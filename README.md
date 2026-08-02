@@ -1,4 +1,4 @@
-﻿# Codex Pets
+﻿# CodeXPets
 
 一个无需安装的 Windows 桌面宠物，用任务栏通知区域图标和云朵气泡显示 Codex CLI 的任务状态。
 
@@ -13,7 +13,7 @@
 
 ## 使用
 
-1. 双击 `Codex Pets.exe`。
+1. 双击 `CodeXPets.exe`。
 2. 程序常驻 Windows 任务栏通知区域。
 3. 右键图标可查看状态、设置开机自动运行、打开 Codex 会话目录或退出。
 4. 不需要安装；退出程序后可直接删除整个文件夹。
@@ -29,13 +29,13 @@
 
 构建输出：
 
-- `Codex Pets.exe`：主程序。
-- `CodexPets.SelfTest.exe`：自测程序。
+- `CodeXPets.exe`：主程序。
+- `CodeXPets.SelfTest.exe`：自测程序。
 
 执行自测：
 
 ```powershell
-.\CodexPets.SelfTest.exe
+.\CodeXPets.SelfTest.exe
 ```
 
 ## 监测位置

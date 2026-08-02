@@ -4,7 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Text;
 
-namespace CodexPets
+namespace CodeXPets
 {
     internal static class MonitorSelfTest
     {
@@ -12,7 +12,7 @@ namespace CodexPets
         {
             int failures = 0;
             string root = Path.Combine(Path.GetTempPath(),
-                "CodexPetsSelfTest_" + Guid.NewGuid().ToString("N"));
+                "CodeXPetsSelfTest_" + Guid.NewGuid().ToString("N"));
             string day = Path.Combine(root, DateTime.Today.ToString("yyyy"),
                 DateTime.Today.ToString("MM"), DateTime.Today.ToString("dd"));
             Directory.CreateDirectory(day);

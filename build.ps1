@@ -7,19 +7,19 @@ $candidates = @(
 $csc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $csc) { throw '找不到 Windows .NET Framework C# 编译器。' }
 
-$source = Join-Path $root 'CodexPets.cs'
+$source = Join-Path $root 'CodeXPets.cs'
 $assemblyInfo = Join-Path $root 'AssemblyInfo.cs'
-$selfTest = Join-Path $root 'CodexPets.SelfTest.cs'
+$selfTest = Join-Path $root 'CodeXPets.SelfTest.cs'
 $manifest = Join-Path $root 'app.manifest'
-$icon = Join-Path $root 'CodexPets.ico'
+$icon = Join-Path $root 'CodeXPets.ico'
 $logo = Join-Path $root 'codex-official-icon-source.png'
 $petSprite = Join-Path $root 'boba-spritesheet.png'
 $cloudBubble = Join-Path $root 'cloud-bubble.png'
 $voiceStart = Join-Path $root 'voice-start.mp3'
 $voiceComplete = Join-Path $root 'voice-complete.mp3'
 $voiceError = Join-Path $root 'voice-error.mp3'
-$appOutput = Join-Path $root 'Codex Pets.exe'
-$testOutput = Join-Path $root 'CodexPets.SelfTest.exe'
+$appOutput = Join-Path $root 'CodeXPets.exe'
+$testOutput = Join-Path $root 'CodeXPets.SelfTest.exe'
 
 @($source, $assemblyInfo, $selfTest, $manifest, $icon, $logo, $voiceStart, $voiceComplete, $voiceError, $petSprite, $cloudBubble) | ForEach-Object {
     if (-not (Test-Path -LiteralPath $_)) { throw "缺少构建文件：$_" }
@@ -56,7 +56,7 @@ $references = @(
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 & $csc /nologo /target:exe /optimize+ /platform:anycpu `
-    /main:CodexPets.MonitorSelfTest `
+    /main:CodeXPets.MonitorSelfTest `
     "/out:$testOutput" `
     "/resource:$voiceStart,voice-start.mp3" `
     "/resource:$voiceComplete,voice-complete.mp3" `

@@ -1,11 +1,11 @@
 ﻿using System.Reflection;
 using System.Runtime.InteropServices;
 
-[assembly: AssemblyTitle("Codex Pets")]
+[assembly: AssemblyTitle("CodeXPets")]
 [assembly: AssemblyDescription("Codex CLI 桌面宠物与任务状态提醒")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("Portable local tool")]
-[assembly: AssemblyProduct("Codex Pets")]
+[assembly: AssemblyProduct("CodeXPets")]
 [assembly: AssemblyCopyright("2026")]
 [assembly: AssemblyTrademark("")]
 [assembly: ComVisible(false)]

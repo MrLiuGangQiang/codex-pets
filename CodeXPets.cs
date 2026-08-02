@@ -19,11 +19,11 @@ using Dispatcher = System.Windows.Threading.Dispatcher;
 using DispatcherPriority = System.Windows.Threading.DispatcherPriority;
 using Microsoft.Win32;
 
-namespace CodexPets
+namespace CodeXPets
 {
     internal static class Program
     {
-        private const string MutexName = @"Local\CodexPetsPortable_4B6B725D_C578_47C7_A88D_AA6E548D1ED8";
+        private const string MutexName = @"Local\CodeXPetsPortable_4B6B725D_C578_47C7_A88D_AA6E548D1ED8";
 
         [STAThread]
         private static void Main(string[] args)
@@ -40,7 +40,7 @@ namespace CodexPets
             {
                 if (!createdNew)
                 {
-                    MessageBox.Show("Codex Pets 已经在任务栏里啦。", "Codex Pets",
+                    MessageBox.Show("CodeXPets 已经在任务栏里啦。", "CodeXPets",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
@@ -55,7 +55,7 @@ namespace CodexPets
                 {
                     try { File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "startup-error.txt"), ex.ToString(), Encoding.UTF8); }
                     catch { }
-                    MessageBox.Show(ex.ToString(), "Codex Pets 启动失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(ex.ToString(), "CodeXPets 启动失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
@@ -128,7 +128,7 @@ namespace CodexPets
                 catch (Exception ex)
                 {
                     startupItem.Checked = StartupManager.IsEnabled();
-                    MessageBox.Show("设置开机启动失败：\r\n" + ex.Message, "Codex Pets",
+                    MessageBox.Show("设置开机启动失败：\r\n" + ex.Message, "CodeXPets",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             };
@@ -139,7 +139,7 @@ namespace CodexPets
                 string folder = CodexSessionMonitor.GetDefaultSessionsRoot();
                 if (Directory.Exists(folder)) Process.Start("explorer.exe", "\"" + folder + "\"");
                 else MessageBox.Show("还没有找到 codex 会话目录：\r\n" + folder,
-                    "Codex Pets", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    "CodeXPets", MessageBoxButtons.OK, MessageBoxIcon.Information);
             };
             ToolStripMenuItem exitItem = new ToolStripMenuItem("退出");
             exitItem.Click += delegate { ExitThread(); };
@@ -155,7 +155,7 @@ namespace CodexPets
 
             trayIcon = new NotifyIcon();
             trayIcon.Icon = idleIcon;
-            trayIcon.Text = "Codex Pets：正在检查";
+            trayIcon.Text = "CodeXPets：正在检查";
             trayIcon.ContextMenuStrip = menu;
             trayIcon.Visible = true;
 
@@ -290,7 +290,7 @@ namespace CodexPets
             if (forceText || stateText != lastStatusText)
             {
                 statusItem.Text = "状态：" + stateText;
-                SetTooltip("Codex Pets：" + stateText);
+                SetTooltip("CodeXPets：" + stateText);
                 lastStatusText = stateText;
             }
         }
@@ -2174,7 +2174,7 @@ internal static bool HasEmbeddedLogo()
     internal static class StartupManager
     {
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        private const string ValueName = "CodexPetsPortable";
+        private const string ValueName = "CodeXPetsPortable";
         private static readonly string[] LegacyValueNames =
             { "CodexTaskReminderPortable", "CodexDogPortable" };
 
