@@ -552,6 +552,7 @@ namespace CodeXPets
             {
                 RecordLatestTaskChange(ReminderState.Busy);
                 latestChangedSourcePath = monitor.LastEventFile;
+                showNewestTaskOnNextRefresh = true;
             }
             RefreshVisual(true);
         }
@@ -641,8 +642,8 @@ namespace CodeXPets
                 }
                 else displayedTitles = monitor.ActiveTitles;
                 bool selectNewestTask = showNewestTaskOnNextRefresh && visualState == ReminderState.Busy;
-                int preferredTaskIndex = visualState == ReminderState.Busy
-                    ? monitor.GetActiveTitleIndex(latestChangedSourcePath) : -1;
+                int preferredTaskIndex = SelectPreferredTaskIndex(selectNewestTask,
+                    monitor.GetActiveTitleIndex(latestChangedSourcePath));
                 assistant.UpdateStatus(stateText, thoughtText, visualState, displayedTitles,
                     displayedProgress, selectNewestTask, preferredTaskIndex);
                 if (selectNewestTask) showNewestTaskOnNextRefresh = false;
@@ -657,6 +658,13 @@ namespace CodeXPets
         internal static string FormatAbnormalTaskText(string title)
         {
             return "任务失败：" + (String.IsNullOrWhiteSpace(title) ? "未知任务" : title.Trim());
+        }
+
+        internal static int SelectPreferredTaskIndex(bool focusLatestTask, int latestTaskIndex)
+        {
+            // Focusing the latest task is a one-shot reaction to a new task event.
+            // Periodic refreshes must not overwrite a user's manual cloud selection.
+            return focusLatestTask ? latestTaskIndex : -1;
         }
 
         internal static ReminderState SelectVisualState(int activeCount,
@@ -2575,11 +2583,22 @@ namespace CodeXPets
             ResetScroll();
         }
 
-        private bool IsContentPoint(Point clientPoint)
+        private bool IsTaskSwitchPoint(Point clientPoint)
         {
-            if (taskTitles.Count <= 1 || currentState == ReminderState.Idle) return false;
-            RectangleF viewport = GetContentViewportBounds();
-            return viewport.Contains(clientPoint.X, clientPoint.Y);
+            return IsTaskSwitchPoint(IsDocked, ShouldShowThoughtBubble(), currentState,
+                taskTitles.Count, GetBubbleBounds(), GetContentViewportBounds(), clientPoint);
+        }
+
+        internal static bool IsTaskSwitchPoint(bool isDocked, bool bubbleVisible,
+            ReminderState state, int taskCount, Rectangle bubbleBounds,
+            RectangleF contentBounds, Point clientPoint)
+        {
+            if (!bubbleVisible || taskCount <= 1 || state == ReminderState.Idle) return false;
+            // A docked notification is brief and compact, so the complete cloud is the
+            // task selector. Floating mode keeps the existing text-only selector so the
+            // rest of the cloud can still be used as a drag surface.
+            if (isDocked) return bubbleBounds.Contains(clientPoint);
+            return contentBounds.Contains(clientPoint.X, clientPoint.Y);
         }
 
         private bool IsInteractivePoint(Point clientPoint)
@@ -2593,11 +2612,26 @@ namespace CodeXPets
             return largeDot.Contains(clientPoint) || smallDot.Contains(clientPoint);
         }
 
-        private void SwitchFromContentClick()
+        internal bool SwitchFromContentClick()
         {
-            if (taskTitles.Count <= 1) return;
+            if (taskTitles.Count <= 1) return false;
             MoveToNextTask();
+            if (IsDocked)
+            {
+                DateTime now = DateTime.UtcNow;
+                dockVisibility = 1F;
+                dockLastContentChangeUtc = now;
+                dockThoughtUntilUtc = now.AddSeconds(GetCloudNotificationSeconds(
+                    currentState, appSettings.DockNotificationSeconds));
+                dockHoverRevealUntilUtc = now.AddSeconds(appSettings.DockRevealSeconds);
+            }
             RenderLayered();
+            return true;
+        }
+
+        internal int SelectedTaskIndex
+        {
+            get { return taskIndex; }
         }
 
         internal bool IsDragActive
@@ -2608,9 +2642,10 @@ namespace CodeXPets
         private void StartDrag(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
-            if (IsContentPoint(e.Location))
+            if (IsTaskSwitchPoint(e.Location))
             {
-                // The task text is a selector rather than a drag surface.
+                // In docked mode the whole visible cloud is a selector; while floating,
+                // only the task text is reserved so the remaining cloud stays draggable.
                 SwitchFromContentClick();
                 return;
             }

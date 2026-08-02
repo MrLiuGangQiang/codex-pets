@@ -248,7 +248,7 @@ namespace CodeXPets
                     ref failures);
 
             Check("all event voices embedded", CompletionVoice.HasEmbeddedVoice(), ref failures);
-            Check("release version metadata available", String.Equals(AppInfo.Version, "2.2.1", StringComparison.Ordinal), ref failures);
+            Check("release version metadata available", String.Equals(AppInfo.Version, "3.0.0", StringComparison.Ordinal), ref failures);
 
             PetPositionState savedDockPosition = new PetPositionState(DockEdge.Left,
                 @"\\.\DISPLAY2", 0.5D, 0.375D);
@@ -397,6 +397,10 @@ namespace CodeXPets
                 ReminderApplicationContext.SelectVisualState(1, false, false, ReminderState.Idle) == ReminderState.Busy &&
                 ReminderApplicationContext.SelectVisualState(0, false, false, ReminderState.Idle) == ReminderState.Idle,
                 ref failures);
+            Check("latest task focus is only applied once",
+                ReminderApplicationContext.SelectPreferredTaskIndex(true, 2) == 2 &&
+                ReminderApplicationContext.SelectPreferredTaskIndex(false, 2) == -1,
+                ref failures);
             Check("abnormal task text includes the failed task title",
                 String.Equals(ReminderApplicationContext.FormatAbnormalTaskText("构建安装包"),
                     "任务失败：构建安装包", StringComparison.Ordinal) &&
@@ -436,6 +440,16 @@ namespace CodeXPets
                 plainContentBounds.Left >= cloudSafetyTest.Left + cloudSafetyTest.Width * 0.22F &&
                 plainContentBounds.Right <= cloudSafetyTest.Left + cloudSafetyTest.Width * 0.80F + 0.01F,
                 ref failures);
+            Point cloudEdgePoint = new Point(cloudSafetyTest.Left + 5, cloudSafetyTest.Top + 5);
+            Check("docked cloud accepts task switching across its full visible area",
+                DesktopAssistantForm.IsTaskSwitchPoint(true, true, ReminderState.Busy, 2,
+                    cloudSafetyTest, bulbContentBounds, cloudEdgePoint) &&
+                !DesktopAssistantForm.IsTaskSwitchPoint(false, true, ReminderState.Busy, 2,
+                    cloudSafetyTest, bulbContentBounds, cloudEdgePoint) &&
+                !DesktopAssistantForm.IsTaskSwitchPoint(true, false, ReminderState.Busy, 2,
+                    cloudSafetyTest, bulbContentBounds, cloudEdgePoint) &&
+                !DesktopAssistantForm.IsTaskSwitchPoint(true, true, ReminderState.Busy, 1,
+                    cloudSafetyTest, bulbContentBounds, cloudEdgePoint), ref failures);
             RectangleF centeredHeaderBounds = DesktopAssistantForm.CalculateCloudHeaderBounds(cloudSafetyTest);
             Check("status header uses one centered safe region",
                 Math.Abs((centeredHeaderBounds.Left + centeredHeaderBounds.Width * 0.5F) -
@@ -540,19 +554,34 @@ namespace CodeXPets
                 ref failures);
 
             bool assistantLoads = true;
+            bool manualCloudSelectionPersists = true;
             try
             {
                 using (System.Windows.Forms.ContextMenuStrip testMenu =
                     new System.Windows.Forms.ContextMenuStrip())
                 using (DesktopAssistantForm testForm = new DesktopAssistantForm(testMenu, false))
+                {
                     assistantLoads = !testForm.IsDocked;
+                    string[] selectionTitles = { "会话 A", "会话 B" };
+                    string[] selectionProgress = { null, null };
+                    testForm.UpdateStatus("进行中（2 个会话）", "会话 A", ReminderState.Busy,
+                        selectionTitles, selectionProgress, true, 0);
+                    bool switched = testForm.SwitchFromContentClick();
+                    testForm.UpdateStatus("进行中（2 个会话）", "会话 A", ReminderState.Busy,
+                        selectionTitles, selectionProgress, false,
+                        ReminderApplicationContext.SelectPreferredTaskIndex(false, 0));
+                    manualCloudSelectionPersists = switched && testForm.SelectedTaskIndex == 1;
+                }
             }
             catch (Exception ex)
             {
                 Console.WriteLine("Assistant integration error: " + ex.Message);
                 assistantLoads = false;
+                manualCloudSelectionPersists = false;
             }
             Check("fixed cat assistant loads", assistantLoads, ref failures);
+            Check("manual cloud task selection survives periodic refresh",
+                manualCloudSelectionPersists, ref failures);
 
             bool utilityDialogsLoad = true;
             try
@@ -563,7 +592,7 @@ namespace CodeXPets
                 using (CodeXPetsDiagnosticsForm diagnosticsForm =
                     new CodeXPetsDiagnosticsForm(monitor, testSettings))
                     utilityDialogsLoad = utilityDialogsLoad &&
-                        diagnosticsForm.Text.IndexOf("2.2.1", StringComparison.Ordinal) >= 0;
+                        diagnosticsForm.Text.IndexOf("3.0.0", StringComparison.Ordinal) >= 0;
             }
             catch (Exception ex)
             {

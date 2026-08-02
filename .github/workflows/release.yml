@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "VERSION ($version) does not match tag ${{ github.ref_name }}"
+          }
+      - name: Build, test, and package
+        shell: pwsh
+        run: |
+          ./package.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./CodeXPets.SelfTest.exe
+          Copy-Item CodeXPets.exe dist/CodeXPets.exe -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            dist/CodeXPets.exe
+            dist/CodeXPets-v*-win-portable.zip
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release version
+        run: |
+          test "v$(tr -d '[:space:]' < VERSION)" = "${GITHUB_REF_NAME}"
+      - name: Test, build, sign, and package
+        run: bash Mac/build-mac.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: dist/CodeXPets-v*-macos-universal.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+      - name: Generate SHA-256 checksums
+        run: |
+          cd release
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\0'             | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release/*             --repo "${GITHUB_REPOSITORY}"             --title "CodeXPets ${GITHUB_REF_NAME}"             --generate-notes             --verify-tag
