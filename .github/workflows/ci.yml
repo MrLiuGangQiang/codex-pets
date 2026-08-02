@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows build and self-test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        shell: pwsh
+        run: |
+          ./build.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./CodeXPets.SelfTest.exe
+      - name: Package Windows portable build
+        shell: pwsh
+        run: ./package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: |
+            CodeXPets.exe
+            dist/CodeXPets-v*-win-portable.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  macos:
+    name: macOS Universal build and tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test, build, sign, and package
+        run: bash Mac/build-mac.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: |
+            dist/CodeXPets-v*-macos-universal.zip
+            dist/SHA256SUMS-macos.txt
+          if-no-files-found: error

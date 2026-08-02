@@ -19,3 +19,9 @@ obj/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Swift/macOS build outputs
+Mac/.build/
+Mac/.swiftpm/
+*.app/
+*.iconset/
