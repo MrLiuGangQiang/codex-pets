@@ -19,6 +19,14 @@
 4. 不需要安装；退出程序后可直接删除整个文件夹。
 
 
+## 下载
+
+请从 GitHub Releases 下载最新的正式版：
+
+- `CodeXPets-v2.0.1-win-portable.zip`：推荐，解压后直接运行。
+- `CodeXPets.exe`：单独的主程序文件。
+
+当前正式版本：**2.0.1**。
 ## 构建
 
 在 Windows PowerShell 中运行：
