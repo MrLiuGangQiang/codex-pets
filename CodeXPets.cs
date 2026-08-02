@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Media;
 using System.Runtime.InteropServices;
@@ -13,6 +14,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
+using System.Web.Script.Serialization;
 using MediaPlayer = System.Windows.Media.MediaPlayer;
 using MediaExceptionEventArgs = System.Windows.Media.ExceptionEventArgs;
 using Dispatcher = System.Windows.Threading.Dispatcher;
@@ -74,7 +76,97 @@ namespace CodeXPets
         }
     }
 
-    internal sealed class ReminderApplicationContext : ApplicationContext, IDisposable
+    internal sealed class PetPositionState
+    {
+        public readonly DockEdge DockEdge;
+        public readonly string ScreenDeviceName;
+        public readonly double RelativeX;
+        public readonly double RelativeY;
+
+        public PetPositionState(DockEdge dockEdge, string screenDeviceName,
+            double relativeX, double relativeY)
+        {
+            DockEdge = dockEdge;
+            ScreenDeviceName = screenDeviceName ?? String.Empty;
+            RelativeX = PetPositionSettings.Clamp01(relativeX);
+            RelativeY = PetPositionSettings.Clamp01(relativeY);
+        }
+    }
+
+    internal static class PetPositionSettings
+    {
+        private const string SettingsKeyPath = @"Software\CodeXPets";
+        private const string PositionValueName = "PetPositionV1";
+
+        public static PetPositionState Load()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(SettingsKeyPath, false))
+                {
+                    string value = key == null ? null : key.GetValue(PositionValueName) as string;
+                    return Deserialize(value);
+                }
+            }
+            catch { return null; }
+        }
+
+        public static void Save(PetPositionState state)
+        {
+            if (state == null) return;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(SettingsKeyPath))
+                    if (key != null) key.SetValue(PositionValueName, Serialize(state),
+                        RegistryValueKind.String);
+            }
+            catch { }
+        }
+
+        internal static string Serialize(PetPositionState state)
+        {
+            if (state == null) return String.Empty;
+            string mode = state.DockEdge == DockEdge.Left ? "L" :
+                state.DockEdge == DockEdge.Right ? "R" : "F";
+            string device = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+                state.ScreenDeviceName ?? String.Empty));
+            return String.Join(";", new[]
+            {
+                "1", mode, device,
+                Clamp01(state.RelativeX).ToString("R", CultureInfo.InvariantCulture),
+                Clamp01(state.RelativeY).ToString("R", CultureInfo.InvariantCulture)
+            });
+        }
+
+        internal static PetPositionState Deserialize(string value)
+        {
+            if (String.IsNullOrWhiteSpace(value)) return null;
+            try
+            {
+                string[] parts = value.Split(';');
+                if (parts.Length != 5 || parts[0] != "1") return null;
+                DockEdge edge = parts[1] == "L" ? DockEdge.Left :
+                    parts[1] == "R" ? DockEdge.Right : DockEdge.None;
+                string device = Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]));
+                double relativeX;
+                double relativeY;
+                if (!Double.TryParse(parts[3], NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out relativeX) ||
+                    !Double.TryParse(parts[4], NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out relativeY)) return null;
+                return new PetPositionState(edge, device, relativeX, relativeY);
+            }
+            catch (FormatException) { return null; }
+        }
+
+        internal static double Clamp01(double value)
+        {
+            if (Double.IsNaN(value) || Double.IsInfinity(value)) return 0.5D;
+            return Math.Max(0D, Math.Min(1D, value));
+        }
+    }
+
+    internal sealed class ReminderApplicationContext : ApplicationContext
     {
         private readonly NotifyIcon trayIcon;
         private readonly System.Windows.Forms.Timer timer;
@@ -91,15 +183,15 @@ namespace CodeXPets
         private readonly ToolStripMenuItem assistantItem;
         private bool soundEnabled = true;
         private int animationFrame;
+        private int petAnimationTick;
+        private ReminderState lastVisualState = (ReminderState)(-1);
         private readonly Stopwatch animationClock = Stopwatch.StartNew();
         private long lastAnimationTimestamp;
         private double spriteAnimationSeconds;
         private string lastStatusText = "";
         private DateTime completedUntilUtc = DateTime.MinValue;
         private DateTime abnormalUntilUtc = DateTime.MinValue;
-        private DateTime assistantHideAfterUtc = DateTime.MaxValue;
         private bool showNewestTaskOnNextRefresh;
-        private bool assistantAutoHidden;
         private bool disposed;
 
         public ReminderApplicationContext()
@@ -155,7 +247,7 @@ namespace CodeXPets
 
             trayIcon = new NotifyIcon();
             trayIcon.Icon = idleIcon;
-            trayIcon.Text = "CodeXPets：正在检查";
+            trayIcon.Text = "正在检查";
             trayIcon.ContextMenuStrip = menu;
             trayIcon.Visible = true;
 
@@ -165,12 +257,11 @@ namespace CodeXPets
             assistantItem.CheckOnClick = true;
             assistantItem.Click += delegate
             {
-                assistantAutoHidden = false;
-                assistantHideAfterUtc = DateTime.MaxValue;
                 if (assistantItem.Checked) assistant.ShowInactive();
                 else assistant.Hide();
             };
             menu.Items.Insert(2, assistantItem);
+
             assistant.ShowInactive();
 
             monitor = new CodexSessionMonitor();
@@ -194,31 +285,38 @@ namespace CodeXPets
 
         private void OnTaskStarted(object sender, EventArgs e)
         {
-            assistantAutoHidden = false;
-            assistantHideAfterUtc = DateTime.MaxValue;
             completedUntilUtc = DateTime.MinValue;
             abnormalUntilUtc = DateTime.MinValue;
-            if (assistantItem.Checked) assistant.ShowInactive();
+            RevealAssistant();
             if (soundEnabled) CompletionVoice.QueueStart();
             showNewestTaskOnNextRefresh = true;
-            RefreshVisual(true);
         }
+
         private void OnTaskCompleted(object sender, EventArgs e)
         {
             DateTime hideAt = DateTime.UtcNow.AddSeconds(5);
             completedUntilUtc = hideAt;
-            assistantHideAfterUtc = hideAt;
-            assistantAutoHidden = false;
-            if (assistantItem.Checked) assistant.ShowInactive();
+            RevealAssistant();
             if (soundEnabled) CompletionVoice.QueueComplete();
         }
+
         private void OnTaskAborted(object sender, EventArgs e)
         {
-            abnormalUntilUtc = DateTime.UtcNow.AddSeconds(10);
+            DateTime hideAt = DateTime.UtcNow.AddSeconds(10);
+            abnormalUntilUtc = hideAt;
+            RevealAssistant();
             if (soundEnabled) CompletionVoice.QueueError();
+        }
+
+        private void RevealAssistant()
+        {
+            if (assistantItem.Checked) assistant.ShowInactive();
+        }
+
+        private void OnStateChanged(object sender, EventArgs e)
+        {
             RefreshVisual(true);
         }
-        private void OnStateChanged(object sender, EventArgs e) { RefreshVisual(true); }
         private void OnPollTick(object sender, EventArgs e)
         {
             try { monitor.Poll(); } catch { }
@@ -236,19 +334,25 @@ namespace CodeXPets
             {
                 spriteAnimationSeconds -= 0.12;
                 animationFrame = (animationFrame + 1) % busyIcons.Length;
+                petAnimationTick = (petAnimationTick + 1) % 6400;
             }
-            assistant.Animate(animationFrame, elapsedSeconds);
+            assistant.Animate(petAnimationTick, elapsedSeconds);
             RefreshVisual(false);
         }
         private void RefreshVisual(bool forceText)
         {
-            int active = monitor == null ? 0 : monitor.ActiveCount;
+            int active = monitor.ActiveCount;
             DateTime now = DateTime.UtcNow;
             bool abnormalRecently = now < abnormalUntilUtc;
             bool completedRecently = now < completedUntilUtc;
             ReminderState visualState = abnormalRecently ? ReminderState.Error
                 : completedRecently ? ReminderState.Completed
                 : active > 0 ? ReminderState.Busy : ReminderState.Idle;
+            if (visualState != lastVisualState)
+            {
+                petAnimationTick = 0;
+                lastVisualState = visualState;
+            }
             Icon currentIcon = visualState == ReminderState.Error ? errorIcon
                 : visualState == ReminderState.Completed ? completedIcon
                 : visualState == ReminderState.Busy ? busyIcons[animationFrame] : idleIcon;
@@ -258,39 +362,39 @@ namespace CodeXPets
             if (abnormalRecently) stateText = "异常";
             else if (active > 0)
             {
-                stateText = "进行中（" + active + " 个任务）";
+                int completedSteps = monitor.CompletedPlanStepCount;
+                int totalSteps = monitor.TotalPlanStepCount;
+                stateText = active == 1 ? "进行中" : "进行中（" + active + " 个任务）";
+                if (active == 1 && totalSteps > 0)
+                    stateText += " · Tasks " + completedSteps + "/" + totalSteps;
             }
             else stateText = "空闲";
             string thoughtText = abnormalRecently ? "任务被中断了" :
                 completedRecently ? "任务完成啦！" :
                 active > 0 ? (String.IsNullOrEmpty(monitor.PrimaryActiveTitle) ? "正在认真处理你的任务…" : monitor.PrimaryActiveTitle) :
                 "等你交给我下一个任务";
-            if (active == 0 && assistantHideAfterUtc != DateTime.MaxValue && now >= assistantHideAfterUtc)
-            {
-                assistantAutoHidden = true;
-                assistant.Hide();
-            }
-            else if (assistantItem.Checked && !assistantAutoHidden)
+            if (assistantItem.Checked)
             {
                 if (!assistant.Visible) assistant.ShowInactive();
-                IList<string> displayedTitles = null;
-                if (monitor != null)
+                IList<string> displayedTitles;
+                IList<string> displayedProgress = null;
+                if (abnormalRecently && !String.IsNullOrEmpty(monitor.LastAbortedTitle))
+                    displayedTitles = new[] { monitor.LastAbortedTitle };
+                else if (completedRecently && !String.IsNullOrEmpty(monitor.LastCompletedTitle))
+                    displayedTitles = new[] { monitor.LastCompletedTitle };
+                else
                 {
-                    if (abnormalRecently && !String.IsNullOrEmpty(monitor.LastAbortedTitle))
-                        displayedTitles = new[] { monitor.LastAbortedTitle };
-                    else if (completedRecently && !String.IsNullOrEmpty(monitor.LastCompletedTitle))
-                        displayedTitles = new[] { monitor.LastCompletedTitle };
-                    else
-                        displayedTitles = monitor.ActiveTitles;
+                    displayedTitles = monitor.ActiveTitles;
+                    displayedProgress = monitor.ActivePlanProgressLabels;
                 }
                 bool selectNewestTask = showNewestTaskOnNextRefresh && visualState == ReminderState.Busy;
-                assistant.UpdateStatus(stateText, thoughtText, visualState, displayedTitles, selectNewestTask);
+                assistant.UpdateStatus(stateText, thoughtText, visualState, displayedTitles, displayedProgress, selectNewestTask);
                 if (selectNewestTask) showNewestTaskOnNextRefresh = false;
             }
             if (forceText || stateText != lastStatusText)
             {
                 statusItem.Text = "状态：" + stateText;
-                SetTooltip("CodeXPets：" + stateText);
+                SetTooltip(stateText);
                 lastStatusText = stateText;
             }
         }
@@ -306,41 +410,47 @@ namespace CodeXPets
             trayIcon.Visible = false;
             base.ExitThreadCore();
         }
-        public new void Dispose()
+        protected override void Dispose(bool disposing)
         {
-            if (disposed) return;
-            disposed = true;
-            if (timer != null) timer.Dispose();
-            if (animationTimer != null) animationTimer.Dispose();
-            if (monitor != null) monitor.Dispose();
-            if (assistant != null)
+            if (disposing && !disposed)
             {
-                assistant.Close();
-                assistant.Dispose();
+                disposed = true;
+                if (timer != null) timer.Dispose();
+                if (animationTimer != null) animationTimer.Dispose();
+                if (monitor != null) monitor.Dispose();
+                if (assistant != null) assistant.Dispose();
+                if (trayIcon != null)
+                {
+                    trayIcon.Visible = false;
+                    if (trayIcon.ContextMenuStrip != null) trayIcon.ContextMenuStrip.Dispose();
+                    trayIcon.Dispose();
+                }
+                if (idleIcon != null) idleIcon.Dispose();
+                if (completedIcon != null) completedIcon.Dispose();
+                if (errorIcon != null) errorIcon.Dispose();
+                if (busyIcons != null)
+                    foreach (Icon icon in busyIcons)
+                        if (icon != null) icon.Dispose();
             }
-            if (trayIcon != null)
-            {
-                trayIcon.Visible = false;
-                if (trayIcon.ContextMenuStrip != null) trayIcon.ContextMenuStrip.Dispose();
-                trayIcon.Dispose();
-            }
-            if (idleIcon != null) idleIcon.Dispose();
-            if (completedIcon != null) completedIcon.Dispose();
-            if (errorIcon != null) errorIcon.Dispose();
-            if (busyIcons != null) foreach (Icon icon in busyIcons) if (icon != null) icon.Dispose();
-            base.Dispose();
+            base.Dispose(disposing);
         }
     }
 
     internal sealed class DesktopAssistantForm : Form
     {
-        private const string SpriteResource = "boba-spritesheet.png";
+        private const string SpriteResource = "white-cat-spritesheet.png";
+        private const string DockSpriteResource = "cat-dock-spritesheet.png";
         private const string CloudResource = "cloud-bubble.png";
+        private const int DockSpriteCellSize = 256;
+        private const int DockExpressionCount = 4;
         private const int SpriteColumns = 8;
-        private const int SpriteRows = 11;
+        private const int SpriteRows = 4;
         private const int SpriteCellWidth = 192;
         private const int SpriteCellHeight = 208;
-        private const int IdleFrameCount = 7;
+        private const int IdleSpriteRow = 0;
+        private const int CompletedSpriteRow = 1;
+        private const int BusySpriteRow = 2;
+        private const int ErrorSpriteRow = 3;
         private const float ScrollStartHoldSeconds = 1.9F;
         private const float ScrollEndHoldSeconds = 1.7F;
         private const float ShortTaskDisplaySeconds = 6F;
@@ -350,9 +460,24 @@ namespace CodeXPets
         private const int WmNcHitTest = 0x0084;
         private const int HtClient = 1;
         private const int HtTransparent = -1;
+        private const float SpriteScale = 1.35F;
+        private const float DockNotificationSeconds = 5F;
+        private const float DockIdleHideSeconds = 10F;
+        private const float DockHoverRevealSeconds = 3F;
+        private const float DockSlideInDurationSeconds = 0.30F;
+        private const float DockSlideOutDurationSeconds = 0.55F;
+        private static readonly Color HeaderTextColor = Color.FromArgb(34, 49, 67);
+        private static readonly Color ContentTextColor = Color.FromArgb(45, 60, 78);
+        private static readonly Color DotOutlineColor = Color.FromArgb(42, 50, 60);
+        private static readonly Color DotFillColor = Color.FromArgb(241, 248, 255);
+        private static readonly Color BulbGlowColor = Color.FromArgb(83, 169, 236);
+        private static readonly Color BulbHighlightColor = Color.FromArgb(202, 232, 255);
         private readonly Bitmap spriteSheet;
+        private readonly Bitmap dockSpriteSheet;
         private readonly Bitmap cloudBubble;
         private readonly SpriteFrameMetrics[,] spriteMetrics;
+        private readonly Rectangle[] dockSpriteOpaqueBounds;
+        private readonly bool positionPersistenceEnabled;
         private float uiScale = 1F;
         private int bubbleWidth = 320;
         private int bubbleHeight = 112;
@@ -364,6 +489,7 @@ namespace CodeXPets
         private string thoughtText = "等你交给我下一个任务";
         private ReminderState currentState = ReminderState.Idle;
         private readonly List<string> taskTitles = new List<string>();
+        private readonly List<string> taskProgressLabels = new List<string>();
         private int taskIndex;
         private float scrollOffset;
         private float scrollHoldSeconds;
@@ -391,7 +517,16 @@ namespace CodeXPets
         private bool preferredAnchorInitialized;
         private bool dragPending;
         private bool dragging;
+        private bool dragStartedDocked;
         private int animationFrame;
+        private DockEdge dockEdge;
+        private int dockCoordinate;
+        private string dockScreenDeviceName;
+        private bool dockBubbleBelow;
+        private float dockVisibility = 1F;
+        private DateTime dockLastContentChangeUtc = DateTime.UtcNow;
+        private DateTime dockThoughtUntilUtc = DateTime.MinValue;
+        private DateTime dockHoverRevealUntilUtc = DateTime.MinValue;
 
         private struct SpriteFrameMetrics
         {
@@ -415,8 +550,9 @@ namespace CodeXPets
             }
         }
 
-        public DesktopAssistantForm(ContextMenuStrip menu)
+        public DesktopAssistantForm(ContextMenuStrip menu, bool persistPosition = true)
         {
+            positionPersistenceEnabled = persistPosition;
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
             ShowInTaskbar = false;
@@ -432,14 +568,16 @@ namespace CodeXPets
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
             spriteSheet = LoadBitmapResource(SpriteResource);
+            dockSpriteSheet = LoadBitmapResource(DockSpriteResource);
             cloudBubble = LoadBitmapResource(CloudResource);
             spriteMetrics = AnalyzeSpriteFrames(spriteSheet);
+            dockSpriteOpaqueBounds = AnalyzeDockSpriteBounds(dockSpriteSheet);
 
             Rectangle workArea = Screen.PrimaryScreen.WorkingArea;
             Location = new Point(workArea.Right - Width - 24, workArea.Bottom - Height - 24);
             RememberCurrentAnchor();
             RecalculateAdaptiveLayout();
-            RememberCurrentAnchor();
+            if (!positionPersistenceEnabled || !RestoreSavedPosition()) RememberCurrentAnchor();
 
             MouseDown += StartDrag;
             MouseMove += Drag;
@@ -458,27 +596,42 @@ namespace CodeXPets
                     0x0001 | 0x0002 | 0x0010 | 0x0040);
         }
 
-        public void UpdateStatus(string status, string thought, ReminderState state, IList<string> titles, bool selectNewestTask)
+        public void UpdateStatus(string status, string thought, ReminderState state, IList<string> titles,
+            IList<string> progressLabels, bool selectNewestTask)
         {
             if (IsDisposed) return;
             string nextStatus = status ?? "空闲";
             string nextThought = thought ?? String.Empty;
             List<string> nextTitles = titles == null ? new List<string>() : new List<string>(titles);
+            List<string> nextProgress = progressLabels == null ? new List<string>() : new List<string>(progressLabels);
+            while (nextProgress.Count < nextTitles.Count) nextProgress.Add(null);
+            if (nextProgress.Count > nextTitles.Count)
+                nextProgress.RemoveRange(nextTitles.Count, nextProgress.Count - nextTitles.Count);
             int previousTaskIndex = taskIndex;
-            string selectedTitle = taskTitles.Count == 0 ? null : GetDisplayedText();
+            string selectedTitle = GetSelectedTaskTitle();
             bool changed = !String.Equals(statusText, nextStatus, StringComparison.Ordinal) ||
                 !String.Equals(thoughtText, nextThought, StringComparison.Ordinal) ||
-                currentState != state || taskTitles.Count != nextTitles.Count;
+                currentState != state || taskTitles.Count != nextTitles.Count ||
+                taskProgressLabels.Count != nextProgress.Count;
             if (!changed)
             {
                 for (int i = 0; i < taskTitles.Count; i++)
-                    if (!String.Equals(taskTitles[i], nextTitles[i], StringComparison.Ordinal)) { changed = true; break; }
+                    if (!String.Equals(taskTitles[i], nextTitles[i], StringComparison.Ordinal) ||
+                        !String.Equals(taskProgressLabels[i], nextProgress[i], StringComparison.Ordinal)) { changed = true; break; }
+            }
+            if (changed && IsDocked && state != ReminderState.Idle)
+            {
+                DateTime changedAt = DateTime.UtcNow;
+                dockLastContentChangeUtc = changedAt;
+                dockThoughtUntilUtc = changedAt.AddSeconds(DockNotificationSeconds);
             }
             statusText = nextStatus;
             thoughtText = nextThought;
             currentState = state;
             taskTitles.Clear();
             taskTitles.AddRange(nextTitles);
+            taskProgressLabels.Clear();
+            taskProgressLabels.AddRange(nextProgress);
             if (currentState != ReminderState.Busy)
                 taskIndex = 0;
             else if (selectNewestTask && taskTitles.Count > 0)
@@ -496,10 +649,35 @@ namespace CodeXPets
 
         public void Animate(int frame, float elapsedSeconds)
         {
+            bool frameChanged = animationFrame != frame;
             animationFrame = frame;
-            if (currentState == ReminderState.Idle) return;
             if (currentState == ReminderState.Busy) AdvanceScroll(elapsedSeconds);
+            bool dockAnimationChanged = AdvanceDockAnimation(elapsedSeconds);
+            if (currentState != ReminderState.Busy && !frameChanged && !dockAnimationChanged) return;
             RenderLayered();
+        }
+
+        private bool AdvanceDockAnimation(float elapsedSeconds)
+        {
+            if (!IsDocked) return false;
+            DateTime now = DateTime.UtcNow;
+            bool hovering = IsDockHovering();
+            if (hovering) dockHoverRevealUntilUtc = now.AddSeconds(DockHoverRevealSeconds);
+            bool shouldBeVisible = ShouldShowDock(dockLastContentChangeUtc, now,
+                IsDragActive, hovering, dockHoverRevealUntilUtc);
+            float target = shouldBeVisible ? 1F : 0F;
+            if (Math.Abs(dockVisibility - target) < 0.001F)
+            {
+                dockVisibility = target;
+                return false;
+            }
+            float duration = target > dockVisibility
+                ? DockSlideInDurationSeconds : DockSlideOutDurationSeconds;
+            float step = elapsedSeconds / duration;
+            dockVisibility = target > dockVisibility
+                ? Math.Min(target, dockVisibility + step)
+                : Math.Max(target, dockVisibility - step);
+            return true;
         }
 
         private bool RecalculateAdaptiveLayout()
@@ -509,9 +687,7 @@ namespace CodeXPets
             Screen screen = Screen.FromPoint(anchor);
             Rectangle workArea = screen.WorkingArea;
 
-            // Keep one stable window size for every state and every task.  The old
-            // content-dependent resize changed the form's bounds on every title
-            // update, which made the pet appear to jump around the desktop.
+            // Keep one stable window size so status and title updates never move the pet.
             int nextPetWidth = Math.Max(72, (int)Math.Round(96F * nextScale));
             int nextPetHeight = Math.Max(78, (int)Math.Round(104F * nextScale));
             int edgeMargin = Math.Max(12, (int)Math.Round(16F * nextScale));
@@ -542,7 +718,7 @@ namespace CodeXPets
                 (int)Math.Round(nextBubbleHeight * 0.44F));
             int nextWidth = Math.Max(nextBubbleWidth,
                 nextPetWidth + (int)Math.Round(24F * nextScale));
-            int nextHeight = nextBubbleHeight + (int)Math.Round(24F * nextScale) +
+            int nextHeight = nextBubbleHeight + (int)Math.Round(8F * nextScale) +
                 nextPetHeight;
 
             bool changed = Width != nextWidth || Height != nextHeight ||
@@ -553,10 +729,8 @@ namespace CodeXPets
                 contentViewportHeight != nextViewportHeight;
             if (!changed) return false;
 
-            // Never let a polling/animation tick resize or relocate the window
-            // while the user is dragging it.  FinishDrag recalculates once the
-            // pointer is released.
-            if (dragging || dragPending) return false;
+            // Defer DPI/layout changes until the current pointer interaction ends.
+            if (IsDragActive) return false;
 
             uiScale = nextScale;
             petWidth = nextPetWidth;
@@ -574,9 +748,10 @@ namespace CodeXPets
             nextTop = Math.Max(workArea.Top,
                 Math.Min(nextTop, workArea.Bottom - nextHeight));
             SetBounds(nextLeft, nextTop, nextWidth, nextHeight, BoundsSpecified.All);
+            if (IsDocked) PositionDockedWindow();
             // Store the actual on-screen pet anchor after clamping.  Subsequent
             // polling ticks therefore have no reason to move the form.
-            RememberCurrentAnchor();
+            if (!IsDocked) RememberCurrentAnchor();
             ResetScroll();
             return true;
         }
@@ -589,8 +764,83 @@ namespace CodeXPets
 
         private void RememberCurrentAnchor()
         {
+            if (IsDocked) return;
             preferredAnchor = new Point(Left + Width / 2, Top + Height);
             preferredAnchorInitialized = true;
+        }
+
+        private static Screen FindScreenByDeviceName(string deviceName)
+        {
+            if (String.IsNullOrEmpty(deviceName)) return null;
+            foreach (Screen screen in Screen.AllScreens)
+                if (String.Equals(screen.DeviceName, deviceName,
+                    StringComparison.OrdinalIgnoreCase)) return screen;
+            return null;
+        }
+
+        private bool RestoreSavedPosition()
+        {
+            PetPositionState state = PetPositionSettings.Load();
+            if (state == null) return false;
+            Screen screen = FindScreenByDeviceName(state.ScreenDeviceName) ?? Screen.PrimaryScreen;
+            if (screen == null) return false;
+            Rectangle workArea = screen.WorkingArea;
+            if (state.DockEdge == DockEdge.Left || state.DockEdge == DockEdge.Right)
+            {
+                dockEdge = state.DockEdge;
+                dockScreenDeviceName = screen.DeviceName;
+                dockCoordinate = workArea.Top + (int)Math.Round(state.RelativeY * workArea.Height);
+                dockVisibility = 1F;
+                dockLastContentChangeUtc = DateTime.UtcNow;
+                dockThoughtUntilUtc = DateTime.MinValue;
+                dockHoverRevealUntilUtc = DateTime.MinValue;
+                PositionDockedWindow();
+                return true;
+            }
+
+            int anchorX = workArea.Left + (int)Math.Round(state.RelativeX * workArea.Width);
+            int anchorY = workArea.Top + (int)Math.Round(state.RelativeY * workArea.Height);
+            int x = Math.Max(workArea.Left, Math.Min(anchorX - Width / 2,
+                workArea.Right - Width));
+            int y = Math.Max(workArea.Top, Math.Min(anchorY - Height,
+                workArea.Bottom - Height));
+            dockEdge = DockEdge.None;
+            dockScreenDeviceName = null;
+            SetBounds(x, y, Width, Height, BoundsSpecified.Location);
+            RememberCurrentAnchor();
+            return true;
+        }
+
+        private void SaveCurrentPosition()
+        {
+            if (!positionPersistenceEnabled) return;
+            try
+            {
+                Screen screen = IsDocked
+                    ? (FindScreenByDeviceName(dockScreenDeviceName) ?? Screen.FromRectangle(Bounds))
+                    : Screen.FromRectangle(Bounds);
+                if (screen == null) return;
+                Rectangle workArea = screen.WorkingArea;
+                if (workArea.Width <= 0 || workArea.Height <= 0) return;
+                if (IsDocked)
+                {
+                    double relativeY = (dockCoordinate - workArea.Top) /
+                        (double)workArea.Height;
+                    PetPositionSettings.Save(new PetPositionState(dockEdge,
+                        screen.DeviceName, 0.5D, relativeY));
+                }
+                else
+                {
+                    Point anchor = GetPreferredAnchor();
+                    double relativeX = (anchor.X - workArea.Left) /
+                        (double)workArea.Width;
+                    double relativeY = (anchor.Y - workArea.Top) /
+                        (double)workArea.Height;
+                    PetPositionSettings.Save(new PetPositionState(DockEdge.None,
+                        screen.DeviceName, relativeX, relativeY));
+                }
+            }
+            catch { }
         }
 
         private float GetUiScale()
@@ -614,10 +864,128 @@ namespace CodeXPets
 
         private void ClampToWorkingArea()
         {
+            if (IsDocked)
+            {
+                PositionDockedWindow();
+                return;
+            }
             Rectangle workArea = Screen.FromRectangle(Bounds).WorkingArea;
             int x = Math.Max(workArea.Left, Math.Min(Left, workArea.Right - Width));
             int y = Math.Max(workArea.Top, Math.Min(Top, workArea.Bottom - Height));
             if (x != Left || y != Top) Location = new Point(x, y);
+        }
+
+        private void PositionDockedWindow()
+        {
+            if (!IsDocked) return;
+            Screen screen = FindScreenByDeviceName(dockScreenDeviceName) ??
+                Screen.FromRectangle(Bounds);
+            if (screen == null) return;
+            dockScreenDeviceName = screen.DeviceName;
+            Rectangle workArea = screen.WorkingArea;
+            dockBubbleBelow = false;
+            Rectangle visible = GetDockedPoseVisibleBounds();
+            int candidateTop = dockCoordinate - (visible.Top + visible.Height / 2);
+            if (candidateTop < workArea.Top)
+            {
+                dockBubbleBelow = true;
+                visible = GetDockedPoseVisibleBounds();
+            }
+            int x = dockEdge == DockEdge.Left ? workArea.Left : workArea.Right - Width;
+            int y = dockCoordinate - (visible.Top + visible.Height / 2);
+            x = Math.Max(workArea.Left, Math.Min(x, workArea.Right - Width));
+            y = Math.Max(workArea.Top, Math.Min(y, workArea.Bottom - Height));
+            if (x != Left || y != Top) Location = new Point(x, y);
+        }
+
+        private bool TrySnapToEdge(Point cursor)
+        {
+            Rectangle workArea = Screen.FromPoint(cursor).WorkingArea;
+            int snapDistance = Math.Max(24, (int)Math.Round(36F * uiScale));
+            DockEdge edge = SelectSnapEdge(cursor, workArea, snapDistance);
+            if (edge == DockEdge.None) return false;
+            dockEdge = edge;
+            dockScreenDeviceName = Screen.FromPoint(cursor).DeviceName;
+            dockCoordinate = cursor.Y;
+            dockVisibility = 1F;
+            dockLastContentChangeUtc = DateTime.UtcNow;
+            dockThoughtUntilUtc = DateTime.MinValue;
+            dockHoverRevealUntilUtc = DateTime.MinValue;
+            PositionDockedWindow();
+            ResetScroll();
+            RenderLayered();
+            return true;
+        }
+
+        private void UndockForDrag(Point cursor)
+        {
+            if (!IsDocked) return;
+            dockEdge = DockEdge.None;
+            dockScreenDeviceName = null;
+            dockBubbleBelow = false;
+            dockVisibility = 1F;
+            dockThoughtUntilUtc = DateTime.MinValue;
+            dockHoverRevealUntilUtc = DateTime.MinValue;
+            int x = cursor.X - Width / 2;
+            int y = cursor.Y - Height + Math.Max(24, petHeight / 2);
+            Location = new Point(x, y);
+            dragStartCursor = cursor;
+            dragStartLocation = Location;
+            preferredAnchor = new Point(Left + Width / 2, Top + Height);
+            preferredAnchorInitialized = true;
+            RenderLayered();
+        }
+
+        internal bool IsDocked
+        {
+            get { return dockEdge != DockEdge.None; }
+        }
+
+        internal static DockEdge SelectSnapEdge(Point cursor, Rectangle workArea, int snapDistance)
+        {
+            if (Math.Abs(cursor.X - workArea.Left) <= snapDistance) return DockEdge.Left;
+            if (Math.Abs(cursor.X - workArea.Right) <= snapDistance) return DockEdge.Right;
+            return DockEdge.None;
+        }
+
+        internal static bool ShouldKeepDockVisible(DateTime lastContentChangeUtc,
+            DateTime nowUtc)
+        {
+            return (nowUtc - lastContentChangeUtc).TotalSeconds < DockIdleHideSeconds;
+        }
+
+        internal static bool ShouldShowDock(DateTime lastContentChangeUtc,
+            DateTime nowUtc, bool isDragging, bool isHovering, DateTime hoverRevealUntilUtc)
+        {
+            return isDragging || isHovering || nowUtc < hoverRevealUntilUtc ||
+                ShouldKeepDockVisible(lastContentChangeUtc, nowUtc);
+        }
+
+        internal static Rectangle GetDockHoverBounds(DockEdge edge, Rectangle workArea,
+            int dockY, float scale, bool fullyHidden)
+        {
+            int width = Math.Max(40, (int)Math.Round(56F * scale));
+            int x = edge == DockEdge.Left ? workArea.Left : workArea.Right - width;
+            if (fullyHidden) return new Rectangle(x, workArea.Top, width, workArea.Height);
+
+            int halfHeight = Math.Max(64, (int)Math.Round(80F * scale));
+            int top = Math.Max(workArea.Top, dockY - halfHeight);
+            int bottom = Math.Min(workArea.Bottom, dockY + halfHeight);
+            return Rectangle.FromLTRB(x, top, x + width, Math.Max(top + 1, bottom));
+        }
+
+        private bool IsDockHovering()
+        {
+            if (!IsDocked) return false;
+            Point cursor = Cursor.Position;
+            Rectangle workArea = Screen.FromRectangle(Bounds).WorkingArea;
+            Rectangle hoverBounds = GetDockHoverBounds(dockEdge, workArea,
+                dockCoordinate, uiScale, dockVisibility <= 0.01F);
+            if (hoverBounds.Contains(cursor)) return true;
+
+            Rectangle petBounds = GetPetVisibleBounds();
+            petBounds.Offset(Location);
+            return petBounds.Contains(cursor);
         }
 
         private static Bitmap LoadBitmapResource(string resourceName)
@@ -707,6 +1075,37 @@ namespace CodeXPets
             return result;
         }
 
+        private static Rectangle[] AnalyzeDockSpriteBounds(Bitmap sheet)
+        {
+            Rectangle[] result = new Rectangle[DockExpressionCount * 2];
+            for (int index = 0; index < result.Length; index++)
+            {
+                Rectangle cell = new Rectangle(index * DockSpriteCellSize, 0,
+                    DockSpriteCellSize, DockSpriteCellSize);
+                int minX = cell.Right;
+                int minY = cell.Bottom;
+                int maxX = cell.Left - 1;
+                int maxY = cell.Top - 1;
+                if (sheet != null)
+                {
+                    for (int y = cell.Top; y < Math.Min(cell.Bottom, sheet.Height); y++)
+                        for (int x = cell.Left; x < Math.Min(cell.Right, sheet.Width); x++)
+                            if (sheet.GetPixel(x, y).A > 16)
+                            {
+                                minX = Math.Min(minX, x);
+                                minY = Math.Min(minY, y);
+                                maxX = Math.Max(maxX, x);
+                                maxY = Math.Max(maxY, y);
+                            }
+                }
+                result[index] = maxX < minX
+                    ? new Rectangle(0, 0, DockSpriteCellSize, DockSpriteCellSize)
+                    : Rectangle.FromLTRB(minX - cell.Left, minY - cell.Top,
+                        maxX - cell.Left + 1, maxY - cell.Top + 1);
+            }
+            return result;
+        }
+
         private void RenderLayered()
         {
             if (IsDisposed || !IsHandleCreated) return;
@@ -717,8 +1116,7 @@ namespace CodeXPets
                     g.Clear(Color.Transparent);
                     g.SmoothingMode = SmoothingMode.AntiAlias;
                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
-                    bool showThought = currentState == ReminderState.Busy || currentState == ReminderState.Completed || currentState == ReminderState.Error;
-                    if (showThought) DrawThoughtBubble(g);
+                    if (ShouldShowThoughtBubble()) DrawThoughtBubble(g);
                     DrawSprite(g);
                 }
                 UpdateLayeredBitmap(canvas);
@@ -789,8 +1187,6 @@ namespace CodeXPets
             base.WndProc(ref m);
         }
 
-        private const int VirtualKeyLeftButton = 0x01;
-        [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int virtualKey);
         [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter,
             int x, int y, int cx, int cy, uint flags);
@@ -813,23 +1209,52 @@ namespace CodeXPets
 
         private void GetSpriteFrame(out int row, out int frame, out int frameCount)
         {
+            if (currentState == ReminderState.Busy)
+            {
+                // The cat follows a calm work rhythm: walk for a while,
+                // sit down to think, pause, then stand and resume walking.
+                row = BusySpriteRow;
+                frameCount = 8;
+                frame = GetBusySequenceFrame(animationFrame);
+                return;
+            }
+
+            int holdTicks;
             switch (currentState)
             {
-                case ReminderState.Busy:
-                    row = 4; frameCount = 5; break;
                 case ReminderState.Completed:
-                    row = 3; frameCount = 4; break;
+                    row = CompletedSpriteRow; frameCount = 4; holdTicks = 3; break;
                 case ReminderState.Error:
-                    row = 5; frameCount = 8; break;
+                    row = ErrorSpriteRow; frameCount = 8; holdTicks = 3; break;
                 default:
-                    // The eighth cell in the idle row is transparent.  Treating it
-                    // as a frame made the pet periodically disappear.
-                    row = 0; frameCount = IdleFrameCount; break;
+                    row = IdleSpriteRow; frameCount = 8; holdTicks = 3; break;
             }
-            frame = animationFrame % frameCount;
+            frame = (animationFrame / holdTicks) % frameCount;
         }
 
-        private RectangleF GetPetDestination(out Rectangle source, out SpriteFrameMetrics metrics)
+        private static int GetBusySequenceFrame(int tick)
+        {
+            int phase = Math.Abs(tick) % 64;
+            if (phase < 40) return (phase / 2) % 4;       // five relaxed walk cycles
+            if (phase < 44) return 4;                     // lower into the seat
+            if (phase < 60) return 5 + ((phase - 44) / 4) % 2; // think/blink
+            return 7;                                    // stand up, then loop
+        }
+
+        private bool ShouldMirrorFloatingSprite()
+        {
+            Point anchor = GetPreferredAnchor();
+            Rectangle workArea = Screen.FromPoint(anchor).WorkingArea;
+            return ShouldMirrorFloatingSprite(anchor, workArea);
+        }
+
+        internal static bool ShouldMirrorFloatingSprite(Point anchor, Rectangle workArea)
+        {
+            return anchor.X < workArea.Left + workArea.Width / 2;
+        }
+
+        private RectangleF GetPetDestination(bool mirror, out Rectangle source,
+            out SpriteFrameMetrics metrics)
         {
             int row;
             int frame;
@@ -842,47 +1267,150 @@ namespace CodeXPets
                 : spriteMetrics[row, frame];
             if (!metrics.HasPixels) metrics = SpriteFrameMetrics.CreateDefault();
 
-            float scaleX = petWidth / (float)SpriteCellWidth;
-            float scaleY = petHeight / (float)SpriteCellHeight;
+            float visualWidth = petWidth * SpriteScale;
+            float visualHeight = petHeight * SpriteScale;
+            float scaleX = visualWidth / SpriteCellWidth;
+            float scaleY = visualHeight / SpriteCellHeight;
             float targetX = Width / 2F;
             float groundY = Height - Math.Max(2F, (float)Math.Round(3F * uiScale));
-            float x = targetX - metrics.AnchorX * scaleX;
+            float anchorX = mirror ? SpriteCellWidth - metrics.AnchorX : metrics.AnchorX;
+            float x = targetX - anchorX * scaleX;
             float y = groundY - metrics.Bottom * scaleY;
-            return new RectangleF(x, y, petWidth, petHeight);
+            return new RectangleF(x, y, visualWidth, visualHeight);
         }
 
         private Rectangle GetPetVisibleBounds()
         {
+            if (IsDocked) return GetDockedPoseVisibleBounds();
+            bool mirror = ShouldMirrorFloatingSprite();
             Rectangle source;
             SpriteFrameMetrics metrics;
-            RectangleF destination = GetPetDestination(out source, out metrics);
+            RectangleF destination = GetPetDestination(mirror, out source, out metrics);
             float scaleX = destination.Width / SpriteCellWidth;
             float scaleY = destination.Height / SpriteCellHeight;
             Rectangle opaque = metrics.OpaqueBounds;
+            int opaqueX = mirror ? SpriteCellWidth - opaque.Right : opaque.X;
             RectangleF visible = new RectangleF(
-                destination.X + opaque.X * scaleX,
+                destination.X + opaqueX * scaleX,
                 destination.Y + opaque.Y * scaleY,
                 Math.Max(1F, opaque.Width * scaleX),
                 Math.Max(1F, opaque.Height * scaleY));
             return Rectangle.Ceiling(visible);
         }
 
+        private int GetDockExpressionIndex()
+        {
+            return SelectDockExpression(currentState, animationFrame);
+        }
+
+        internal static int SelectDockExpression(ReminderState state, int frame)
+        {
+            int phase = Math.Abs(frame) % 20;
+            bool quickBlink = phase == 11 || phase == 14;
+            if (state == ReminderState.Completed) return quickBlink ? 1 : 2;
+            if (state == ReminderState.Error) return quickBlink ? 1 : 3;
+            return quickBlink ? 1 : 0;
+        }
+
+        private int GetDockSpriteIndex()
+        {
+            int directionOffset = dockEdge == DockEdge.Right ? DockExpressionCount : 0;
+            return directionOffset + GetDockExpressionIndex();
+        }
+
+        private static float SmoothStep(float value)
+        {
+            value = Math.Max(0F, Math.Min(1F, value));
+            return value * value * (3F - 2F * value);
+        }
+
+        private void GetDockedPose(out Rectangle source, out Rectangle destination,
+            out Rectangle visibleBounds)
+        {
+            int index = GetDockSpriteIndex();
+            source = new Rectangle(index * DockSpriteCellSize, 0,
+                DockSpriteCellSize, DockSpriteCellSize);
+            int size = Math.Max(84, (int)Math.Round(104F * uiScale));
+            float visibility = SmoothStep(dockVisibility);
+            int hiddenOffset = (int)Math.Round(size * (1F - visibility));
+            int x = dockEdge == DockEdge.Left
+                ? -hiddenOffset
+                : Width - size + hiddenOffset;
+            int y = dockBubbleBelow ? 0 : Height - size;
+            destination = new Rectangle(x, y, size, size);
+
+            Rectangle opaque = dockSpriteOpaqueBounds == null
+                ? new Rectangle(0, 0, DockSpriteCellSize, DockSpriteCellSize)
+                : dockSpriteOpaqueBounds[index];
+            float scale = size / (float)DockSpriteCellSize;
+            visibleBounds = Rectangle.Ceiling(new RectangleF(
+                destination.X + opaque.X * scale,
+                destination.Y + opaque.Y * scale,
+                Math.Max(1F, opaque.Width * scale),
+                Math.Max(1F, opaque.Height * scale)));
+        }
+
+        private Rectangle GetDockedPoseVisibleBounds()
+        {
+            Rectangle source;
+            Rectangle destination;
+            Rectangle visible;
+            GetDockedPose(out source, out destination, out visible);
+            return visible;
+        }
+
         private void DrawSprite(Graphics g)
         {
-            if (spriteSheet == null) return;
             Rectangle source;
-            SpriteFrameMetrics metrics;
-            RectangleF destination = GetPetDestination(out source, out metrics);
+            RectangleF destination;
+            Bitmap sheet;
+            bool mirror = false;
+            if (IsDocked)
+            {
+                Rectangle dockDestination;
+                Rectangle visible;
+                GetDockedPose(out source, out dockDestination, out visible);
+                destination = dockDestination;
+                sheet = dockSpriteSheet;
+            }
+            else
+            {
+                SpriteFrameMetrics metrics;
+                mirror = ShouldMirrorFloatingSprite();
+                destination = GetPetDestination(mirror, out source, out metrics);
+                sheet = spriteSheet;
+            }
+            if (sheet == null) return;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.DrawImage(spriteSheet, Rectangle.Round(destination), source.X, source.Y,
-                source.Width, source.Height, GraphicsUnit.Pixel);
+            if (mirror)
+            {
+                PointF[] destinationPoints =
+                {
+                    new PointF(destination.Right, destination.Top),
+                    new PointF(destination.Left, destination.Top),
+                    new PointF(destination.Right, destination.Bottom)
+                };
+                g.DrawImage(sheet, destinationPoints, source, GraphicsUnit.Pixel);
+            }
+            else
+            {
+                g.DrawImage(sheet, destination, source, GraphicsUnit.Pixel);
+            }
             g.InterpolationMode = InterpolationMode.NearestNeighbor;
+        }
+
+        private bool ShouldShowThoughtBubble()
+        {
+            bool hasTaskState = currentState == ReminderState.Busy ||
+                currentState == ReminderState.Completed || currentState == ReminderState.Error;
+            return hasTaskState && (!IsDocked || DateTime.UtcNow < dockThoughtUntilUtc);
         }
 
         private Rectangle GetBubbleBounds()
         {
-            return new Rectangle((Width - bubbleWidth) / 2, 0, bubbleWidth, bubbleHeight);
+            int y = dockBubbleBelow ? Height - bubbleHeight : 0;
+            return new Rectangle((Width - bubbleWidth) / 2, y, bubbleWidth, bubbleHeight);
         }
 
         private void GetThoughtDotBounds(out Rectangle largeDot, out Rectangle smallDot)
@@ -891,11 +1419,35 @@ namespace CodeXPets
             int largeDotH = Math.Max(11, (int)Math.Round(15F * uiScale));
             int smallDotW = Math.Max(8, (int)Math.Round(11F * uiScale));
             int smallDotH = Math.Max(7, (int)Math.Round(10F * uiScale));
-            int largeDotX = Width / 2 - largeDotW / 2 - (int)Math.Round(7F * uiScale);
-            // Lift the larger thought dot so it stays clearly separated from the small dot.
-            int largeDotY = bubbleHeight - (int)Math.Round(6F * uiScale);
-            int smallDotX = Width / 2 - smallDotW / 2 - (int)Math.Round(11F * uiScale);
-            int smallDotY = bubbleHeight + (int)Math.Round(12F * uiScale);
+            Rectangle cloud = GetBubbleBounds();
+            Rectangle pet = GetPetVisibleBounds();
+            int petCenterX = pet.Left + pet.Width / 2;
+            int cloudCenterX = cloud.Left + cloud.Width / 2;
+            int smallCenterX = IsDocked ? petCenterX : cloudCenterX - (int)Math.Round(11F * uiScale);
+            int largeCenterX = IsDocked
+                ? (petCenterX * 2 + cloudCenterX) / 3
+                : cloudCenterX - (int)Math.Round(7F * uiScale);
+            int smallDotX = smallCenterX - smallDotW / 2;
+            int largeDotX = largeCenterX - largeDotW / 2;
+            int smallDotY;
+            int largeDotY;
+
+            if (dockBubbleBelow)
+            {
+                smallDotY = pet.Bottom + (int)Math.Round(6F * uiScale);
+                largeDotY = Math.Min(cloud.Top - largeDotH - (int)Math.Round(5F * uiScale),
+                    smallDotY + smallDotH + (int)Math.Round(5F * uiScale));
+            }
+            else
+            {
+                int minimumSmallY = cloud.Bottom + (int)Math.Round(10F * uiScale);
+                int maximumSmallY = cloud.Bottom + (int)Math.Round(30F * uiScale);
+                int desiredSmallY = pet.Top - smallDotH - (int)Math.Round(6F * uiScale);
+                smallDotY = Math.Max(minimumSmallY, Math.Min(maximumSmallY, desiredSmallY));
+                largeDotY = Math.Max(cloud.Bottom - (int)Math.Round(6F * uiScale),
+                    smallDotY - largeDotH - (int)Math.Round(5F * uiScale));
+            }
+
             largeDot = new Rectangle(largeDotX, largeDotY, largeDotW, largeDotH);
             smallDot = new Rectangle(smallDotX, smallDotY, smallDotW, smallDotH);
         }
@@ -911,12 +1463,14 @@ namespace CodeXPets
         {
             Rectangle cloud = GetBubbleBounds();
             bool reserveLightBulbSpace = ShouldShowLightBulb();
-            float x = reserveLightBulbSpace ? cloud.X + bubbleWidth * 0.285F :
-                cloud.X + bubbleWidth * 0.19F;
-            float y = cloud.Y + bubbleHeight * 0.29F;
-            float width = reserveLightBulbSpace ? contentViewportWidth : bubbleWidth * 0.66F;
+            float x = reserveLightBulbSpace ? cloud.X + bubbleWidth * 0.30F :
+                cloud.X + bubbleWidth * 0.21F;
+            float y = cloud.Y + bubbleHeight * 0.31F;
+            float maximumRight = cloud.X + bubbleWidth * 0.82F;
+            float desiredWidth = reserveLightBulbSpace ? contentViewportWidth : bubbleWidth * 0.62F;
+            float width = Math.Min(desiredWidth, Math.Max(1F, maximumRight - x));
             float height = contentViewportHeight;
-            float maximumBottom = cloud.Y + bubbleHeight * 0.90F;
+            float maximumBottom = cloud.Y + bubbleHeight * 0.84F;
             if (y + height > maximumBottom) height = Math.Max(1F, maximumBottom - y);
             return new RectangleF(x, y, Math.Max(1F, width), Math.Max(1F, height));
         }
@@ -937,29 +1491,37 @@ namespace CodeXPets
             DrawPixelThoughtDot(g, largeDot, uiScale);
             DrawPixelThoughtDot(g, smallDot, uiScale);
 
-            float headerFontSize = 11.5F * uiScale;
+            float headerFontSize = (currentState == ReminderState.Busy ? 9.2F : 11.5F) * uiScale;
             float contentFontSize = GetContentFontSize();
             using (Font headerFont = new Font("Microsoft YaHei UI", headerFontSize, FontStyle.Bold))
             using (Font contentFont = new Font("Microsoft YaHei UI", contentFontSize, FontStyle.Bold))
-            using (SolidBrush headerBrush = new SolidBrush(Color.FromArgb(55, 35, 22)))
-            using (SolidBrush contentBrush = new SolidBrush(Color.FromArgb(68, 44, 27)))
+            using (SolidBrush headerBrush = new SolidBrush(HeaderTextColor))
+            using (SolidBrush contentBrush = new SolidBrush(ContentTextColor))
             using (StringFormat headerFormat = (StringFormat)StringFormat.GenericTypographic.Clone())
             {
-                headerFormat.FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
+                headerFormat.FormatFlags = StringFormatFlags.NoWrap;
+                headerFormat.Trimming = StringTrimming.EllipsisCharacter;
                 headerFormat.Alignment = StringAlignment.Center;
                 string header;
                 if (currentState == ReminderState.Busy)
-                    header = taskTitles.Count > 1 ? "进行中...  " + (taskIndex + 1) + "/" + taskTitles.Count : "进行中...";
-                else if (currentState == ReminderState.Completed) header = "任务完成！";
-                else if (currentState == ReminderState.Error) header = "任务异常";
+                {
+                    string progress = taskIndex >= 0 && taskIndex < taskProgressLabels.Count
+                        ? taskProgressLabels[taskIndex] : null;
+                    header = "进行中";
+                    if (!String.IsNullOrEmpty(progress)) header += "(" + progress + ")";
+                    if (taskTitles.Count > 1)
+                        header += " · " + (taskIndex + 1) + "/" + taskTitles.Count;
+                }
+                else if (currentState == ReminderState.Completed) header = "已完成";
+                else if (currentState == ReminderState.Error) header = "异常";
                 else header = statusText;
 
                 bool reserveLightBulbSpace = ShouldShowLightBulb();
                 // All state titles share one cloud-centred header area so
                 // 进行中、任务完成和任务异常 never shift horizontally.
-                float headerX = cloud.X + bubbleWidth * 0.18F;
+                float headerX = cloud.X + bubbleWidth * 0.10F;
                 float headerY = cloud.Y + bubbleHeight * 0.125F;
-                float headerW = bubbleWidth * 0.64F;
+                float headerW = bubbleWidth * 0.80F;
                 float headerH = Math.Max(21F * uiScale, bubbleHeight * 0.23F);
                 g.DrawString(header, headerFont, headerBrush,
                     new RectangleF(headerX, headerY, headerW, headerH), headerFormat);
@@ -969,8 +1531,8 @@ namespace CodeXPets
                     bool errorBulb = currentState == ReminderState.Error;
                     DrawPixelLightBulb(g, cloud.X + bubbleWidth * 0.125F,
                         cloud.Y + bubbleHeight * 0.285F, uiScale,
-                        errorBulb ? Color.FromArgb(226, 62, 55) : Color.FromArgb(255, 183, 43),
-                        errorBulb ? Color.FromArgb(255, 174, 154) : Color.FromArgb(255, 238, 146));
+                        errorBulb ? Color.FromArgb(226, 62, 55) : BulbGlowColor,
+                        errorBulb ? Color.FromArgb(255, 174, 154) : BulbHighlightColor);
                 }
 
                 string sourceText = NormalizeDisplayText(GetDisplayedText());
@@ -986,7 +1548,7 @@ namespace CodeXPets
             }
         }
 
-        private static void DrawPixelThoughtDot(Graphics g, Rectangle bounds, float scale)
+        private void DrawPixelThoughtDot(Graphics g, Rectangle bounds, float scale)
         {
             SmoothingMode previous = g.SmoothingMode;
             g.SmoothingMode = SmoothingMode.None;
@@ -999,8 +1561,8 @@ namespace CodeXPets
                 ? CreatePixelOctagon(innerBounds, Math.Min(innerNotch,
                     Math.Max(1, Math.Min(innerBounds.Width, innerBounds.Height) / 3)))
                 : null;
-            using (SolidBrush outline = new SolidBrush(Color.FromArgb(76, 49, 30)))
-            using (SolidBrush fill = new SolidBrush(Color.FromArgb(255, 247, 225)))
+            using (SolidBrush outline = new SolidBrush(DotOutlineColor))
+            using (SolidBrush fill = new SolidBrush(DotFillColor))
             {
                 g.FillPolygon(outline, outer);
                 if (inner != null) g.FillPolygon(fill, inner);
@@ -1208,7 +1770,7 @@ namespace CodeXPets
             using (Graphics textGraphics = Graphics.FromImage(smoothTextBitmap))
             using (Font renderFont = new Font(baseFont.FontFamily,
                 baseFont.Size * TextSupersample, baseFont.Style, GraphicsUnit.Point))
-            using (SolidBrush textBrush = new SolidBrush(Color.FromArgb(68, 44, 27)))
+            using (SolidBrush textBrush = new SolidBrush(ContentTextColor))
             using (StringFormat lineFormat = (StringFormat)StringFormat.GenericTypographic.Clone())
             {
                 textGraphics.Clear(Color.Transparent);
@@ -1294,10 +1856,16 @@ namespace CodeXPets
             }
         }
 
+        private string GetSelectedTaskTitle()
+        {
+            if (taskTitles.Count == 0) return null;
+            return taskTitles[Math.Max(0, Math.Min(taskIndex, taskTitles.Count - 1))] ?? String.Empty;
+        }
+
         private string GetDisplayedText()
         {
-            if (taskTitles.Count == 0) return thoughtText ?? String.Empty;
-            return taskTitles[Math.Max(0, Math.Min(taskIndex, taskTitles.Count - 1))] ?? String.Empty;
+            string title = GetSelectedTaskTitle();
+            return title ?? thoughtText ?? String.Empty;
         }
 
         private int FindTaskIndex(string selectedTitle)
@@ -1385,7 +1953,7 @@ namespace CodeXPets
         private bool IsInteractivePoint(Point clientPoint)
         {
             if (GetPetVisibleBounds().Contains(clientPoint)) return true;
-            if (currentState == ReminderState.Idle) return false;
+            if (!ShouldShowThoughtBubble()) return false;
             if (GetBubbleBounds().Contains(clientPoint)) return true;
             Rectangle largeDot;
             Rectangle smallDot;
@@ -1400,19 +1968,28 @@ namespace CodeXPets
             RenderLayered();
         }
 
+        internal bool IsDragActive
+        {
+            get { return dragPending || dragging; }
+        }
+
         private void StartDrag(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
             if (IsContentPoint(e.Location))
             {
-                // Content is a task selector, never a drag surface.  Switching
-                // on mouse-down makes the response immediate and prevents the
-                // old accidental-drag/jump behaviour.
+                // The task text is a selector rather than a drag surface.
                 SwitchFromContentClick();
                 return;
             }
             if (!IsInteractivePoint(e.Location)) return;
 
+            dragStartedDocked = IsDocked;
+            if (dragStartedDocked)
+            {
+                dockVisibility = 1F;
+                RenderLayered();
+            }
             dragPending = true;
             dragging = false;
             dragStartCursor = Cursor.Position;
@@ -1422,23 +1999,26 @@ namespace CodeXPets
 
         private void Drag(object sender, MouseEventArgs e)
         {
-            if (!dragPending && !dragging) return;
-            if ((GetAsyncKeyState(VirtualKeyLeftButton) & 0x8000) == 0)
-            {
-                FinishDrag();
-                return;
-            }
+            if (!IsDragActive) return;
 
+            bool wasMirrored = !IsDocked && ShouldMirrorFloatingSprite();
             Point cursor = Cursor.Position;
             int dx = cursor.X - dragStartCursor.X;
             int dy = cursor.Y - dragStartCursor.Y;
             int threshold = Math.Max(3, SystemInformation.DragSize.Width / 3);
             if (!dragging && Math.Abs(dx) + Math.Abs(dy) < threshold) return;
 
+            if (!dragging && IsDocked)
+            {
+                UndockForDrag(cursor);
+                dx = 0;
+                dy = 0;
+            }
             dragging = true;
             SetBounds(dragStartLocation.X + dx, dragStartLocation.Y + dy,
                 Width, Height, BoundsSpecified.Location);
             RememberCurrentAnchor();
+            if (!IsDocked && wasMirrored != ShouldMirrorFloatingSprite()) RenderLayered();
         }
 
         private void EndDrag(object sender, MouseEventArgs e)
@@ -1448,32 +2028,47 @@ namespace CodeXPets
 
         private void AssistantMouseCaptureChanged(object sender, EventArgs e)
         {
-            if ((dragging || dragPending) &&
-                (GetAsyncKeyState(VirtualKeyLeftButton) & 0x8000) == 0)
-                FinishDrag();
+            if (IsDragActive && !Capture) FinishDrag();
         }
 
         private void FinishDrag()
         {
-            if (!dragging && !dragPending) return;
+            if (!IsDragActive) return;
             bool moved = dragging;
+            bool startedDocked = dragStartedDocked;
             dragging = false;
             dragPending = false;
+            dragStartedDocked = false;
             Capture = false;
-            if (!moved) return;
+            if (!moved)
+            {
+                if (startedDocked && IsDocked)
+                {
+                    dockLastContentChangeUtc = DateTime.UtcNow;
+                    dockVisibility = 1F;
+                    RenderLayered();
+                }
+                return;
+            }
 
             RememberCurrentAnchor();
             bool changed = RecalculateAdaptiveLayout();
-            ClampToWorkingArea();
-            RememberCurrentAnchor();
-            if (changed) RenderLayered();
+            if (!TrySnapToEdge(Cursor.Position))
+            {
+                ClampToWorkingArea();
+                RememberCurrentAnchor();
+                if (changed) RenderLayered();
+            }
+            SaveCurrentPosition();
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
+                SaveCurrentPosition();
                 if (spriteSheet != null) spriteSheet.Dispose();
+                if (dockSpriteSheet != null) dockSpriteSheet.Dispose();
                 if (cloudBubble != null) cloudBubble.Dispose();
                 DisposeSmoothTextBitmap();
             }
@@ -1481,13 +2076,13 @@ namespace CodeXPets
         }
     }
 
+    internal enum DockEdge { None, Left, Right }
+
     internal enum ReminderState { Idle, Busy, Completed, Error }
 
     internal static class StatusIconFactory
     {
         public const int BusyFrameCount = 24;
-        private const string LogoResource = "codex-official-icon.png";
-
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern bool DestroyIcon(IntPtr handle);
 
@@ -1533,29 +2128,6 @@ namespace CodeXPets
                 }
             }
             return bitmap;
-        }
-
-        private static Bitmap LoadOfficialLogo()
-        {
-            using (Stream source = Assembly.GetExecutingAssembly().GetManifestResourceStream(LogoResource))
-            {
-                if (source == null)
-                    throw new InvalidOperationException("内嵌 Codex 官方图标不存在。");
-                using (Bitmap loaded = new Bitmap(source)) return new Bitmap(loaded);
-            }
-        }
-
-        private static void DrawOfficialLogo(Graphics g, Bitmap logo, float opacity)
-        {
-            Rectangle destination = new Rectangle(10, 10, 44, 44);
-            using (ImageAttributes attributes = new ImageAttributes())
-            {
-                ColorMatrix matrix = new ColorMatrix();
-                matrix.Matrix33 = opacity;
-                attributes.SetColorMatrix(matrix, ColorMatrixFlag.Default, ColorAdjustType.Bitmap);
-                g.DrawImage(logo, destination, 0, 0, logo.Width, logo.Height,
-                    GraphicsUnit.Pixel, attributes);
-            }
         }
 
         private static void DrawIdleDot(Graphics g)
@@ -1635,17 +2207,12 @@ namespace CodeXPets
             return Color.FromArgb(color.A, r, g, b);
         }
 
-internal static bool HasEmbeddedLogo()
-        {
-            using (Stream source = Assembly.GetExecutingAssembly().GetManifestResourceStream(LogoResource))
-                return source != null && source.Length > 1000;
-        }
     }
 
     internal sealed class CodexSessionMonitor : IDisposable
     {
         private static readonly Regex EventTypeRegex = new Regex(
-            "\\\"type\\\"\\s*:\\s*\\\"(task_started|task_complete|turn_aborted)\\\"",
+            "\\\"type\\\"\\s*:\\s*\\\"(task_started|task_complete|turn_aborted|task_failed|turn_failed|stream_error|request_error|error)\\\"",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
         private static readonly Regex TurnIdRegex = new Regex(
             "\\\"turn_id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"",
@@ -1656,9 +2223,51 @@ internal static bool HasEmbeddedLogo()
         private static readonly Regex UserMessageTextRegex = new Regex(
             "\\\"message\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"])*)\\\"",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex HttpServerErrorRegex = new Regex(
+            @"\bhttp(?: status)?\s*5\d\d\b",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex FailedTestsRegex = new Regex(
+            @"\b[1-9]\d*\s+test\(s\)\s+failed\b",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex NonZeroExitCodeRegex = new Regex(
+            @"(?:^|[\r\n])\s*exit code:\s*[1-9]\d*\b",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly string[] FailureMessagePrefixes =
+        {
+            "traceback (most recent call last):",
+            "unhandled exception",
+            "fatal error",
+            "internal server error",
+            "server error",
+            "api error",
+            "request failed",
+            "stream error",
+            "something went wrong",
+            "服务端错误",
+            "服务器错误",
+            "内部服务器错误",
+            "请求失败"
+        };
+        private static readonly string[] FailureMessageFragments =
+        {
+            "stream disconnected before completion",
+            "connection reset by peer",
+            "upstream service error",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "rate limit exceeded",
+            "error sending request"
+        };
+        private static readonly HashSet<string> FailureEventTypes = new HashSet<string>(
+            new[] { "turn_aborted", "task_failed", "turn_failed", "stream_error", "request_error", "error" },
+            StringComparer.Ordinal);
+        private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
         private readonly string sessionsRoot;
         private readonly Dictionary<string, TailState> files = new Dictionary<string, TailState>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, ActiveTurn> activeTurns = new Dictionary<string, ActiveTurn>(StringComparer.Ordinal);
+        private readonly Dictionary<string, TaskPlanProgress> plansByFile =
+            new Dictionary<string, TaskPlanProgress>(StringComparer.OrdinalIgnoreCase);
         private string lastCompletedTitle;
         private string lastAbortedTitle;
         private long nextStartedSequence;
@@ -1685,17 +2294,54 @@ internal static bool HasEmbeddedLogo()
             get
             {
                 List<string> titles = new List<string>();
-                foreach (ActiveTurn turn in activeTurns.Values.OrderBy(delegate(ActiveTurn item) { return item.StartSequence; }))
+                foreach (ActiveTurn turn in OrderedActiveTurns())
                     titles.Add(String.IsNullOrEmpty(turn.Title) ? "正在处理任务…" : turn.Title);
                 return titles;
             }
+        }
+
+        public IList<string> ActivePlanProgressLabels
+        {
+            get
+            {
+                List<string> labels = new List<string>();
+                foreach (ActiveTurn turn in OrderedActiveTurns())
+                    labels.Add(turn.Plan == null || turn.Plan.TotalSteps <= 1 ? null :
+                        turn.Plan.CompletedSteps + "/" + turn.Plan.TotalSteps);
+                return labels;
+            }
+        }
+
+        public int TotalPlanStepCount
+        {
+            get { return activeTurns.Values.Sum(delegate(ActiveTurn turn) { return turn.Plan == null ? 0 : turn.Plan.TotalSteps; }); }
+        }
+
+        public int CompletedPlanStepCount
+        {
+            get { return activeTurns.Values.Sum(delegate(ActiveTurn turn) { return turn.Plan == null ? 0 : turn.Plan.CompletedSteps; }); }
+        }
+
+        public string PrimaryCurrentPlanStep
+        {
+            get
+            {
+                foreach (ActiveTurn turn in OrderedActiveTurns())
+                    if (turn.Plan != null && turn.Plan.TotalSteps > 0) return turn.Plan.CurrentStep;
+                return null;
+            }
+        }
+
+        private IEnumerable<ActiveTurn> OrderedActiveTurns()
+        {
+            return activeTurns.Values.OrderBy(delegate(ActiveTurn item) { return item.StartSequence; });
         }
 
         public string PrimaryActiveTitle
         {
             get
             {
-                foreach (ActiveTurn turn in activeTurns.Values.OrderBy(delegate(ActiveTurn item) { return item.StartSequence; }))
+                foreach (ActiveTurn turn in OrderedActiveTurns())
                     if (!String.IsNullOrEmpty(turn.Title)) return turn.Title;
                 return null;
             }
@@ -1771,6 +2417,7 @@ internal static bool HasEmbeddedLogo()
                     if (length < state.Position)
                     {
                         RemoveTurnsForFile(state.Path);
+                        plansByFile.Remove(state.Path);
                         state.Reset();
                     }
                     if (length == state.Position) return;
@@ -1836,6 +2483,7 @@ internal static bool HasEmbeddedLogo()
 
         private bool TryProcessEvent(string lineStart, string sourcePath, bool suppressCompletionNotification)
         {
+            if (TryProcessPlanUpdate(lineStart, sourcePath, suppressCompletionNotification)) return true;
             if (lineStart.IndexOf("\"type\":\"event_msg\"", StringComparison.Ordinal) < 0 &&
                 lineStart.IndexOf("\"type\": \"event_msg\"", StringComparison.Ordinal) < 0) return false;
             if (UserMessageTypeRegex.IsMatch(lineStart))
@@ -1856,7 +2504,10 @@ internal static bool HasEmbeddedLogo()
                 bool added = false;
                 if (!activeTurns.ContainsKey(turnId))
                 {
-                    activeTurns[turnId] = new ActiveTurn(turnId, sourcePath, nextStartedSequence++);
+                    ActiveTurn newTurn = new ActiveTurn(turnId, sourcePath, nextStartedSequence++);
+                    TaskPlanProgress rememberedPlan;
+                    if (plansByFile.TryGetValue(sourcePath, out rememberedPlan)) newTurn.Plan = rememberedPlan;
+                    activeTurns[turnId] = newTurn;
                     added = true;
                 }
                 if (added && !suppressCompletionNotification)
@@ -1869,17 +2520,29 @@ internal static bool HasEmbeddedLogo()
             {
                 ActiveTurn completedTurn;
                 bool wasActive = activeTurns.TryGetValue(turnId, out completedTurn);
+                bool abnormalCompletion = IsAbnormalTaskCompletion(lineStart);
                 if (wasActive) activeTurns.Remove(turnId);
                 if (wasActive && !suppressCompletionNotification)
                 {
-                    lastCompletedTitle = String.IsNullOrEmpty(completedTurn.Title)
-                        ? "已完成的任务"
-                        : completedTurn.Title;
-                    EventHandler completed = TaskCompleted;
-                    if (completed != null) completed(this, EventArgs.Empty);
+                    if (abnormalCompletion)
+                    {
+                        lastAbortedTitle = String.IsNullOrEmpty(completedTurn.Title)
+                            ? "发生异常的任务"
+                            : completedTurn.Title;
+                        EventHandler aborted = TaskAborted;
+                        if (aborted != null) aborted(this, EventArgs.Empty);
+                    }
+                    else
+                    {
+                        lastCompletedTitle = String.IsNullOrEmpty(completedTurn.Title)
+                            ? "已完成的任务"
+                            : completedTurn.Title;
+                        EventHandler completed = TaskCompleted;
+                        if (completed != null) completed(this, EventArgs.Empty);
+                    }
                 }
             }
-            else if (eventType == "turn_aborted")
+            else if (FailureEventTypes.Contains(eventType))
             {
                 ActiveTurn abortedTurn;
                 bool wasActive = activeTurns.TryGetValue(turnId, out abortedTurn);
@@ -1899,6 +2562,117 @@ internal static bool HasEmbeddedLogo()
                 if (changed != null) changed(this, EventArgs.Empty);
             }
             return true;
+        }
+
+        private static bool IsAbnormalTaskCompletion(string lineStart)
+        {
+            try
+            {
+                IDictionary<string, object> root = Json.DeserializeObject(lineStart) as IDictionary<string, object>;
+                IDictionary<string, object> payload = GetObjectMap(root, "payload");
+                if (payload == null) return false;
+                string status = GetString(payload, "status");
+                if (String.Equals(status, "failed", StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(status, "error", StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(status, "aborted", StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(status, "cancelled", StringComparison.OrdinalIgnoreCase)) return true;
+                object errorValue;
+                if (payload.TryGetValue("error", out errorValue) && errorValue != null &&
+                    !String.IsNullOrWhiteSpace(errorValue.ToString())) return true;
+                return LooksLikeFailureMessage(GetString(payload, "last_agent_message"));
+            }
+            catch (ArgumentException) { return false; }
+            catch (InvalidOperationException) { return false; }
+        }
+
+        internal static bool LooksLikeFailureMessage(string message)
+        {
+            if (String.IsNullOrWhiteSpace(message)) return false;
+            string trimmed = message.Trim();
+            string lower = trimmed.ToLowerInvariant();
+            foreach (string prefix in FailureMessagePrefixes)
+                if (lower.StartsWith(prefix, StringComparison.Ordinal)) return true;
+            foreach (string fragment in FailureMessageFragments)
+                if (lower.IndexOf(fragment, StringComparison.Ordinal) >= 0) return true;
+
+            if (HttpServerErrorRegex.IsMatch(lower)) return true;
+            if (FailedTestsRegex.IsMatch(lower)) return true;
+            if (NonZeroExitCodeRegex.IsMatch(lower)) return true;
+            return false;
+        }
+
+        private bool TryProcessPlanUpdate(string lineStart, string sourcePath, bool suppressNotification)
+        {
+            if (lineStart.IndexOf("update_plan", StringComparison.Ordinal) < 0 ||
+                lineStart.IndexOf("function_call", StringComparison.Ordinal) < 0) return false;
+            try
+            {
+                IDictionary<string, object> root = Json.DeserializeObject(lineStart) as IDictionary<string, object>;
+                IDictionary<string, object> payload = GetObjectMap(root, "payload");
+                if (payload == null || !String.Equals(GetString(payload, "type"), "function_call", StringComparison.Ordinal) ||
+                    !String.Equals(GetString(payload, "name"), "update_plan", StringComparison.Ordinal)) return false;
+
+                string arguments = GetString(payload, "arguments");
+                IDictionary<string, object> argumentsRoot = String.IsNullOrEmpty(arguments) ? null :
+                    Json.DeserializeObject(arguments) as IDictionary<string, object>;
+                object planValue;
+                object[] planItems = argumentsRoot != null && argumentsRoot.TryGetValue("plan", out planValue)
+                    ? planValue as object[] : null;
+                if (planItems == null) return true;
+
+                IDictionary<string, object> metadata = GetObjectMap(payload, "internal_chat_message_metadata_passthrough");
+                string turnId = GetString(metadata, "turn_id");
+                ActiveTurn turn;
+                if (String.IsNullOrEmpty(turnId) || !activeTurns.TryGetValue(turnId, out turn))
+                {
+                    turn = activeTurns.Values.Where(delegate(ActiveTurn item)
+                    {
+                        return String.Equals(item.SourcePath, sourcePath, StringComparison.OrdinalIgnoreCase);
+                    }).OrderByDescending(delegate(ActiveTurn item) { return item.StartSequence; }).FirstOrDefault();
+                }
+                if (turn == null) return true;
+
+                int completed = 0;
+                string currentStep = null;
+                string firstPendingStep = null;
+                foreach (object item in planItems)
+                {
+                    IDictionary<string, object> step = item as IDictionary<string, object>;
+                    if (step == null) continue;
+                    string status = GetString(step, "status");
+                    string stepText = GetString(step, "step");
+                    if (String.Equals(status, "completed", StringComparison.Ordinal)) completed++;
+                    else if (String.Equals(status, "in_progress", StringComparison.Ordinal) && String.IsNullOrEmpty(currentStep))
+                        currentStep = stepText;
+                    else if (String.Equals(status, "pending", StringComparison.Ordinal) && String.IsNullOrEmpty(firstPendingStep))
+                        firstPendingStep = stepText;
+                }
+                if (String.IsNullOrEmpty(currentStep)) currentStep = firstPendingStep;
+                TaskPlanProgress next = new TaskPlanProgress(planItems.Length, completed, currentStep);
+                plansByFile[sourcePath] = next;
+                bool changed = turn.Plan == null || !turn.Plan.Equals(next);
+                turn.Plan = next;
+                if (changed && !suppressNotification)
+                {
+                    EventHandler stateChanged = StateChanged;
+                    if (stateChanged != null) stateChanged(this, EventArgs.Empty);
+                }
+                return true;
+            }
+            catch (ArgumentException) { return false; }
+            catch (InvalidOperationException) { return false; }
+        }
+
+        private static IDictionary<string, object> GetObjectMap(IDictionary<string, object> map, string key)
+        {
+            object value;
+            return map != null && map.TryGetValue(key, out value) ? value as IDictionary<string, object> : null;
+        }
+
+        private static string GetString(IDictionary<string, object> map, string key)
+        {
+            object value;
+            return map != null && map.TryGetValue(key, out value) && value != null ? value.ToString() : null;
         }
 
         private void RemoveTurnsForFile(string path)
@@ -1988,11 +2762,38 @@ internal static bool HasEmbeddedLogo()
             public readonly string SourcePath;
             public readonly long StartSequence;
             public string Title;
+            public TaskPlanProgress Plan;
             public ActiveTurn(string turnId, string sourcePath, long startSequence)
             {
                 TurnId = turnId;
                 SourcePath = sourcePath;
                 StartSequence = startSequence;
+            }
+        }
+
+        private sealed class TaskPlanProgress
+        {
+            public readonly int TotalSteps;
+            public readonly int CompletedSteps;
+            public readonly string CurrentStep;
+
+            public TaskPlanProgress(int totalSteps, int completedSteps, string currentStep)
+            {
+                TotalSteps = totalSteps;
+                CompletedSteps = completedSteps;
+                CurrentStep = currentStep;
+            }
+
+            public override bool Equals(object obj)
+            {
+                TaskPlanProgress other = obj as TaskPlanProgress;
+                return other != null && TotalSteps == other.TotalSteps && CompletedSteps == other.CompletedSteps &&
+                    String.Equals(CurrentStep, other.CurrentStep, StringComparison.Ordinal);
+            }
+
+            public override int GetHashCode()
+            {
+                return TotalSteps ^ CompletedSteps ^ (CurrentStep == null ? 0 : CurrentStep.GetHashCode());
             }
         }
     }

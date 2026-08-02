@@ -12,8 +12,8 @@ $assemblyInfo = Join-Path $root 'AssemblyInfo.cs'
 $selfTest = Join-Path $root 'CodeXPets.SelfTest.cs'
 $manifest = Join-Path $root 'app.manifest'
 $icon = Join-Path $root 'CodeXPets.ico'
-$logo = Join-Path $root 'codex-official-icon-source.png'
-$petSprite = Join-Path $root 'boba-spritesheet.png'
+$whiteCatSprite = Join-Path $root 'white-cat-spritesheet.png'
+$dockSprite = Join-Path $root 'cat-dock-spritesheet.png'
 $cloudBubble = Join-Path $root 'cloud-bubble.png'
 $voiceStart = Join-Path $root 'voice-start.mp3'
 $voiceComplete = Join-Path $root 'voice-complete.mp3'
@@ -21,50 +21,62 @@ $voiceError = Join-Path $root 'voice-error.mp3'
 $appOutput = Join-Path $root 'CodeXPets.exe'
 $testOutput = Join-Path $root 'CodeXPets.SelfTest.exe'
 
-@($source, $assemblyInfo, $selfTest, $manifest, $icon, $logo, $voiceStart, $voiceComplete, $voiceError, $petSprite, $cloudBubble) | ForEach-Object {
-    if (-not (Test-Path -LiteralPath $_)) { throw "缺少构建文件：$_" }
+$requiredFiles = @(
+    $source, $assemblyInfo, $selfTest, $manifest, $icon,
+    $whiteCatSprite, $dockSprite, $cloudBubble,
+    $voiceStart, $voiceComplete, $voiceError
+)
+foreach ($requiredFile in $requiredFiles) {
+    if (-not (Test-Path -LiteralPath $requiredFile)) {
+        throw "缺少构建文件：$requiredFile"
+    }
 }
 
 $frameworkDir = Split-Path -Parent $csc
-$wpfDir = Join-Path $frameworkDir 'WPF'
-$presentationCore = Join-Path $wpfDir 'PresentationCore.dll'
-$windowsBase = Join-Path $wpfDir 'WindowsBase.dll'
-if (-not (Test-Path -LiteralPath $presentationCore) -or -not (Test-Path -LiteralPath $windowsBase)) {
-    throw '找不到 Windows WPF 媒体组件，无法启用可靠 MP3 播放。'
+$presentationCore = Join-Path $frameworkDir 'WPF\PresentationCore.dll'
+$windowsBase = Join-Path $frameworkDir 'WPF\WindowsBase.dll'
+$webExtensions = Join-Path $frameworkDir 'System.Web.Extensions.dll'
+foreach ($frameworkAssembly in @($presentationCore, $windowsBase, $webExtensions)) {
+    if (-not (Test-Path -LiteralPath $frameworkAssembly)) {
+        throw "缺少 .NET Framework 组件：$frameworkAssembly"
+    }
 }
+
 $references = @(
     '/reference:System.dll',
     '/reference:System.Core.dll',
     '/reference:System.Drawing.dll',
     '/reference:System.Windows.Forms.dll',
     "/reference:$presentationCore",
-    "/reference:$windowsBase"
+    "/reference:$windowsBase",
+    "/reference:$webExtensions"
 )
+$resources = @(
+    "/resource:$voiceStart,voice-start.mp3",
+    "/resource:$voiceComplete,voice-complete.mp3",
+    "/resource:$voiceError,voice-error.mp3",
+    "/resource:$whiteCatSprite,white-cat-spritesheet.png",
+    "/resource:$dockSprite,cat-dock-spritesheet.png",
+    "/resource:$cloudBubble,cloud-bubble.png"
+)
+$commonCompilerArgs = @(
+    '/nologo',
+    '/optimize+',
+    '/warn:4',
+    '/warnaserror+',
+    '/platform:anycpu'
+) + $references + $resources
 
-& $csc /nologo /target:winexe /optimize+ /platform:anycpu `
+& $csc @commonCompilerArgs '/target:winexe' `
     "/out:$appOutput" `
     "/win32manifest:$manifest" `
     "/win32icon:$icon" `
-    "/resource:$voiceStart,voice-start.mp3" `
-    "/resource:$voiceComplete,voice-complete.mp3" `
-    "/resource:$voiceError,voice-error.mp3" `
-    "/resource:$logo,codex-official-icon.png" `
-    "/resource:$petSprite,boba-spritesheet.png" `
-    "/resource:$cloudBubble,cloud-bubble.png" `
-    $references `
     $source $assemblyInfo
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& $csc /nologo /target:exe /optimize+ /platform:anycpu `
-    /main:CodeXPets.MonitorSelfTest `
+& $csc @commonCompilerArgs '/target:exe' `
+    '/main:CodeXPets.MonitorSelfTest' `
     "/out:$testOutput" `
-    "/resource:$voiceStart,voice-start.mp3" `
-    "/resource:$voiceComplete,voice-complete.mp3" `
-    "/resource:$voiceError,voice-error.mp3" `
-    "/resource:$logo,codex-official-icon.png" `
-    "/resource:$petSprite,boba-spritesheet.png" `
-    "/resource:$cloudBubble,cloud-bubble.png" `
-    $references `
     $source $selfTest $assemblyInfo
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
