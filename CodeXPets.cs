@@ -207,7 +207,7 @@ namespace CodeXPets
         {
             return new CodeXPetsSettings
             {
-                DockHoverHeight = 160,
+                DockHoverHeight = 240,
                 DockIdleHideSeconds = 10,
                 DockRevealSeconds = 3,
                 DockNotificationSeconds = 5,
@@ -983,7 +983,7 @@ namespace CodeXPets
         private const int HtClient = 1;
         private const int HtTransparent = -1;
         private const float SpriteScale = 1.35F;
-        private const int DefaultDockHoverHeight = 160;
+        private const int DefaultDockHoverHeight = 240;
         private const int DefaultDockIdleHideSeconds = 10;
         private const float DockSlideInDurationSeconds = 0.30F;
         private const float DockSlideOutDurationSeconds = 0.55F;

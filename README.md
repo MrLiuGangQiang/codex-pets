@@ -24,10 +24,10 @@ CodeXPets 是一个无需安装的 Windows 桌面宠物，通过任务栏通知�
 
 请从 GitHub Releases 下载最新正式版：
 
-- `CodeXPets-v2.2.0-win-portable.zip`：推荐，解压后直接运行。
+- `CodeXPets-v2.2.1-win-portable.zip`：推荐，解压后直接运行。
 - `CodeXPets.exe`：单独的主程序文件。
 
-当前正式版本：**2.2.0**。
+当前正式版本：**2.2.1**。
 
 ## 设置
 

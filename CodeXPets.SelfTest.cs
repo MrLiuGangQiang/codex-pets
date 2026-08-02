@@ -227,6 +227,9 @@ namespace CodeXPets
                 !CodexSessionMonitor.IsTurnStale(staleNow.AddMinutes(-11),
                     staleNow.AddMinutes(-1), staleNow, 600), ref failures);
 
+            CodeXPetsSettings defaultSettings = CodeXPetsSettings.CreateDefault();
+            Check("default edge trigger height is 240 pixels",
+                defaultSettings.DockHoverHeight == 240, ref failures);
             CodeXPetsSettings normalizedSettings = CodeXPetsSettings.CreateDefault();
             normalizedSettings.DockHoverHeight = 5;
             normalizedSettings.DockIdleHideSeconds = -1;
@@ -245,7 +248,7 @@ namespace CodeXPets
                     ref failures);
 
             Check("all event voices embedded", CompletionVoice.HasEmbeddedVoice(), ref failures);
-            Check("release version metadata available", String.Equals(AppInfo.Version, "2.2.0", StringComparison.Ordinal), ref failures);
+            Check("release version metadata available", String.Equals(AppInfo.Version, "2.2.1", StringComparison.Ordinal), ref failures);
 
             PetPositionState savedDockPosition = new PetPositionState(DockEdge.Left,
                 @"\\.\DISPLAY2", 0.5D, 0.375D);
@@ -513,13 +516,13 @@ namespace CodeXPets
             Rectangle localHover = DesktopAssistantForm.GetDockHoverBounds(
                 DockEdge.Left, snapArea, 400, 1F, false);
             Check("hidden left dock uses a fixed-height local edge hotspot",
-                leftHover.Contains(101, 400) && !leftHover.Contains(101, 300) &&
+                leftHover.Contains(101, 400) && !leftHover.Contains(101, 250) &&
                 !leftHover.Contains(200, 400), ref failures);
             Check("hidden right dock uses a fixed-height local edge hotspot",
-                rightHover.Contains(1299, 400) && !rightHover.Contains(1299, 500) &&
+                rightHover.Contains(1299, 400) && !rightHover.Contains(1299, 550) &&
                 !rightHover.Contains(1200, 400), ref failures);
             Check("visible dock hover zone stays near the pet",
-                localHover.Contains(101, 400) && !localHover.Contains(101, 300), ref failures);
+                localHover.Contains(101, 400) && !localHover.Contains(101, 250), ref failures);
             Rectangle customHover = DesktopAssistantForm.GetDockHoverBounds(
                 DockEdge.Left, snapArea, 400, 1F, true, 240);
             Check("configured dock hover height is respected",
@@ -560,7 +563,7 @@ namespace CodeXPets
                 using (CodeXPetsDiagnosticsForm diagnosticsForm =
                     new CodeXPetsDiagnosticsForm(monitor, testSettings))
                     utilityDialogsLoad = utilityDialogsLoad &&
-                        diagnosticsForm.Text.IndexOf("2.2.0", StringComparison.Ordinal) >= 0;
+                        diagnosticsForm.Text.IndexOf("2.2.1", StringComparison.Ordinal) >= 0;
             }
             catch (Exception ex)
             {
