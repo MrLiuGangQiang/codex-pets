@@ -108,12 +108,134 @@ namespace CodeXPets
                 "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Follow-up\"}}\n", Encoding.UTF8);
             using (CodexSessionMonitor carryMonitor = new CodexSessionMonitor(carryRoot))
             {
-                Check("plan retained across turns", carryMonitor.ActiveCount == 1 &&
+                bool planRetained = carryMonitor.ActiveCount == 1 &&
                     carryMonitor.ActivePlanProgressLabels.Count == 1 &&
-                    String.Equals(carryMonitor.ActivePlanProgressLabels[0], "1/2", StringComparison.Ordinal),
-                    ref failures);
+                    String.Equals(carryMonitor.ActivePlanProgressLabels[0], "1/2", StringComparison.Ordinal);
+                if (!planRetained) Console.WriteLine(carryMonitor.GetDiagnosticsText());
+                Check("plan retained across turns", planRetained, ref failures);
             }
             try { Directory.Delete(carryRoot, true); } catch { }
+
+            string oldRoot = Path.Combine(Path.GetTempPath(),
+                "CodeXPetsOldSessionTest_" + Guid.NewGuid().ToString("N"));
+            DateTime oldDayValue = DateTime.Today.AddDays(-10);
+            string oldDay = Path.Combine(oldRoot, oldDayValue.ToString("yyyy"),
+                oldDayValue.ToString("MM"), oldDayValue.ToString("dd"));
+            Directory.CreateDirectory(oldDay);
+            string oldFile = Path.Combine(oldDay, "rollout-old-active.jsonl");
+            File.WriteAllText(oldFile,
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"OLD-DAY\"}}\n",
+                Encoding.UTF8);
+            File.SetLastWriteTimeUtc(oldFile, DateTime.UtcNow);
+            using (CodexSessionMonitor oldMonitor = new CodexSessionMonitor(oldRoot))
+                Check("recently modified long-running session is discovered outside three-day folders",
+                    oldMonitor.ActiveCount == 1, ref failures);
+            string switchRoot = Path.Combine(Path.GetTempPath(),
+                "CodeXPetsSwitchRootTest_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(switchRoot);
+            using (CodexSessionMonitor switchMonitor = new CodexSessionMonitor(switchRoot))
+            {
+                switchMonitor.SetSessionsRoot(oldRoot);
+                Check("session root can be changed at runtime",
+                    switchMonitor.ActiveCount == 1 &&
+                    switchMonitor.GetDiagnosticsText().IndexOf(oldRoot,
+                        StringComparison.OrdinalIgnoreCase) >= 0, ref failures);
+            }
+            try { Directory.Delete(switchRoot, true); } catch { }
+            try { Directory.Delete(oldRoot, true); } catch { }
+
+            string utfRoot = Path.Combine(Path.GetTempPath(),
+                "CodeXPetsUtf8BoundaryTest_" + Guid.NewGuid().ToString("N"));
+            string utfDay = Path.Combine(utfRoot, DateTime.Today.ToString("yyyy"),
+                DateTime.Today.ToString("MM"), DateTime.Today.ToString("dd"));
+            Directory.CreateDirectory(utfDay);
+            string utfFile = Path.Combine(utfDay, "rollout-utf8.jsonl");
+            string utfStart =
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"UTF8\"}}\n";
+            string utfMessagePrefix =
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"";
+            int bytesBeforeBoundary = Encoding.UTF8.GetByteCount(utfStart + utfMessagePrefix);
+            int asciiPadding = 65535 - (bytesBeforeBoundary % 65536);
+            string utfContent = utfStart + utfMessagePrefix + new string('a', asciiPadding) +
+                "猫跨块\"}}\n";
+            File.WriteAllBytes(utfFile, new UTF8Encoding(false).GetBytes(utfContent));
+            using (CodexSessionMonitor utfMonitor = new CodexSessionMonitor(utfRoot))
+            {
+                Check("UTF-8 character split across read buffers is preserved",
+                    utfMonitor.ActiveCount == 1 &&
+                    !String.IsNullOrEmpty(utfMonitor.PrimaryActiveTitle) &&
+                    utfMonitor.PrimaryActiveTitle.EndsWith("猫跨块", StringComparison.Ordinal),
+                    ref failures);
+                Check("partial JSON while tailing is not reported as a parse error",
+                    utfMonitor.GetDiagnosticsText().IndexOf("JSON 解析错误：0",
+                        StringComparison.Ordinal) >= 0, ref failures);
+            }
+            try { Directory.Delete(utfRoot, true); } catch { }
+
+            string startupRoot = Path.Combine(Path.GetTempPath(),
+                "CodeXPetsStartupActiveTest_" + Guid.NewGuid().ToString("N"));
+            string startupDay = Path.Combine(startupRoot, DateTime.Today.ToString("yyyy"),
+                DateTime.Today.ToString("MM"), DateTime.Today.ToString("dd"));
+            Directory.CreateDirectory(startupDay);
+            string startupFile = Path.Combine(startupDay, "rollout-startup-active.jsonl");
+            string recentTimestamp = DateTime.UtcNow.AddSeconds(-2).ToString("o");
+            File.WriteAllText(startupFile,
+                "{\"timestamp\":\"" + recentTimestamp + "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"STARTUP\"}}\n" +
+                "{\"timestamp\":\"" + recentTimestamp + "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Startup title\"}}\n",
+                Encoding.UTF8);
+            File.SetLastWriteTimeUtc(startupFile, DateTime.UtcNow.AddHours(-1));
+            using (CodexSessionMonitor startupMonitor = new CodexSessionMonitor(startupRoot))
+            {
+                startupMonitor.Poll();
+                Check("startup scan uses recent JSON event time when file time is frozen",
+                    startupMonitor.ActiveCount == 1 &&
+                    String.Equals(startupMonitor.PrimaryActiveTitle, "Startup title",
+                        StringComparison.Ordinal), ref failures);
+            }
+            try { Directory.Delete(startupRoot, true); } catch { }
+
+            string liveRoot = Path.Combine(Path.GetTempPath(),
+                "CodeXPetsLiveAppendTest_" + Guid.NewGuid().ToString("N"));
+            string liveDay = Path.Combine(liveRoot, DateTime.Today.ToString("yyyy"),
+                DateTime.Today.ToString("MM"), DateTime.Today.ToString("dd"));
+            Directory.CreateDirectory(liveDay);
+            string liveFile = Path.Combine(liveDay, "rollout-live-append.jsonl");
+            File.WriteAllText(liveFile, "{}\n", Encoding.UTF8);
+            DateTime frozenWriteUtc = DateTime.UtcNow.AddHours(-1);
+            File.SetLastWriteTimeUtc(liveFile, frozenWriteUtc);
+            using (CodexSessionMonitor liveMonitor = new CodexSessionMonitor(liveRoot))
+            {
+                File.AppendAllText(liveFile,
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"LIVE\"}}\n" +
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Live title\"}}\n",
+                    Encoding.UTF8);
+                // Reproduce Codex holding an open JSONL whose LastWriteTime does not
+                // advance even though its length and contents do.
+                File.SetLastWriteTimeUtc(liveFile, frozenWriteUtc);
+                liveMonitor.Poll();
+                Check("live append remains active when LastWriteTime is frozen",
+                    liveMonitor.ActiveCount == 1 &&
+                    String.Equals(liveMonitor.PrimaryActiveTitle, "Live title",
+                        StringComparison.Ordinal), ref failures);
+            }
+            try { Directory.Delete(liveRoot, true); } catch { }
+
+            DateTime staleNow = new DateTime(2026, 8, 2, 12, 0, 0, DateTimeKind.Utc);
+            Check("inactive turn is stale only when both turn and file are old",
+                CodexSessionMonitor.IsTurnStale(staleNow.AddMinutes(-11),
+                    staleNow.AddMinutes(-11), staleNow, 600) &&
+                !CodexSessionMonitor.IsTurnStale(staleNow.AddMinutes(-11),
+                    staleNow.AddMinutes(-1), staleNow, 600), ref failures);
+
+            CodeXPetsSettings normalizedSettings = CodeXPetsSettings.CreateDefault();
+            normalizedSettings.DockHoverHeight = 5;
+            normalizedSettings.DockIdleHideSeconds = -1;
+            normalizedSettings.DockRevealSeconds = 0;
+            normalizedSettings.Normalize();
+            Check("settings values are normalized safely",
+                normalizedSettings.DockHoverHeight == 40 &&
+                normalizedSettings.DockIdleHideSeconds == 0 &&
+                normalizedSettings.DockRevealSeconds == 1, ref failures);
 
             using (Bitmap idle = StatusIconFactory.CreateBitmap(64, ReminderState.Idle, 0))
             using (Bitmap busy = StatusIconFactory.CreateBitmap(64, ReminderState.Busy, 3))
@@ -123,6 +245,7 @@ namespace CodeXPets
                     ref failures);
 
             Check("all event voices embedded", CompletionVoice.HasEmbeddedVoice(), ref failures);
+            Check("release version metadata available", String.Equals(AppInfo.Version, "2.2.0", StringComparison.Ordinal), ref failures);
 
             PetPositionState savedDockPosition = new PetPositionState(DockEdge.Left,
                 @"\\.\DISPLAY2", 0.5D, 0.375D);
@@ -264,6 +387,73 @@ namespace CodeXPets
                     catWalkAmplitudeBalanced, ref failures);
             }
 
+            Check("latest task change controls the displayed state",
+                ReminderApplicationContext.SelectVisualState(1, true, false, ReminderState.Error) == ReminderState.Error &&
+                ReminderApplicationContext.SelectVisualState(1, false, true, ReminderState.Completed) == ReminderState.Completed &&
+                ReminderApplicationContext.SelectVisualState(1, false, false, ReminderState.Busy) == ReminderState.Busy &&
+                ReminderApplicationContext.SelectVisualState(1, false, false, ReminderState.Idle) == ReminderState.Busy &&
+                ReminderApplicationContext.SelectVisualState(0, false, false, ReminderState.Idle) == ReminderState.Idle,
+                ref failures);
+            Check("abnormal task text includes the failed task title",
+                String.Equals(ReminderApplicationContext.FormatAbnormalTaskText("构建安装包"),
+                    "任务失败：构建安装包", StringComparison.Ordinal) &&
+                String.Equals(ReminderApplicationContext.FormatAbnormalTaskText(null),
+                    "任务失败：未知任务", StringComparison.Ordinal), ref failures);
+            Check("animation redraw waits for an actual visual change",
+                DesktopAssistantForm.ShouldRenderAnimation(true, false, false, false) == false &&
+                DesktopAssistantForm.ShouldRenderAnimation(false, true, false, false) &&
+                DesktopAssistantForm.ShouldRenderAnimation(true, false, true, false) &&
+                DesktopAssistantForm.ShouldRenderAnimation(false, false, false, true), ref failures);
+            Check("expired latest notification falls back to remaining active work",
+                ReminderApplicationContext.SelectVisualState(1, false, false, ReminderState.Error) == ReminderState.Busy &&
+                ReminderApplicationContext.SelectVisualState(1, false, false, ReminderState.Completed) == ReminderState.Busy,
+                ref failures);
+
+            Check("busy state keeps its light bulb",
+                DesktopAssistantForm.ShouldShowLightBulb(ReminderState.Busy) &&
+                DesktopAssistantForm.ShouldShowLightBulb(ReminderState.Completed) &&
+                DesktopAssistantForm.ShouldShowLightBulb(ReminderState.Error) &&
+                !DesktopAssistantForm.ShouldShowLightBulb(ReminderState.Idle), ref failures);
+            Check("error notifications stay visible for at least ten seconds",
+                DesktopAssistantForm.GetCloudNotificationSeconds(ReminderState.Error, 1) == 10 &&
+                DesktopAssistantForm.GetCloudNotificationSeconds(ReminderState.Busy, 5) == 5 &&
+                DesktopAssistantForm.GetCloudNotificationSeconds(ReminderState.Error, 15) == 15,
+                ref failures);
+
+            Rectangle cloudSafetyTest = new Rectangle(10, 20, 300, 150);
+            RectangleF bulbContentBounds = DesktopAssistantForm.CalculateCloudContentBounds(
+                cloudSafetyTest, true, 190, 80);
+            RectangleF plainContentBounds = DesktopAssistantForm.CalculateCloudContentBounds(
+                cloudSafetyTest, false, 220, 80);
+            Check("title viewport stays inside cloud safe area",
+                bulbContentBounds.Left >= cloudSafetyTest.Left + cloudSafetyTest.Width * 0.30F &&
+                bulbContentBounds.Right <= cloudSafetyTest.Left + cloudSafetyTest.Width * 0.80F + 0.01F &&
+                bulbContentBounds.Top >= cloudSafetyTest.Top + cloudSafetyTest.Height * 0.31F &&
+                bulbContentBounds.Bottom <= cloudSafetyTest.Top + cloudSafetyTest.Height * 0.76F + 0.01F &&
+                plainContentBounds.Left >= cloudSafetyTest.Left + cloudSafetyTest.Width * 0.22F &&
+                plainContentBounds.Right <= cloudSafetyTest.Left + cloudSafetyTest.Width * 0.80F + 0.01F,
+                ref failures);
+            RectangleF centeredHeaderBounds = DesktopAssistantForm.CalculateCloudHeaderBounds(cloudSafetyTest);
+            Check("status header uses one centered safe region",
+                Math.Abs((centeredHeaderBounds.Left + centeredHeaderBounds.Width * 0.5F) -
+                    (cloudSafetyTest.Left + cloudSafetyTest.Width * 0.5F)) < 0.01F &&
+                centeredHeaderBounds.Left >= cloudSafetyTest.Left + cloudSafetyTest.Width * 0.20F &&
+                centeredHeaderBounds.Right <= cloudSafetyTest.Left + cloudSafetyTest.Width * 0.80F + 0.01F,
+                ref failures);
+
+            Check("busy header combines status and counters without a step label",
+                String.Equals(DesktopAssistantForm.FormatBusyHeader("1/2", 0, 2),
+                    "进行中(1/2)·会话(1/2)", StringComparison.Ordinal), ref failures);
+            Check("busy metadata distinguishes step progress from session position",
+                String.Equals(DesktopAssistantForm.FormatBusyMetadata("1/2", 0, 2),
+                    "(1/2)·会话(1/2)", StringComparison.Ordinal), ref failures);
+            Check("busy metadata omits unnecessary single-session counter",
+                String.Equals(DesktopAssistantForm.FormatBusyMetadata("1/3", 0, 1),
+                    "(1/3)", StringComparison.Ordinal), ref failures);
+            Check("busy metadata labels session counter even without a plan",
+                String.Equals(DesktopAssistantForm.FormatBusyMetadata(null, 1, 2),
+                    "会话(2/2)", StringComparison.Ordinal), ref failures);
+
             Rectangle snapArea = new Rectangle(100, 50, 1200, 800);
             Check("floating cat faces inward from the left side",
                 DesktopAssistantForm.ShouldMirrorFloatingSprite(
@@ -289,8 +479,23 @@ namespace CodeXPets
                 visibilityStart, visibilityStart.AddSeconds(9.9)), ref failures);
             Check("dock hides after ten seconds", !DesktopAssistantForm.ShouldKeepDockVisible(
                 visibilityStart, visibilityStart.AddSeconds(10.1)), ref failures);
+            Check("zero auto-hide timeout keeps dock visible",
+                DesktopAssistantForm.ShouldKeepDockVisible(visibilityStart,
+                    visibilityStart.AddHours(1), 0), ref failures);
 
             DateTime expiredDockTime = visibilityStart.AddSeconds(20);
+            Check("floating cloud remains visible while idle",
+                DesktopAssistantForm.ShouldShowThoughtBubble(false, ReminderState.Idle,
+                    expiredDockTime, DateTime.MinValue), ref failures);
+            Check("docked idle cloud remains hidden",
+                !DesktopAssistantForm.ShouldShowThoughtBubble(true, ReminderState.Idle,
+                    expiredDockTime, expiredDockTime.AddSeconds(5)), ref failures);
+            Check("docked task cloud respects its notification timeout",
+                DesktopAssistantForm.ShouldShowThoughtBubble(true, ReminderState.Busy,
+                    expiredDockTime, expiredDockTime.AddSeconds(5)) &&
+                !DesktopAssistantForm.ShouldShowThoughtBubble(true, ReminderState.Busy,
+                    expiredDockTime.AddSeconds(6), expiredDockTime.AddSeconds(5)), ref failures);
+
             Check("dragging keeps expired dock visible", DesktopAssistantForm.ShouldShowDock(
                 visibilityStart, expiredDockTime, true, false, DateTime.MinValue), ref failures);
             Check("hover keeps expired dock visible", DesktopAssistantForm.ShouldShowDock(
@@ -307,14 +512,19 @@ namespace CodeXPets
                 DockEdge.Right, snapArea, 400, 1F, true);
             Rectangle localHover = DesktopAssistantForm.GetDockHoverBounds(
                 DockEdge.Left, snapArea, 400, 1F, false);
-            Check("hidden left dock can be found along the full edge",
-                leftHover.Contains(101, 60) && leftHover.Contains(101, 840) &&
+            Check("hidden left dock uses a fixed-height local edge hotspot",
+                leftHover.Contains(101, 400) && !leftHover.Contains(101, 300) &&
                 !leftHover.Contains(200, 400), ref failures);
-            Check("hidden right dock can be found along the full edge",
-                rightHover.Contains(1299, 60) && rightHover.Contains(1299, 840) &&
+            Check("hidden right dock uses a fixed-height local edge hotspot",
+                rightHover.Contains(1299, 400) && !rightHover.Contains(1299, 500) &&
                 !rightHover.Contains(1200, 400), ref failures);
             Check("visible dock hover zone stays near the pet",
-                localHover.Contains(101, 400) && !localHover.Contains(101, 100), ref failures);
+                localHover.Contains(101, 400) && !localHover.Contains(101, 300), ref failures);
+            Rectangle customHover = DesktopAssistantForm.GetDockHoverBounds(
+                DockEdge.Left, snapArea, 400, 1F, true, 240);
+            Check("configured dock hover height is respected",
+                customHover.Height == 240 && customHover.Contains(101, 510) &&
+                !customHover.Contains(101, 530), ref failures);
 
             Check("dock expression performs quick double blink",
                 DesktopAssistantForm.SelectDockExpression(ReminderState.Busy, 11) == 1 &&
@@ -340,6 +550,24 @@ namespace CodeXPets
                 assistantLoads = false;
             }
             Check("fixed cat assistant loads", assistantLoads, ref failures);
+
+            bool utilityDialogsLoad = true;
+            try
+            {
+                CodeXPetsSettings testSettings = CodeXPetsSettings.CreateDefault();
+                using (CodeXPetsSettingsForm settingsForm = new CodeXPetsSettingsForm(testSettings))
+                    utilityDialogsLoad = settingsForm.Result != null;
+                using (CodeXPetsDiagnosticsForm diagnosticsForm =
+                    new CodeXPetsDiagnosticsForm(monitor, testSettings))
+                    utilityDialogsLoad = utilityDialogsLoad &&
+                        diagnosticsForm.Text.IndexOf("2.2.0", StringComparison.Ordinal) >= 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Utility dialog integration error: " + ex.Message);
+                utilityDialogsLoad = false;
+            }
+            Check("settings and diagnostics dialogs load", utilityDialogsLoad, ref failures);
 
             monitor.Dispose();
 

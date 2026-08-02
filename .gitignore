@@ -6,6 +6,7 @@
 # Runtime diagnostics and generated previews
 startup-error.txt
 preview/
+dist/
 
 # IDE and editor files
 .vs/

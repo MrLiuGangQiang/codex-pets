@@ -166,6 +166,155 @@ namespace CodeXPets
         }
     }
 
+    internal static class AppInfo
+    {
+        public const string ProductName = "CodeXPets";
+        public const string Repository = "https://github.com/MrLiuGangQiang/codex-pets";
+
+        public static string Version
+        {
+            get
+            {
+                Version version = Assembly.GetExecutingAssembly().GetName().Version;
+                return version == null ? "未知版本" : version.ToString(3);
+            }
+        }
+
+        public static string DisplayName
+        {
+            get { return ProductName + " v" + Version; }
+        }
+    }
+
+    internal sealed class CodeXPetsSettings
+    {
+        private const string SettingsKeyPath = @"Software\CodeXPets";
+        private const string HoverHeightValueName = "DockHoverHeight";
+        private const string IdleHideValueName = "DockIdleHideSeconds";
+        private const string RevealValueName = "DockRevealSeconds";
+        private const string NotificationValueName = "DockNotificationSeconds";
+        private const string SoundValueName = "SoundEnabled";
+        private const string SessionsRootValueName = "SessionsRoot";
+
+        public int DockHoverHeight { get; set; }
+        public int DockIdleHideSeconds { get; set; }
+        public int DockRevealSeconds { get; set; }
+        public int DockNotificationSeconds { get; set; }
+        public bool SoundEnabled { get; set; }
+        public string SessionsRoot { get; set; }
+
+        public static CodeXPetsSettings CreateDefault()
+        {
+            return new CodeXPetsSettings
+            {
+                DockHoverHeight = 160,
+                DockIdleHideSeconds = 10,
+                DockRevealSeconds = 3,
+                DockNotificationSeconds = 5,
+                SoundEnabled = true,
+                SessionsRoot = CodexSessionMonitor.GetDefaultSessionsRoot()
+            };
+        }
+
+        public static CodeXPetsSettings Load()
+        {
+            CodeXPetsSettings result = CreateDefault();
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(SettingsKeyPath, false))
+                {
+                    if (key != null)
+                    {
+                        result.DockHoverHeight = ReadInt(key, HoverHeightValueName,
+                            result.DockHoverHeight);
+                        result.DockIdleHideSeconds = ReadInt(key, IdleHideValueName,
+                            result.DockIdleHideSeconds);
+                        result.DockRevealSeconds = ReadInt(key, RevealValueName,
+                            result.DockRevealSeconds);
+                        result.DockNotificationSeconds = ReadInt(key, NotificationValueName,
+                            result.DockNotificationSeconds);
+                        result.SoundEnabled = ReadInt(key, SoundValueName,
+                            result.SoundEnabled ? 1 : 0) != 0;
+                        string root = key.GetValue(SessionsRootValueName) as string;
+                        if (!String.IsNullOrWhiteSpace(root)) result.SessionsRoot = root;
+                    }
+                }
+            }
+            catch { }
+            result.Normalize();
+            return result;
+        }
+
+        public CodeXPetsSettings Clone()
+        {
+            CodeXPetsSettings copy = new CodeXPetsSettings();
+            copy.CopyFrom(this);
+            return copy;
+        }
+
+        public void CopyFrom(CodeXPetsSettings other)
+        {
+            if (other == null) return;
+            DockHoverHeight = other.DockHoverHeight;
+            DockIdleHideSeconds = other.DockIdleHideSeconds;
+            DockRevealSeconds = other.DockRevealSeconds;
+            DockNotificationSeconds = other.DockNotificationSeconds;
+            SoundEnabled = other.SoundEnabled;
+            SessionsRoot = other.SessionsRoot;
+            Normalize();
+        }
+
+        public void Normalize()
+        {
+            DockHoverHeight = Math.Max(40, Math.Min(1000, DockHoverHeight));
+            DockIdleHideSeconds = Math.Max(0, Math.Min(3600, DockIdleHideSeconds));
+            DockRevealSeconds = Math.Max(1, Math.Min(60, DockRevealSeconds));
+            DockNotificationSeconds = Math.Max(1, Math.Min(120, DockNotificationSeconds));
+            SessionsRoot = NormalizePath(SessionsRoot);
+        }
+
+        public void Save()
+        {
+            Normalize();
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(SettingsKeyPath))
+                {
+                    if (key == null) return;
+                    key.SetValue(HoverHeightValueName, DockHoverHeight, RegistryValueKind.DWord);
+                    key.SetValue(IdleHideValueName, DockIdleHideSeconds, RegistryValueKind.DWord);
+                    key.SetValue(RevealValueName, DockRevealSeconds, RegistryValueKind.DWord);
+                    key.SetValue(NotificationValueName, DockNotificationSeconds, RegistryValueKind.DWord);
+                    key.SetValue(SoundValueName, SoundEnabled ? 1 : 0, RegistryValueKind.DWord);
+                    key.SetValue(SessionsRootValueName, SessionsRoot ?? String.Empty,
+                        RegistryValueKind.String);
+                }
+            }
+            catch { }
+        }
+
+        private static int ReadInt(RegistryKey key, string valueName, int fallback)
+        {
+            try
+            {
+                object value = key.GetValue(valueName);
+                return value == null ? fallback : Convert.ToInt32(value, CultureInfo.InvariantCulture);
+            }
+            catch { return fallback; }
+        }
+
+        private static string NormalizePath(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path)) return CodexSessionMonitor.GetDefaultSessionsRoot();
+            try
+            {
+                string expanded = Environment.ExpandEnvironmentVariables(path.Trim());
+                return Path.GetFullPath(expanded);
+            }
+            catch { return CodexSessionMonitor.GetDefaultSessionsRoot(); }
+        }
+    }
+
     internal sealed class ReminderApplicationContext : ApplicationContext
     {
         private readonly NotifyIcon trayIcon;
@@ -181,7 +330,8 @@ namespace CodeXPets
         private readonly ToolStripMenuItem startupItem;
         private readonly DesktopAssistantForm assistant;
         private readonly ToolStripMenuItem assistantItem;
-        private bool soundEnabled = true;
+        private readonly CodeXPetsSettings appSettings;
+        private bool soundEnabled;
         private int animationFrame;
         private int petAnimationTick;
         private ReminderState lastVisualState = (ReminderState)(-1);
@@ -191,11 +341,18 @@ namespace CodeXPets
         private string lastStatusText = "";
         private DateTime completedUntilUtc = DateTime.MinValue;
         private DateTime abnormalUntilUtc = DateTime.MinValue;
+        // The most recent task-related change owns the visual state until it expires.
+        private ReminderState latestChangedState = ReminderState.Idle;
+        private string latestChangedSourcePath;
+        private DateTime lastVisualRefreshUtc = DateTime.MinValue;
         private bool showNewestTaskOnNextRefresh;
         private bool disposed;
 
         public ReminderApplicationContext()
         {
+            appSettings = CodeXPetsSettings.Load();
+            soundEnabled = appSettings.SoundEnabled;
+
             idleIcon = StatusIconFactory.CreateIcon(64, ReminderState.Idle, 0);
             completedIcon = StatusIconFactory.CreateIcon(64, ReminderState.Completed, 0);
             errorIcon = StatusIconFactory.CreateIcon(64, ReminderState.Error, 0);
@@ -203,12 +360,17 @@ namespace CodeXPets
             for (int i = 0; i < busyIcons.Length; i++)
                 busyIcons[i] = StatusIconFactory.CreateIcon(64, ReminderState.Busy, i);
 
-            statusItem = new ToolStripMenuItem("状态：正在检查 codex…");
+            statusItem = new ToolStripMenuItem("状态：正在检查 Codex…");
             statusItem.Enabled = false;
             soundItem = new ToolStripMenuItem("播放语音提醒");
-            soundItem.Checked = true;
+            soundItem.Checked = soundEnabled;
             soundItem.CheckOnClick = true;
-            soundItem.Click += delegate { soundEnabled = soundItem.Checked; };
+            soundItem.Click += delegate
+            {
+                soundEnabled = soundItem.Checked;
+                appSettings.SoundEnabled = soundEnabled;
+                appSettings.Save();
+            };
 
             startupItem = new ToolStripMenuItem("开机自动运行");
             StartupManager.MigrateLegacyEntry();
@@ -220,19 +382,19 @@ namespace CodeXPets
                 catch (Exception ex)
                 {
                     startupItem.Checked = StartupManager.IsEnabled();
-                    MessageBox.Show("设置开机启动失败：\r\n" + ex.Message, "CodeXPets",
+                    MessageBox.Show("设置开机启动失败：\r\n" + ex.Message, AppInfo.ProductName,
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             };
 
-            ToolStripMenuItem openFolderItem = new ToolStripMenuItem("打开 codex 会话目录");
-            openFolderItem.Click += delegate
-            {
-                string folder = CodexSessionMonitor.GetDefaultSessionsRoot();
-                if (Directory.Exists(folder)) Process.Start("explorer.exe", "\"" + folder + "\"");
-                else MessageBox.Show("还没有找到 codex 会话目录：\r\n" + folder,
-                    "CodeXPets", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            };
+            ToolStripMenuItem openFolderItem = new ToolStripMenuItem("打开 Codex 会话目录");
+            openFolderItem.Click += delegate { OpenSessionsFolder(); };
+            ToolStripMenuItem settingsItem = new ToolStripMenuItem("设置…");
+            settingsItem.Click += delegate { ShowSettings(); };
+            ToolStripMenuItem diagnosticsItem = new ToolStripMenuItem("诊断信息…");
+            diagnosticsItem.Click += delegate { ShowDiagnostics(); };
+            ToolStripMenuItem updateItem = new ToolStripMenuItem("查看更新…");
+            updateItem.Click += delegate { OpenLatestRelease(); };
             ToolStripMenuItem exitItem = new ToolStripMenuItem("退出");
             exitItem.Click += delegate { ExitThread(); };
 
@@ -242,6 +404,9 @@ namespace CodeXPets
             menu.Items.Add(soundItem);
             menu.Items.Add(startupItem);
             menu.Items.Add(openFolderItem);
+            menu.Items.Add(settingsItem);
+            menu.Items.Add(diagnosticsItem);
+            menu.Items.Add(updateItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
 
@@ -251,7 +416,7 @@ namespace CodeXPets
             trayIcon.ContextMenuStrip = menu;
             trayIcon.Visible = true;
 
-            assistant = new DesktopAssistantForm(menu);
+            assistant = new DesktopAssistantForm(menu, true, appSettings);
             assistantItem = new ToolStripMenuItem("显示桌面助手");
             assistantItem.Checked = true;
             assistantItem.CheckOnClick = true;
@@ -264,7 +429,7 @@ namespace CodeXPets
 
             assistant.ShowInactive();
 
-            monitor = new CodexSessionMonitor();
+            monitor = new CodexSessionMonitor(appSettings.SessionsRoot);
             monitor.TaskStarted += OnTaskStarted;
             monitor.TaskCompleted += OnTaskCompleted;
             monitor.TaskAborted += OnTaskAborted;
@@ -275,37 +440,103 @@ namespace CodeXPets
             timer.Start();
 
             animationTimer = new System.Windows.Forms.Timer();
-            // A television-subtitle style scroll needs a short render cadence.
-            // Movement itself is elapsed-time based, so timer jitter cannot alter speed.
-            animationTimer.Interval = 16;
+            // 30 FPS is smooth enough for the small sprite and scrolling text,
+            // while substantially reducing idle wake-ups compared with 60 FPS.
+            animationTimer.Interval = 33;
             animationTimer.Tick += OnAnimationTick;
             animationTimer.Start();
             RefreshVisual(true);
         }
 
+        private void OpenSessionsFolder()
+        {
+            string folder = appSettings.SessionsRoot;
+            if (Directory.Exists(folder))
+                Process.Start("explorer.exe", "\"" + folder + "\"");
+            else
+                MessageBox.Show("还没有找到 Codex 会话目录：\r\n" + folder,
+                    AppInfo.ProductName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void ShowSettings()
+        {
+            using (CodeXPetsSettingsForm dialog = new CodeXPetsSettingsForm(appSettings))
+            {
+                if (dialog.ShowDialog() != DialogResult.OK) return;
+                string previousRoot = appSettings.SessionsRoot;
+                appSettings.CopyFrom(dialog.Result);
+                appSettings.Save();
+                soundEnabled = appSettings.SoundEnabled;
+                soundItem.Checked = soundEnabled;
+                assistant.ApplySettings();
+                if (!String.Equals(previousRoot, appSettings.SessionsRoot,
+                    StringComparison.OrdinalIgnoreCase))
+                    monitor.SetSessionsRoot(appSettings.SessionsRoot);
+                RefreshVisual(true);
+            }
+        }
+
+        private void ShowDiagnostics()
+        {
+            using (CodeXPetsDiagnosticsForm dialog =
+                new CodeXPetsDiagnosticsForm(monitor, appSettings))
+                dialog.ShowDialog();
+        }
+
+        private static void OpenLatestRelease()
+        {
+            try { Process.Start(AppInfo.Repository + "/releases/latest"); }
+            catch (Exception ex)
+            {
+                MessageBox.Show("无法打开更新页面：\r\n" + ex.Message, AppInfo.ProductName,
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
         private void OnTaskStarted(object sender, EventArgs e)
         {
-            completedUntilUtc = DateTime.MinValue;
-            abnormalUntilUtc = DateTime.MinValue;
-            RevealAssistant();
-            if (soundEnabled) CompletionVoice.QueueStart();
+            RecordLatestTaskChange(ReminderState.Busy);
+            latestChangedSourcePath = monitor.LastEventFile;
             showNewestTaskOnNextRefresh = true;
+            RevealAssistant();
+            RefreshVisual(true);
+            if (soundEnabled) CompletionVoice.QueueStart();
         }
 
         private void OnTaskCompleted(object sender, EventArgs e)
         {
-            DateTime hideAt = DateTime.UtcNow.AddSeconds(5);
-            completedUntilUtc = hideAt;
+            RecordLatestTaskChange(ReminderState.Completed);
             RevealAssistant();
+            RefreshVisual(true);
             if (soundEnabled) CompletionVoice.QueueComplete();
         }
 
         private void OnTaskAborted(object sender, EventArgs e)
         {
-            DateTime hideAt = DateTime.UtcNow.AddSeconds(10);
-            abnormalUntilUtc = hideAt;
+            RecordLatestTaskChange(ReminderState.Error);
             RevealAssistant();
+            RefreshVisual(true);
             if (soundEnabled) CompletionVoice.QueueError();
+        }
+
+        private void RecordLatestTaskChange(ReminderState state)
+        {
+            latestChangedState = state;
+            if (state == ReminderState.Busy)
+            {
+                completedUntilUtc = DateTime.MinValue;
+                abnormalUntilUtc = DateTime.MinValue;
+            }
+            else if (state == ReminderState.Completed)
+            {
+                completedUntilUtc = DateTime.UtcNow.AddSeconds(5);
+                abnormalUntilUtc = DateTime.MinValue;
+            }
+            else if (state == ReminderState.Error)
+            {
+                abnormalUntilUtc = DateTime.UtcNow.AddSeconds(10);
+                completedUntilUtc = DateTime.MinValue;
+            }
         }
 
         private void RevealAssistant()
@@ -315,19 +546,27 @@ namespace CodeXPets
 
         private void OnStateChanged(object sender, EventArgs e)
         {
+            // A plan update is also a fresh activity change, so it takes the visual
+            // focus back from an older completion or error notification.
+            if (String.Equals(monitor.LastEventType, "update_plan", StringComparison.Ordinal))
+            {
+                RecordLatestTaskChange(ReminderState.Busy);
+                latestChangedSourcePath = monitor.LastEventFile;
+            }
             RefreshVisual(true);
         }
         private void OnPollTick(object sender, EventArgs e)
         {
-            try { monitor.Poll(); } catch { }
+            try { monitor.Poll(); }
+            catch (Exception ex) { monitor.ReportUnexpectedError("轮询会话", ex); }
         }
         private void OnAnimationTick(object sender, EventArgs e)
         {
             long timestamp = animationClock.ElapsedTicks;
-            float elapsedSeconds = lastAnimationTimestamp == 0 ? 0.016F :
+            float elapsedSeconds = lastAnimationTimestamp == 0 ? 0.033F :
                 (float)((timestamp - lastAnimationTimestamp) / (double)Stopwatch.Frequency);
             lastAnimationTimestamp = timestamp;
-            elapsedSeconds = Math.Max(0.001F, Math.Min(0.050F, elapsedSeconds));
+            elapsedSeconds = Math.Max(0.001F, Math.Min(0.100F, elapsedSeconds));
 
             spriteAnimationSeconds += elapsedSeconds;
             while (spriteAnimationSeconds >= 0.12)
@@ -337,17 +576,26 @@ namespace CodeXPets
                 petAnimationTick = (petAnimationTick + 1) % 6400;
             }
             assistant.Animate(petAnimationTick, elapsedSeconds);
-            RefreshVisual(false);
+
+            DateTime now = DateTime.UtcNow;
+            double refreshMilliseconds = monitor.ActiveCount > 0 ? 120D : 250D;
+            if (lastVisualRefreshUtc == DateTime.MinValue ||
+                (now - lastVisualRefreshUtc).TotalMilliseconds >= refreshMilliseconds)
+                RefreshVisual(false);
         }
         private void RefreshVisual(bool forceText)
         {
             int active = monitor.ActiveCount;
             DateTime now = DateTime.UtcNow;
+            if (abnormalUntilUtc != DateTime.MinValue && now >= abnormalUntilUtc)
+                abnormalUntilUtc = DateTime.MinValue;
+            if (completedUntilUtc != DateTime.MinValue && now >= completedUntilUtc)
+                completedUntilUtc = DateTime.MinValue;
+            lastVisualRefreshUtc = now;
             bool abnormalRecently = now < abnormalUntilUtc;
             bool completedRecently = now < completedUntilUtc;
-            ReminderState visualState = abnormalRecently ? ReminderState.Error
-                : completedRecently ? ReminderState.Completed
-                : active > 0 ? ReminderState.Busy : ReminderState.Idle;
+            ReminderState visualState = SelectVisualState(active, abnormalRecently,
+                completedRecently, latestChangedState);
             if (visualState != lastVisualState)
             {
                 petAnimationTick = 0;
@@ -359,36 +607,44 @@ namespace CodeXPets
             if (!Object.ReferenceEquals(trayIcon.Icon, currentIcon))
                 trayIcon.Icon = currentIcon;
             string stateText;
-            if (abnormalRecently) stateText = "异常";
-            else if (active > 0)
+            if (visualState == ReminderState.Busy)
             {
                 int completedSteps = monitor.CompletedPlanStepCount;
                 int totalSteps = monitor.TotalPlanStepCount;
-                stateText = active == 1 ? "进行中" : "进行中（" + active + " 个任务）";
+                stateText = active == 1 ? "进行中" : "进行中（" + active + " 个会话）";
                 if (active == 1 && totalSteps > 0)
-                    stateText += " · Tasks " + completedSteps + "/" + totalSteps;
+                    stateText += " · 步骤 " + completedSteps + "/" + totalSteps;
             }
+            else if (visualState == ReminderState.Error) stateText = "异常";
+            else if (visualState == ReminderState.Completed) stateText = "已完成";
             else stateText = "空闲";
-            string thoughtText = abnormalRecently ? "任务被中断了" :
-                completedRecently ? "任务完成啦！" :
-                active > 0 ? (String.IsNullOrEmpty(monitor.PrimaryActiveTitle) ? "正在认真处理你的任务…" : monitor.PrimaryActiveTitle) :
-                "等你交给我下一个任务";
+            string thoughtText = visualState == ReminderState.Error ? "任务异常了"
+                : visualState == ReminderState.Completed ? "任务完成啦！"
+                : visualState == ReminderState.Busy
+                    ? (String.IsNullOrEmpty(monitor.PrimaryActiveTitle)
+                        ? "正在认真处理你的任务…" : monitor.PrimaryActiveTitle)
+                    : "等你交给我下一个任务";
             if (assistantItem.Checked)
             {
                 if (!assistant.Visible) assistant.ShowInactive();
                 IList<string> displayedTitles;
                 IList<string> displayedProgress = null;
-                if (abnormalRecently && !String.IsNullOrEmpty(monitor.LastAbortedTitle))
-                    displayedTitles = new[] { monitor.LastAbortedTitle };
-                else if (completedRecently && !String.IsNullOrEmpty(monitor.LastCompletedTitle))
+                if (visualState == ReminderState.Error)
+                    displayedTitles = new[] { FormatAbnormalTaskText(monitor.LastAbortedTitle) };
+                else if (visualState == ReminderState.Completed &&
+                    !String.IsNullOrEmpty(monitor.LastCompletedTitle))
                     displayedTitles = new[] { monitor.LastCompletedTitle };
-                else
+                else if (active > 0)
                 {
                     displayedTitles = monitor.ActiveTitles;
                     displayedProgress = monitor.ActivePlanProgressLabels;
                 }
+                else displayedTitles = monitor.ActiveTitles;
                 bool selectNewestTask = showNewestTaskOnNextRefresh && visualState == ReminderState.Busy;
-                assistant.UpdateStatus(stateText, thoughtText, visualState, displayedTitles, displayedProgress, selectNewestTask);
+                int preferredTaskIndex = visualState == ReminderState.Busy
+                    ? monitor.GetActiveTitleIndex(latestChangedSourcePath) : -1;
+                assistant.UpdateStatus(stateText, thoughtText, visualState, displayedTitles,
+                    displayedProgress, selectNewestTask, preferredTaskIndex);
                 if (selectNewestTask) showNewestTaskOnNextRefresh = false;
             }
             if (forceText || stateText != lastStatusText)
@@ -398,6 +654,25 @@ namespace CodeXPets
                 lastStatusText = stateText;
             }
         }
+        internal static string FormatAbnormalTaskText(string title)
+        {
+            return "任务失败：" + (String.IsNullOrWhiteSpace(title) ? "未知任务" : title.Trim());
+        }
+
+        internal static ReminderState SelectVisualState(int activeCount,
+            bool abnormalRecently, bool completedRecently, ReminderState latestChangedState)
+        {
+            // The most recently changed task owns the status. Once its notification
+            // expires, fall back to any work that is still active.
+            if (latestChangedState == ReminderState.Error && abnormalRecently)
+                return ReminderState.Error;
+            if (latestChangedState == ReminderState.Completed && completedRecently)
+                return ReminderState.Completed;
+            if (latestChangedState == ReminderState.Busy && activeCount > 0)
+                return ReminderState.Busy;
+            return activeCount > 0 ? ReminderState.Busy : ReminderState.Idle;
+        }
+
         private void SetTooltip(string text)
         {
             if (text.Length > 63) text = text.Substring(0, 63);
@@ -436,6 +711,253 @@ namespace CodeXPets
         }
     }
 
+    internal sealed class CodeXPetsSettingsForm : Form
+    {
+        private readonly NumericUpDown hoverHeightBox;
+        private readonly NumericUpDown idleHideBox;
+        private readonly NumericUpDown revealBox;
+        private readonly NumericUpDown notificationBox;
+        private readonly CheckBox soundBox;
+        private readonly TextBox sessionsRootBox;
+
+        public CodeXPetsSettings Result { get; private set; }
+
+        public CodeXPetsSettingsForm(CodeXPetsSettings current)
+        {
+            Result = (current ?? CodeXPetsSettings.CreateDefault()).Clone();
+            Text = AppInfo.DisplayName + " 设置";
+            StartPosition = FormStartPosition.CenterScreen;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            ClientSize = new Size(560, 355);
+            Font = SystemFonts.MessageBoxFont;
+
+            hoverHeightBox = CreateNumberBox(40, 1000, 10);
+            idleHideBox = CreateNumberBox(0, 3600, 1);
+            revealBox = CreateNumberBox(1, 60, 1);
+            notificationBox = CreateNumberBox(1, 120, 1);
+            soundBox = new CheckBox { AutoSize = true, Text = "播放开始、完成和异常语音提醒" };
+            sessionsRootBox = new TextBox { Dock = DockStyle.Fill };
+
+            TableLayoutPanel table = new TableLayoutPanel();
+            table.Dock = DockStyle.Fill;
+            table.Padding = new Padding(14);
+            table.ColumnCount = 2;
+            table.RowCount = 8;
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160F));
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            for (int row = 0; row < 6; row++)
+                table.RowStyles.Add(new RowStyle(SizeType.Absolute, 38F));
+            table.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
+            Controls.Add(table);
+
+            AddSettingRow(table, 0, "边缘触发区高度：", hoverHeightBox);
+            AddSettingRow(table, 1, "吸附自动隐藏（秒）：", idleHideBox);
+            AddSettingRow(table, 2, "鼠标唤出保持（秒）：", revealBox);
+            AddSettingRow(table, 3, "任务云朵保持（秒）：", notificationBox);
+            AddSettingRow(table, 4, "声音：", soundBox);
+
+            FlowLayoutPanel folderPanel = new FlowLayoutPanel();
+            folderPanel.Dock = DockStyle.Fill;
+            folderPanel.FlowDirection = FlowDirection.LeftToRight;
+            folderPanel.WrapContents = false;
+            folderPanel.Margin = new Padding(0);
+            sessionsRootBox.Width = 300;
+            Button browseButton = new Button { Text = "浏览…", AutoSize = true };
+            browseButton.Click += BrowseSessionsRoot;
+            folderPanel.Controls.Add(sessionsRootBox);
+            folderPanel.Controls.Add(browseButton);
+            AddSettingRow(table, 5, "Codex 会话目录：", folderPanel);
+
+            Label note = new Label();
+            note.AutoSize = true;
+            note.MaximumSize = new Size(500, 0);
+            note.Text = @"自动隐藏设为 0 表示吸附后始终显示。会话目录修改后会立即重新扫描；默认目录为 %USERPROFILE%\.codex\sessions。";
+            note.ForeColor = SystemColors.GrayText;
+            note.Margin = new Padding(3, 8, 3, 3);
+            table.Controls.Add(note, 0, 6);
+            table.SetColumnSpan(note, 2);
+
+            FlowLayoutPanel buttons = new FlowLayoutPanel();
+            buttons.Dock = DockStyle.Fill;
+            buttons.FlowDirection = FlowDirection.RightToLeft;
+            buttons.WrapContents = false;
+            Button okButton = new Button { Text = "确定", AutoSize = true };
+            Button cancelButton = new Button { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
+            Button defaultsButton = new Button { Text = "恢复默认", AutoSize = true };
+            okButton.Click += SaveAndClose;
+            defaultsButton.Click += delegate { SetValues(CodeXPetsSettings.CreateDefault()); };
+            buttons.Controls.Add(okButton);
+            buttons.Controls.Add(cancelButton);
+            buttons.Controls.Add(defaultsButton);
+            table.Controls.Add(buttons, 0, 7);
+            table.SetColumnSpan(buttons, 2);
+            AcceptButton = okButton;
+            CancelButton = cancelButton;
+
+            SetValues(Result);
+        }
+
+        private static NumericUpDown CreateNumberBox(int minimum, int maximum, int increment)
+        {
+            return new NumericUpDown
+            {
+                Minimum = minimum,
+                Maximum = maximum,
+                Increment = increment,
+                Width = 120,
+                ThousandsSeparator = true
+            };
+        }
+
+        private static void AddSettingRow(TableLayoutPanel table, int row, string labelText,
+            Control control)
+        {
+            Label label = new Label();
+            label.Text = labelText;
+            label.TextAlign = ContentAlignment.MiddleRight;
+            label.Dock = DockStyle.Fill;
+            control.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            table.Controls.Add(label, 0, row);
+            table.Controls.Add(control, 1, row);
+        }
+
+        private void SetValues(CodeXPetsSettings values)
+        {
+            CodeXPetsSettings normalized = values.Clone();
+            normalized.Normalize();
+            hoverHeightBox.Value = normalized.DockHoverHeight;
+            idleHideBox.Value = normalized.DockIdleHideSeconds;
+            revealBox.Value = normalized.DockRevealSeconds;
+            notificationBox.Value = normalized.DockNotificationSeconds;
+            soundBox.Checked = normalized.SoundEnabled;
+            sessionsRootBox.Text = normalized.SessionsRoot;
+        }
+
+        private void BrowseSessionsRoot(object sender, EventArgs e)
+        {
+            using (FolderBrowserDialog dialog = new FolderBrowserDialog())
+            {
+                dialog.Description = "选择 Codex sessions 目录";
+                if (Directory.Exists(sessionsRootBox.Text))
+                    dialog.SelectedPath = sessionsRootBox.Text;
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                    sessionsRootBox.Text = dialog.SelectedPath;
+            }
+        }
+
+        private void SaveAndClose(object sender, EventArgs e)
+        {
+            Result.DockHoverHeight = Decimal.ToInt32(hoverHeightBox.Value);
+            Result.DockIdleHideSeconds = Decimal.ToInt32(idleHideBox.Value);
+            Result.DockRevealSeconds = Decimal.ToInt32(revealBox.Value);
+            Result.DockNotificationSeconds = Decimal.ToInt32(notificationBox.Value);
+            Result.SoundEnabled = soundBox.Checked;
+            Result.SessionsRoot = sessionsRootBox.Text;
+            Result.Normalize();
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+    }
+
+    internal sealed class CodeXPetsDiagnosticsForm : Form
+    {
+        private readonly CodexSessionMonitor monitor;
+        private readonly CodeXPetsSettings settings;
+        private readonly TextBox diagnosticsBox;
+        private readonly System.Windows.Forms.Timer refreshTimer;
+
+        public CodeXPetsDiagnosticsForm(CodexSessionMonitor sessionMonitor,
+            CodeXPetsSettings currentSettings)
+        {
+            monitor = sessionMonitor;
+            settings = currentSettings;
+            Text = AppInfo.DisplayName + " 诊断信息";
+            StartPosition = FormStartPosition.CenterScreen;
+            FormBorderStyle = FormBorderStyle.Sizable;
+            ShowInTaskbar = false;
+            MinimizeBox = false;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            ClientSize = new Size(700, 470);
+            Font = SystemFonts.MessageBoxFont;
+
+            diagnosticsBox = new TextBox();
+            diagnosticsBox.Dock = DockStyle.Fill;
+            diagnosticsBox.Multiline = true;
+            diagnosticsBox.ReadOnly = true;
+            diagnosticsBox.ScrollBars = ScrollBars.Both;
+            diagnosticsBox.WordWrap = false;
+            diagnosticsBox.Font = new Font("Consolas", 9F);
+            Controls.Add(diagnosticsBox);
+
+            FlowLayoutPanel buttons = new FlowLayoutPanel();
+            buttons.Dock = DockStyle.Bottom;
+            buttons.Height = 44;
+            buttons.Padding = new Padding(6);
+            buttons.FlowDirection = FlowDirection.RightToLeft;
+            Button closeButton = new Button { Text = "关闭", AutoSize = true, DialogResult = DialogResult.OK };
+            Button copyButton = new Button { Text = "复制", AutoSize = true };
+            Button refreshButton = new Button { Text = "刷新", AutoSize = true };
+            Button openButton = new Button { Text = "打开会话目录", AutoSize = true };
+            copyButton.Click += delegate
+            {
+                try { if (!String.IsNullOrEmpty(diagnosticsBox.Text)) Clipboard.SetText(diagnosticsBox.Text); }
+                catch { }
+            };
+            refreshButton.Click += delegate { RefreshDiagnostics(); };
+            openButton.Click += delegate
+            {
+                if (Directory.Exists(settings.SessionsRoot))
+                    Process.Start("explorer.exe", "\"" + settings.SessionsRoot + "\"");
+            };
+            buttons.Controls.Add(closeButton);
+            buttons.Controls.Add(copyButton);
+            buttons.Controls.Add(refreshButton);
+            buttons.Controls.Add(openButton);
+            Controls.Add(buttons);
+            AcceptButton = closeButton;
+
+            refreshTimer = new System.Windows.Forms.Timer();
+            refreshTimer.Interval = 1000;
+            refreshTimer.Tick += delegate { RefreshDiagnostics(); };
+            refreshTimer.Start();
+            RefreshDiagnostics();
+        }
+
+        private void RefreshDiagnostics()
+        {
+            StringBuilder builder = new StringBuilder();
+            builder.AppendLine(AppInfo.DisplayName);
+            builder.AppendLine("运行目录：" + AppDomain.CurrentDomain.BaseDirectory);
+            builder.AppendLine("操作系统：" + Environment.OSVersion);
+            builder.AppendLine("CLR：" + Environment.Version);
+            builder.AppendLine("声音提醒：" + (settings.SoundEnabled ? "开启" : "关闭"));
+            builder.AppendLine("触发区高度：" + settings.DockHoverHeight + " px");
+            builder.AppendLine("自动隐藏：" + (settings.DockIdleHideSeconds <= 0
+                ? "关闭" : settings.DockIdleHideSeconds + " 秒"));
+            builder.AppendLine();
+            builder.Append(monitor.GetDiagnosticsText());
+            diagnosticsBox.Text = builder.ToString();
+            diagnosticsBox.SelectionStart = 0;
+            diagnosticsBox.SelectionLength = 0;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (refreshTimer != null) refreshTimer.Dispose();
+                if (diagnosticsBox != null && diagnosticsBox.Font != null)
+                    diagnosticsBox.Font.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+    }
+
     internal sealed class DesktopAssistantForm : Form
     {
         private const string SpriteResource = "white-cat-spritesheet.png";
@@ -461,9 +983,8 @@ namespace CodeXPets
         private const int HtClient = 1;
         private const int HtTransparent = -1;
         private const float SpriteScale = 1.35F;
-        private const float DockNotificationSeconds = 5F;
-        private const float DockIdleHideSeconds = 10F;
-        private const float DockHoverRevealSeconds = 3F;
+        private const int DefaultDockHoverHeight = 160;
+        private const int DefaultDockIdleHideSeconds = 10;
         private const float DockSlideInDurationSeconds = 0.30F;
         private const float DockSlideOutDurationSeconds = 0.55F;
         private static readonly Color HeaderTextColor = Color.FromArgb(34, 49, 67);
@@ -478,6 +999,7 @@ namespace CodeXPets
         private readonly SpriteFrameMetrics[,] spriteMetrics;
         private readonly Rectangle[] dockSpriteOpaqueBounds;
         private readonly bool positionPersistenceEnabled;
+        private readonly CodeXPetsSettings appSettings;
         private float uiScale = 1F;
         private int bubbleWidth = 320;
         private int bubbleHeight = 112;
@@ -550,9 +1072,12 @@ namespace CodeXPets
             }
         }
 
-        public DesktopAssistantForm(ContextMenuStrip menu, bool persistPosition = true)
+        public DesktopAssistantForm(ContextMenuStrip menu, bool persistPosition = true,
+            CodeXPetsSettings settings = null)
         {
             positionPersistenceEnabled = persistPosition;
+            appSettings = settings ?? CodeXPetsSettings.CreateDefault();
+            appSettings.Normalize();
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
             ShowInTaskbar = false;
@@ -596,8 +1121,15 @@ namespace CodeXPets
                     0x0001 | 0x0002 | 0x0010 | 0x0040);
         }
 
+        public void ApplySettings()
+        {
+            appSettings.Normalize();
+            RecalculateAdaptiveLayout();
+            RenderLayered();
+        }
+
         public void UpdateStatus(string status, string thought, ReminderState state, IList<string> titles,
-            IList<string> progressLabels, bool selectNewestTask)
+            IList<string> progressLabels, bool selectNewestTask, int preferredTaskIndex)
         {
             if (IsDisposed) return;
             string nextStatus = status ?? "空闲";
@@ -623,7 +1155,8 @@ namespace CodeXPets
             {
                 DateTime changedAt = DateTime.UtcNow;
                 dockLastContentChangeUtc = changedAt;
-                dockThoughtUntilUtc = changedAt.AddSeconds(DockNotificationSeconds);
+                dockThoughtUntilUtc = changedAt.AddSeconds(GetCloudNotificationSeconds(
+                    state, appSettings.DockNotificationSeconds));
             }
             statusText = nextStatus;
             thoughtText = nextThought;
@@ -632,28 +1165,41 @@ namespace CodeXPets
             taskTitles.AddRange(nextTitles);
             taskProgressLabels.Clear();
             taskProgressLabels.AddRange(nextProgress);
+            int nextTaskIndex;
             if (currentState != ReminderState.Busy)
-                taskIndex = 0;
+                nextTaskIndex = 0;
+            else if (preferredTaskIndex >= 0 && preferredTaskIndex < taskTitles.Count)
+                nextTaskIndex = preferredTaskIndex;
             else if (selectNewestTask && taskTitles.Count > 0)
-                taskIndex = taskTitles.Count - 1;
+                nextTaskIndex = taskTitles.Count - 1;
             else
             {
                 int matchingIndex = FindTaskIndex(selectedTitle);
-                taskIndex = matchingIndex >= 0 ? matchingIndex :
+                nextTaskIndex = matchingIndex >= 0 ? matchingIndex :
                     Math.Max(0, Math.Min(previousTaskIndex, taskTitles.Count - 1));
             }
-            if (changed) ResetScroll();
+            bool taskSelectionChanged = taskIndex != nextTaskIndex;
+            taskIndex = nextTaskIndex;
+            if (changed || taskSelectionChanged) ResetScroll();
             bool layoutChanged = RecalculateAdaptiveLayout();
-            if (changed || layoutChanged) RenderLayered();
+            if (changed || taskSelectionChanged || layoutChanged) RenderLayered();
+        }
+
+        internal static bool ShouldRenderAnimation(bool isBusy, bool frameChanged,
+            bool scrollChanged, bool dockAnimationChanged)
+        {
+            return frameChanged || scrollChanged || dockAnimationChanged;
         }
 
         public void Animate(int frame, float elapsedSeconds)
         {
             bool frameChanged = animationFrame != frame;
             animationFrame = frame;
-            if (currentState == ReminderState.Busy) AdvanceScroll(elapsedSeconds);
+            bool scrollChanged = currentState == ReminderState.Busy &&
+                AdvanceScroll(elapsedSeconds);
             bool dockAnimationChanged = AdvanceDockAnimation(elapsedSeconds);
-            if (currentState != ReminderState.Busy && !frameChanged && !dockAnimationChanged) return;
+            if (!ShouldRenderAnimation(currentState == ReminderState.Busy, frameChanged,
+                scrollChanged, dockAnimationChanged)) return;
             RenderLayered();
         }
 
@@ -662,9 +1208,10 @@ namespace CodeXPets
             if (!IsDocked) return false;
             DateTime now = DateTime.UtcNow;
             bool hovering = IsDockHovering();
-            if (hovering) dockHoverRevealUntilUtc = now.AddSeconds(DockHoverRevealSeconds);
+            if (hovering) dockHoverRevealUntilUtc = now.AddSeconds(appSettings.DockRevealSeconds);
             bool shouldBeVisible = ShouldShowDock(dockLastContentChangeUtc, now,
-                IsDragActive, hovering, dockHoverRevealUntilUtc);
+                IsDragActive, hovering, dockHoverRevealUntilUtc,
+                appSettings.DockIdleHideSeconds);
             float target = shouldBeVisible ? 1F : 0F;
             if (Math.Abs(dockVisibility - target) < 0.001F)
             {
@@ -692,9 +1239,9 @@ namespace CodeXPets
             int nextPetHeight = Math.Max(78, (int)Math.Round(104F * nextScale));
             int edgeMargin = Math.Max(12, (int)Math.Round(16F * nextScale));
             int availableWidth = Math.Max(1, workArea.Width - edgeMargin * 2);
-            int desiredBubbleWidth = Math.Max(250, (int)Math.Round(280F * nextScale));
+            int desiredBubbleWidth = Math.Max(260, (int)Math.Round(300F * nextScale));
             int maxBubbleWidth = Math.Max(1, Math.Min(availableWidth,
-                (int)Math.Round(320F * nextScale)));
+                (int)Math.Round(340F * nextScale)));
             int nextBubbleWidth = Math.Min(desiredBubbleWidth, maxBubbleWidth);
             if (nextBubbleWidth < 1) nextBubbleWidth = availableWidth;
 
@@ -951,24 +1498,51 @@ namespace CodeXPets
         internal static bool ShouldKeepDockVisible(DateTime lastContentChangeUtc,
             DateTime nowUtc)
         {
-            return (nowUtc - lastContentChangeUtc).TotalSeconds < DockIdleHideSeconds;
+            return ShouldKeepDockVisible(lastContentChangeUtc, nowUtc,
+                DefaultDockIdleHideSeconds);
+        }
+
+        internal static bool ShouldKeepDockVisible(DateTime lastContentChangeUtc,
+            DateTime nowUtc, int idleHideSeconds)
+        {
+            return idleHideSeconds <= 0 ||
+                (nowUtc - lastContentChangeUtc).TotalSeconds < idleHideSeconds;
         }
 
         internal static bool ShouldShowDock(DateTime lastContentChangeUtc,
             DateTime nowUtc, bool isDragging, bool isHovering, DateTime hoverRevealUntilUtc)
         {
+            return ShouldShowDock(lastContentChangeUtc, nowUtc, isDragging, isHovering,
+                hoverRevealUntilUtc, DefaultDockIdleHideSeconds);
+        }
+
+        internal static bool ShouldShowDock(DateTime lastContentChangeUtc,
+            DateTime nowUtc, bool isDragging, bool isHovering, DateTime hoverRevealUntilUtc,
+            int idleHideSeconds)
+        {
             return isDragging || isHovering || nowUtc < hoverRevealUntilUtc ||
-                ShouldKeepDockVisible(lastContentChangeUtc, nowUtc);
+                ShouldKeepDockVisible(lastContentChangeUtc, nowUtc, idleHideSeconds);
         }
 
         internal static Rectangle GetDockHoverBounds(DockEdge edge, Rectangle workArea,
             int dockY, float scale, bool fullyHidden)
         {
-            int width = Math.Max(40, (int)Math.Round(56F * scale));
-            int x = edge == DockEdge.Left ? workArea.Left : workArea.Right - width;
-            if (fullyHidden) return new Rectangle(x, workArea.Top, width, workArea.Height);
+            return GetDockHoverBounds(edge, workArea, dockY, scale, fullyHidden,
+                DefaultDockHoverHeight);
+        }
 
-            int halfHeight = Math.Max(64, (int)Math.Round(80F * scale));
+        internal static Rectangle GetDockHoverBounds(DockEdge edge, Rectangle workArea,
+            int dockY, float scale, bool fullyHidden, int hoverHeight)
+        {
+            // Keep the activation target centered on the cat's last docked height
+            // instead of reacting anywhere along the whole screen edge.
+            int width = fullyHidden
+                ? Math.Max(18, (int)Math.Round(28F * scale))
+                : Math.Max(40, (int)Math.Round(56F * scale));
+            int normalizedHeight = Math.Max(40, Math.Min(1000, hoverHeight));
+            int halfHeight = Math.Max(20,
+                (int)Math.Round(normalizedHeight * scale / 2F));
+            int x = edge == DockEdge.Left ? workArea.Left : workArea.Right - width;
             int top = Math.Max(workArea.Top, dockY - halfHeight);
             int bottom = Math.Min(workArea.Bottom, dockY + halfHeight);
             return Rectangle.FromLTRB(x, top, x + width, Math.Max(top + 1, bottom));
@@ -980,7 +1554,8 @@ namespace CodeXPets
             Point cursor = Cursor.Position;
             Rectangle workArea = Screen.FromRectangle(Bounds).WorkingArea;
             Rectangle hoverBounds = GetDockHoverBounds(dockEdge, workArea,
-                dockCoordinate, uiScale, dockVisibility <= 0.01F);
+                dockCoordinate, uiScale, dockVisibility <= 0.01F,
+                appSettings.DockHoverHeight);
             if (hoverBounds.Contains(cursor)) return true;
 
             Rectangle petBounds = GetPetVisibleBounds();
@@ -1402,9 +1977,20 @@ namespace CodeXPets
 
         private bool ShouldShowThoughtBubble()
         {
-            bool hasTaskState = currentState == ReminderState.Busy ||
-                currentState == ReminderState.Completed || currentState == ReminderState.Error;
-            return hasTaskState && (!IsDocked || DateTime.UtcNow < dockThoughtUntilUtc);
+            return ShouldShowThoughtBubble(IsDocked, currentState, DateTime.UtcNow,
+                dockThoughtUntilUtc);
+        }
+
+        internal static bool ShouldShowThoughtBubble(bool isDocked, ReminderState state,
+            DateTime nowUtc, DateTime dockThoughtUntilUtc)
+        {
+            // While floating, the cloud is part of the assistant and should remain
+            // visible even when idle. Docked mode stays compact and only shows a timed
+            // task notification.
+            if (!isDocked) return true;
+            bool hasTaskState = state == ReminderState.Busy ||
+                state == ReminderState.Completed || state == ReminderState.Error;
+            return hasTaskState && nowUtc < dockThoughtUntilUtc;
         }
 
         private Rectangle GetBubbleBounds()
@@ -1454,25 +2040,72 @@ namespace CodeXPets
 
         private bool ShouldShowLightBulb()
         {
-            return currentState == ReminderState.Busy ||
-                currentState == ReminderState.Completed ||
-                currentState == ReminderState.Error;
+            return ShouldShowLightBulb(currentState);
+        }
+
+        internal static bool ShouldShowLightBulb(ReminderState state)
+        {
+            return state == ReminderState.Busy ||
+                state == ReminderState.Completed || state == ReminderState.Error;
         }
 
         private RectangleF GetContentViewportBounds()
         {
-            Rectangle cloud = GetBubbleBounds();
-            bool reserveLightBulbSpace = ShouldShowLightBulb();
-            float x = reserveLightBulbSpace ? cloud.X + bubbleWidth * 0.30F :
-                cloud.X + bubbleWidth * 0.21F;
-            float y = cloud.Y + bubbleHeight * 0.31F;
-            float maximumRight = cloud.X + bubbleWidth * 0.82F;
-            float desiredWidth = reserveLightBulbSpace ? contentViewportWidth : bubbleWidth * 0.62F;
-            float width = Math.Min(desiredWidth, Math.Max(1F, maximumRight - x));
-            float height = contentViewportHeight;
-            float maximumBottom = cloud.Y + bubbleHeight * 0.84F;
-            if (y + height > maximumBottom) height = Math.Max(1F, maximumBottom - y);
+            return CalculateCloudContentBounds(GetBubbleBounds(), ShouldShowLightBulb(),
+                contentViewportWidth, contentViewportHeight);
+        }
+
+        internal static int GetCloudNotificationSeconds(ReminderState state, int configuredSeconds)
+        {
+            int safeConfiguredSeconds = Math.Max(1, configuredSeconds);
+            return state == ReminderState.Error ? Math.Max(10, safeConfiguredSeconds) :
+                safeConfiguredSeconds;
+        }
+
+        internal static RectangleF CalculateCloudContentBounds(Rectangle cloud,
+            bool reserveLightBulbSpace, int preferredWidth, int preferredHeight)
+        {
+            // This rectangle stays within the narrowest part of the cloud silhouette.
+            // Text is clipped to it, so long titles can only wrap/scroll inside the cloud.
+            float x = cloud.X + cloud.Width * (reserveLightBulbSpace ? 0.30F : 0.22F);
+            float y = cloud.Y + cloud.Height * 0.31F;
+            float maximumRight = cloud.X + cloud.Width * 0.80F;
+            float maximumBottom = cloud.Y + cloud.Height * 0.76F;
+            float width = Math.Min(Math.Max(1, preferredWidth), Math.Max(1F, maximumRight - x));
+            float height = Math.Min(Math.Max(1, preferredHeight), Math.Max(1F, maximumBottom - y));
             return new RectangleF(x, y, Math.Max(1F, width), Math.Max(1F, height));
+        }
+
+        internal static RectangleF CalculateCloudHeaderBounds(Rectangle cloud)
+        {
+            // Keep the complete status line centered in the cloud's upper safe area.
+            return new RectangleF(cloud.X + cloud.Width * 0.20F,
+                cloud.Y + cloud.Height * 0.14F, cloud.Width * 0.60F,
+                cloud.Height * 0.20F);
+        }
+
+        internal static string FormatBusyMetadata(string stepProgress, int sessionIndex,
+            int sessionCount)
+        {
+            List<string> parts = new List<string>();
+            if (!String.IsNullOrEmpty(stepProgress))
+                parts.Add("(" + stepProgress + ")");
+            if (sessionCount > 1)
+            {
+                int safeIndex = Math.Max(0, Math.Min(sessionIndex, sessionCount - 1));
+                parts.Add("会话(" + (safeIndex + 1) + "/" + sessionCount + ")");
+            }
+            return String.Join("·", parts.ToArray());
+        }
+
+        internal static string FormatBusyHeader(string stepProgress, int sessionIndex,
+            int sessionCount)
+        {
+            string metadata = FormatBusyMetadata(stepProgress, sessionIndex, sessionCount);
+            if (String.IsNullOrEmpty(metadata)) return "进行中";
+            return metadata.StartsWith("(", StringComparison.Ordinal)
+                ? "进行中" + metadata
+                : "进行中·" + metadata;
         }
 
         private void DrawThoughtBubble(Graphics g)
@@ -1491,7 +2124,7 @@ namespace CodeXPets
             DrawPixelThoughtDot(g, largeDot, uiScale);
             DrawPixelThoughtDot(g, smallDot, uiScale);
 
-            float headerFontSize = (currentState == ReminderState.Busy ? 9.2F : 11.5F) * uiScale;
+            float headerFontSize = (currentState == ReminderState.Busy ? 10.5F : 11.5F) * uiScale;
             float contentFontSize = GetContentFontSize();
             using (Font headerFont = new Font("Microsoft YaHei UI", headerFontSize, FontStyle.Bold))
             using (Font contentFont = new Font("Microsoft YaHei UI", contentFontSize, FontStyle.Bold))
@@ -1501,30 +2134,21 @@ namespace CodeXPets
             {
                 headerFormat.FormatFlags = StringFormatFlags.NoWrap;
                 headerFormat.Trimming = StringTrimming.EllipsisCharacter;
-                headerFormat.Alignment = StringAlignment.Center;
                 string header;
                 if (currentState == ReminderState.Busy)
                 {
                     string progress = taskIndex >= 0 && taskIndex < taskProgressLabels.Count
                         ? taskProgressLabels[taskIndex] : null;
-                    header = "进行中";
-                    if (!String.IsNullOrEmpty(progress)) header += "(" + progress + ")";
-                    if (taskTitles.Count > 1)
-                        header += " · " + (taskIndex + 1) + "/" + taskTitles.Count;
+                    header = FormatBusyHeader(progress, taskIndex, taskTitles.Count);
                 }
                 else if (currentState == ReminderState.Completed) header = "已完成";
                 else if (currentState == ReminderState.Error) header = "异常";
                 else header = statusText;
 
                 bool reserveLightBulbSpace = ShouldShowLightBulb();
-                // All state titles share one cloud-centred header area so
-                // 进行中、任务完成和任务异常 never shift horizontally.
-                float headerX = cloud.X + bubbleWidth * 0.10F;
-                float headerY = cloud.Y + bubbleHeight * 0.125F;
-                float headerW = bubbleWidth * 0.80F;
-                float headerH = Math.Max(21F * uiScale, bubbleHeight * 0.23F);
+                headerFormat.Alignment = StringAlignment.Center;
                 g.DrawString(header, headerFont, headerBrush,
-                    new RectangleF(headerX, headerY, headerW, headerH), headerFormat);
+                    CalculateCloudHeaderBounds(cloud), headerFormat);
 
                 if (reserveLightBulbSpace)
                 {
@@ -1776,7 +2400,7 @@ namespace CodeXPets
                 textGraphics.Clear(Color.Transparent);
                 textGraphics.SmoothingMode = SmoothingMode.AntiAlias;
                 textGraphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-                lineFormat.FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
+                lineFormat.FormatFlags = StringFormatFlags.NoWrap;
                 lineFormat.Alignment = StringAlignment.Near;
                 for (int i = 0; i < smoothTextLines.Length; i++)
                     textGraphics.DrawString(smoothTextLines[i], renderFont, textBrush,
@@ -1838,7 +2462,7 @@ namespace CodeXPets
         private int GetMeasuredTextHeight(string text)
         {
             string source = NormalizeDisplayText(text);
-            int width = Math.Max(1, contentViewportWidth);
+            int width = Math.Max(1, (int)Math.Ceiling(GetContentViewportBounds().Width));
             if (String.Equals(measuredSource, source, StringComparison.Ordinal) &&
                 measuredWidth == width && Math.Abs(measuredScale - uiScale) < 0.01F &&
                 measuredHeight > 0)
@@ -1885,34 +2509,41 @@ namespace CodeXPets
             lastDisplayedText = NormalizeDisplayText(GetDisplayedText());
         }
 
-        private void AdvanceScroll(float elapsedSeconds)
+        private bool AdvanceScroll(float elapsedSeconds)
         {
             string text = NormalizeDisplayText(GetDisplayedText());
             if (!String.Equals(text, NormalizeDisplayText(lastDisplayedText), StringComparison.Ordinal))
             {
                 ResetScroll();
-                return;
+                return true;
             }
 
-            int viewportHeight = Math.Max(1, contentViewportHeight);
+            int viewportHeight = Math.Max(1,
+                (int)Math.Ceiling(GetContentViewportBounds().Height));
             int maxOffset = Math.Max(0, GetMeasuredTextHeight(text) - viewportHeight);
             if (maxOffset <= 0)
             {
                 // Short tasks do not scroll, but still participate in the same
                 // forward-only task rotation cycle.
+                bool offsetChanged = scrollOffset != 0F;
                 scrollOffset = 0;
                 scrollCycleSeconds += elapsedSeconds;
-                if (scrollCycleSeconds >= ShortTaskDisplaySeconds) MoveToNextTask();
-                return;
+                if (scrollCycleSeconds >= ShortTaskDisplaySeconds)
+                {
+                    MoveToNextTask();
+                    return true;
+                }
+                return offsetChanged;
             }
 
             if (scrollHoldSeconds > 0F)
             {
                 scrollHoldSeconds = Math.Max(0F, scrollHoldSeconds - elapsedSeconds);
-                return;
+                return false;
             }
             if (!scrollAtEnd)
             {
+                float previousOffset = scrollOffset;
                 scrollOffset = Math.Min(maxOffset, scrollOffset +
                     ScrollSpeedPixelsPerSecond * elapsedSeconds);
                 if (scrollOffset >= maxOffset)
@@ -1921,17 +2552,18 @@ namespace CodeXPets
                     scrollAtEnd = true;
                     scrollHoldSeconds = ScrollEndHoldSeconds;
                 }
-                return;
+                return Math.Abs(scrollOffset - previousOffset) > 0.01F;
             }
 
             if (scrollHoldSeconds > 0F)
             {
                 scrollHoldSeconds = Math.Max(0F, scrollHoldSeconds - elapsedSeconds);
-                return;
+                return false;
             }
-            // Never reverse back to the top.  Move forward to the next task, or
+            // Never reverse back to the top. Move forward to the next task, or
             // restart the only task from offset zero when there is no next task.
             MoveToNextTask();
+            return true;
         }
 
         private void MoveToNextTask()
@@ -2211,18 +2843,11 @@ namespace CodeXPets
 
     internal sealed class CodexSessionMonitor : IDisposable
     {
-        private static readonly Regex EventTypeRegex = new Regex(
-            "\\\"type\\\"\\s*:\\s*\\\"(task_started|task_complete|turn_aborted|task_failed|turn_failed|stream_error|request_error|error)\\\"",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
-        private static readonly Regex TurnIdRegex = new Regex(
-            "\\\"turn_id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
-        private static readonly Regex UserMessageTypeRegex = new Regex(
-            "\\\"type\\\"\\s*:\\s*\\\"user_message\\\"",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
-        private static readonly Regex UserMessageTextRegex = new Regex(
-            "\\\"message\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"])*)\\\"",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private const int ReadBufferSize = 65536;
+        private const int MaximumBufferedLineCharacters = 262144;
+        private const int MaximumTrackedFiles = 40;
+        private const int FullDiscoveryIntervalSeconds = 120;
+        private const int StaleTurnGraceSeconds = 600;
         private static readonly Regex HttpServerErrorRegex = new Regex(
             @"\bhttp(?: status)?\s*5\d\d\b",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -2263,16 +2888,28 @@ namespace CodeXPets
             new[] { "turn_aborted", "task_failed", "turn_failed", "stream_error", "request_error", "error" },
             StringComparer.Ordinal);
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
-        private readonly string sessionsRoot;
+        private string sessionsRoot;
         private readonly Dictionary<string, TailState> files = new Dictionary<string, TailState>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, ActiveTurn> activeTurns = new Dictionary<string, ActiveTurn>(StringComparer.Ordinal);
         private readonly Dictionary<string, TaskPlanProgress> plansByFile =
             new Dictionary<string, TaskPlanProgress>(StringComparer.OrdinalIgnoreCase);
         private string lastCompletedTitle;
         private string lastAbortedTitle;
+        private string lastReadFile;
+        private string lastEventType;
+        private string lastEventFile;
+        private string lastError;
         private long nextStartedSequence;
+        private int parseErrorCount;
+        private int readErrorCount;
+        private int staleTurnCleanupCount;
+        private DateTime lastDiscoveryUtc = DateTime.MinValue;
+        private DateTime lastReadUtc = DateTime.MinValue;
+        private DateTime lastEventUtc = DateTime.MinValue;
+        private DateTime lastPollUtc = DateTime.MinValue;
         private DateTime nextDiscoveryUtc = DateTime.MinValue;
-        private DateTime nextProcessCheckUtc = DateTime.MinValue;
+        private DateTime nextFullDiscoveryUtc = DateTime.MinValue;
+        private DateTime nextStaleTurnCheckUtc = DateTime.MinValue;
         private bool disposed;
 
         public event EventHandler TaskStarted;
@@ -2282,12 +2919,27 @@ namespace CodeXPets
         public CodexSessionMonitor() : this(GetDefaultSessionsRoot()) { }
         internal CodexSessionMonitor(string sessionsRootPath)
         {
-            sessionsRoot = sessionsRootPath;
+            sessionsRoot = NormalizeSessionsRoot(sessionsRootPath);
             DiscoverFiles(true);
         }
         public int ActiveCount { get { return activeTurns.Count; } }
         public string LastCompletedTitle { get { return lastCompletedTitle; } }
         public string LastAbortedTitle { get { return lastAbortedTitle; } }
+        public string LastEventType { get { return lastEventType; } }
+        public string LastEventFile { get { return lastEventFile; } }
+
+        public int GetActiveTitleIndex(string sourcePath)
+        {
+            if (String.IsNullOrEmpty(sourcePath)) return -1;
+            int index = 0;
+            foreach (ActiveTurn turn in OrderedActiveTurns())
+            {
+                if (String.Equals(turn.SourcePath, sourcePath, StringComparison.OrdinalIgnoreCase))
+                    return index;
+                index++;
+            }
+            return -1;
+        }
 
         public IList<string> ActiveTitles
         {
@@ -2355,6 +3007,83 @@ namespace CodeXPets
             return Path.Combine(codexHome, "sessions");
         }
 
+        private static string NormalizeSessionsRoot(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path)) path = GetDefaultSessionsRoot();
+            try
+            {
+                return Path.GetFullPath(Environment.ExpandEnvironmentVariables(path.Trim()));
+            }
+            catch { return GetDefaultSessionsRoot(); }
+        }
+
+        public void SetSessionsRoot(string path)
+        {
+            if (disposed) return;
+            string nextRoot = NormalizeSessionsRoot(path);
+            if (String.Equals(nextRoot, sessionsRoot, StringComparison.OrdinalIgnoreCase)) return;
+            sessionsRoot = nextRoot;
+            files.Clear();
+            activeTurns.Clear();
+            plansByFile.Clear();
+            lastCompletedTitle = null;
+            lastAbortedTitle = null;
+            nextDiscoveryUtc = DateTime.MinValue;
+            nextFullDiscoveryUtc = DateTime.MinValue;
+            nextStaleTurnCheckUtc = DateTime.MinValue;
+            DiscoverFiles(true);
+            EventHandler changed = StateChanged;
+            if (changed != null) changed(this, EventArgs.Empty);
+        }
+
+        public string GetDiagnosticsText()
+        {
+            StringBuilder builder = new StringBuilder();
+            builder.AppendLine("会话监听");
+            builder.AppendLine("  目录：" + sessionsRoot);
+            builder.AppendLine("  目录存在：" + (Directory.Exists(sessionsRoot) ? "是" : "否"));
+            builder.AppendLine("  已跟踪文件：" + files.Count);
+            builder.AppendLine("  活跃任务：" + activeTurns.Count);
+            builder.AppendLine("  最近轮询：" + FormatUtc(lastPollUtc));
+            builder.AppendLine("  最近扫描：" + FormatUtc(lastDiscoveryUtc));
+            builder.AppendLine("  最近读取：" + FormatUtc(lastReadUtc));
+            if (!String.IsNullOrEmpty(lastReadFile))
+                builder.AppendLine("  最近读取文件：" + lastReadFile);
+            builder.AppendLine("  最近事件：" +
+                (String.IsNullOrEmpty(lastEventType) ? "无" : lastEventType + " · " + FormatUtc(lastEventUtc)));
+            if (!String.IsNullOrEmpty(lastEventFile))
+                builder.AppendLine("  最近事件文件：" + lastEventFile);
+            builder.AppendLine("  JSON 解析错误：" + parseErrorCount);
+            builder.AppendLine("  文件读取错误：" + readErrorCount);
+            builder.AppendLine("  过期任务清理：" + staleTurnCleanupCount);
+            if (!String.IsNullOrEmpty(lastError)) builder.AppendLine("  最近错误：" + lastError);
+            if (activeTurns.Count > 0)
+            {
+                builder.AppendLine();
+                builder.AppendLine("活跃任务明细");
+                foreach (ActiveTurn turn in OrderedActiveTurns())
+                {
+                    builder.AppendLine("  " + turn.TurnId + " | " +
+                        (String.IsNullOrEmpty(turn.Title) ? "未命名任务" : turn.Title));
+                    builder.AppendLine("    最近活动：" + FormatUtc(turn.LastActivityUtc));
+                    builder.AppendLine("    文件：" + turn.SourcePath);
+                }
+            }
+            return builder.ToString();
+        }
+
+        internal void ReportUnexpectedError(string operation, Exception exception)
+        {
+            readErrorCount++;
+            lastError = operation + "：" + (exception == null ? "未知错误" : exception.Message);
+        }
+
+        private static string FormatUtc(DateTime value)
+        {
+            return value == DateTime.MinValue ? "无" : value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss",
+                CultureInfo.InvariantCulture);
+        }
+
         public void Poll()
         {
             if (disposed) return;
@@ -2365,74 +3094,142 @@ namespace CodeXPets
                 nextDiscoveryUtc = now.AddSeconds(1.2);
             }
             foreach (TailState state in files.Values.ToList()) ReadNewBytes(state, false);
-            if (now >= nextProcessCheckUtc)
+            if (now >= nextStaleTurnCheckUtc)
             {
-                nextProcessCheckUtc = now.AddSeconds(5);
-                ClearOrphansWhenCodexIsGone();
+                nextStaleTurnCheckUtc = now.AddSeconds(30);
+                ClearStaleTurns(now);
             }
+            lastPollUtc = now;
         }
 
         private void DiscoverFiles(bool initial)
         {
+            DateTime now = DateTime.UtcNow;
+            lastDiscoveryUtc = now;
             if (!Directory.Exists(sessionsRoot)) return;
             List<string> candidates = new List<string>();
             DateTime today = DateTime.Today;
             for (int daysAgo = 0; daysAgo <= 2; daysAgo++)
             {
                 DateTime day = today.AddDays(-daysAgo);
-                string dayFolder = Path.Combine(sessionsRoot, day.ToString("yyyy"), day.ToString("MM"), day.ToString("dd"));
+                string dayFolder = Path.Combine(sessionsRoot, day.ToString("yyyy"),
+                    day.ToString("MM"), day.ToString("dd"));
                 if (!Directory.Exists(dayFolder)) continue;
                 try { candidates.AddRange(Directory.GetFiles(dayFolder, "*.jsonl", SearchOption.TopDirectoryOnly)); }
-                catch { }
+                catch (Exception ex) { ReportUnexpectedError("扫描日期目录", ex); }
             }
-            if (candidates.Count == 0)
+
+            bool runFullDiscovery = initial || now >= nextFullDiscoveryUtc;
+            if (runFullDiscovery)
             {
+                nextFullDiscoveryUtc = now.AddSeconds(FullDiscoveryIntervalSeconds);
                 try
                 {
-                    candidates.AddRange(Directory.GetFiles(sessionsRoot, "*.jsonl", SearchOption.AllDirectories)
-                        .OrderByDescending(delegate(string path)
-                        {
-                            try { return File.GetLastWriteTimeUtc(path); } catch { return DateTime.MinValue; }
-                        }).Take(30));
+                    candidates.AddRange(Directory.GetFiles(sessionsRoot, "*.jsonl",
+                        SearchOption.AllDirectories));
                 }
-                catch { }
+                catch (Exception ex) { ReportUnexpectedError("完整扫描会话目录", ex); }
             }
-            foreach (string path in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+
+            List<string> newest = candidates.Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(delegate(string path) { return SafeLastWriteTimeUtc(path); })
+                .Take(MaximumTrackedFiles).ToList();
+            foreach (string path in newest)
             {
                 if (files.ContainsKey(path)) continue;
                 TailState state = new TailState(path);
                 files[path] = state;
                 ReadNewBytes(state, initial);
             }
+            PruneTrackedFiles();
+        }
+
+        private void PruneTrackedFiles()
+        {
+            if (files.Count <= MaximumTrackedFiles) return;
+            HashSet<string> activePaths = new HashSet<string>(activeTurns.Values
+                .Select(delegate(ActiveTurn turn) { return turn.SourcePath; }),
+                StringComparer.OrdinalIgnoreCase);
+            List<TailState> removable = files.Values
+                .Where(delegate(TailState state) { return !activePaths.Contains(state.Path); })
+                .OrderBy(delegate(TailState state) { return state.LastActivityUtc; }).ToList();
+            foreach (TailState state in removable)
+            {
+                if (files.Count <= MaximumTrackedFiles) break;
+                files.Remove(state.Path);
+                plansByFile.Remove(state.Path);
+            }
+        }
+
+        private static DateTime SafeLastWriteTimeUtc(string path)
+        {
+            try { return File.GetLastWriteTimeUtc(path); }
+            catch { return DateTime.MinValue; }
         }
 
         private void ReadNewBytes(TailState state, bool suppressCompletionNotification)
         {
             try
             {
+                FileInfo info = new FileInfo(state.Path);
+                if (!info.Exists) return;
+                long length = info.Length;
+                DateTime writeUtc = info.LastWriteTimeUtc;
+                if (length < state.Position)
+                {
+                    RemoveTurnsForFile(state.Path);
+                    plansByFile.Remove(state.Path);
+                    state.Reset();
+                }
+                if (length == state.Position && writeUtc <= state.LastWriteUtc) return;
+                if (length == state.Position)
+                {
+                    state.LastWriteUtc = writeUtc;
+                    return;
+                }
+
                 using (FileStream stream = new FileStream(state.Path, FileMode.Open, FileAccess.Read,
                     FileShare.ReadWrite | FileShare.Delete))
                 {
-                    long length = stream.Length;
-                    if (length < state.Position)
-                    {
-                        RemoveTurnsForFile(state.Path);
-                        plansByFile.Remove(state.Path);
-                        state.Reset();
-                    }
-                    if (length == state.Position) return;
                     stream.Position = state.Position;
-                    byte[] buffer = new byte[65536];
                     int read;
-                    while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+                    while ((read = stream.Read(state.ByteBuffer, 0, state.ByteBuffer.Length)) > 0)
                     {
-                        ConsumeText(state, Encoding.UTF8.GetString(buffer, 0, read), suppressCompletionNotification);
+                        int consumed = 0;
+                        while (consumed < read)
+                        {
+                            int bytesUsed;
+                            int charsUsed;
+                            bool completed;
+                            state.Utf8Decoder.Convert(state.ByteBuffer, consumed, read - consumed,
+                                state.CharacterBuffer, 0, state.CharacterBuffer.Length, false,
+                                out bytesUsed, out charsUsed, out completed);
+                            if (charsUsed > 0)
+                                ConsumeText(state, new string(state.CharacterBuffer, 0, charsUsed),
+                                    suppressCompletionNotification);
+                            consumed += bytesUsed;
+                            if (bytesUsed == 0 && charsUsed == 0) break;
+                        }
                         state.Position += read;
                     }
                 }
+                DateTime readUtc = DateTime.UtcNow;
+                // Codex can keep a JSONL file open for a long time. On Windows the
+                // directory entry's LastWriteTime may then remain unchanged even while
+                // the file length grows. A successful incremental read is direct proof
+                // of live activity, so use the read time for normal polling. Historical
+                // startup scans still use the file timestamp, preventing abandoned turns
+                // from looking newly active just because CodeXPets was launched.
+                DateTime activityUtc = suppressCompletionNotification && writeUtc != DateTime.MinValue
+                    ? writeUtc : readUtc;
+                state.LastWriteUtc = writeUtc;
+                state.LastActivityUtc = activityUtc;
+                lastReadFile = state.Path;
+                lastReadUtc = readUtc;
+                TouchTurnsForFile(state.Path, activityUtc);
             }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
+            catch (IOException ex) { ReportUnexpectedError("读取会话文件", ex); }
+            catch (UnauthorizedAccessException ex) { ReportUnexpectedError("访问会话文件", ex); }
         }
 
         private void ConsumeText(TailState state, string text, bool suppressCompletionNotification)
@@ -2446,7 +3243,7 @@ namespace CodeXPets
                 int count = end - offset;
                 if (!state.SkipCurrentLine && count > 0)
                 {
-                    int remainingCapacity = 8192 - state.LineBuffer.Length;
+                    int remainingCapacity = MaximumBufferedLineCharacters - state.LineBuffer.Length;
                     if (remainingCapacity > 0)
                     {
                         int appendCount = Math.Min(remainingCapacity, count);
@@ -2461,7 +3258,7 @@ namespace CodeXPets
                             state.LineBuffer.Length = 0;
                             if (!hasNewline) state.SkipCurrentLine = true;
                         }
-                        else if (state.LineBuffer.Length >= 8192)
+                        else if (state.LineBuffer.Length >= MaximumBufferedLineCharacters)
                         {
                             state.SkipCurrentLine = true;
                             state.LineBuffer.Length = 0;
@@ -2483,33 +3280,57 @@ namespace CodeXPets
 
         private bool TryProcessEvent(string lineStart, string sourcePath, bool suppressCompletionNotification)
         {
+            lineStart = NormalizeJsonLine(lineStart);
             if (TryProcessPlanUpdate(lineStart, sourcePath, suppressCompletionNotification)) return true;
-            if (lineStart.IndexOf("\"type\":\"event_msg\"", StringComparison.Ordinal) < 0 &&
-                lineStart.IndexOf("\"type\": \"event_msg\"", StringComparison.Ordinal) < 0) return false;
-            if (UserMessageTypeRegex.IsMatch(lineStart))
+            if (lineStart.IndexOf("event_msg", StringComparison.Ordinal) < 0) return false;
+
+            IDictionary<string, object> root;
+            try { root = Json.DeserializeObject(lineStart) as IDictionary<string, object>; }
+            catch (ArgumentException ex)
             {
-                Match messageMatch = UserMessageTextRegex.Match(lineStart);
-                if (messageMatch.Success)
-                    SetTitleForFile(sourcePath, UnescapeJson(messageMatch.Groups[1].Value));
+                if (LooksLikeCompleteJson(lineStart)) RecordParseError("解析 event_msg", ex);
+                return false;
+            }
+            catch (InvalidOperationException ex)
+            {
+                if (LooksLikeCompleteJson(lineStart)) RecordParseError("解析 event_msg", ex);
+                return false;
+            }
+            if (root == null || !String.Equals(GetString(root, "type"), "event_msg",
+                StringComparison.Ordinal)) return false;
+            IDictionary<string, object> payload = GetObjectMap(root, "payload");
+            if (payload == null) return true;
+
+            string eventType = GetString(payload, "type");
+            if (String.IsNullOrEmpty(eventType)) return true;
+            DateTime eventUtc = GetEventUtc(root);
+            RecordEvent(eventType, sourcePath);
+            if (String.Equals(eventType, "user_message", StringComparison.Ordinal))
+            {
+                string title = GetString(payload, "message");
+                if (!String.IsNullOrWhiteSpace(title))
+                    SetTitleForFile(sourcePath, title, eventUtc);
                 return true;
             }
-            Match typeMatch = EventTypeRegex.Match(lineStart);
-            Match turnMatch = TurnIdRegex.Match(lineStart);
-            if (!typeMatch.Success || !turnMatch.Success) return false;
-            string eventType = typeMatch.Groups[1].Value;
-            string turnId = turnMatch.Groups[1].Value;
+
+            string turnId = GetString(payload, "turn_id");
+            if (String.IsNullOrEmpty(turnId)) turnId = GetString(root, "turn_id");
+            if (String.IsNullOrEmpty(turnId)) return true;
+
             int before = activeTurns.Count;
             if (eventType == "task_started")
             {
                 bool added = false;
-                if (!activeTurns.ContainsKey(turnId))
+                ActiveTurn turn;
+                if (!activeTurns.TryGetValue(turnId, out turn))
                 {
-                    ActiveTurn newTurn = new ActiveTurn(turnId, sourcePath, nextStartedSequence++);
+                    turn = new ActiveTurn(turnId, sourcePath, nextStartedSequence++);
                     TaskPlanProgress rememberedPlan;
-                    if (plansByFile.TryGetValue(sourcePath, out rememberedPlan)) newTurn.Plan = rememberedPlan;
-                    activeTurns[turnId] = newTurn;
+                    if (plansByFile.TryGetValue(sourcePath, out rememberedPlan)) turn.Plan = rememberedPlan;
+                    activeTurns[turnId] = turn;
                     added = true;
                 }
+                TouchTurn(turn, eventUtc);
                 if (added && !suppressCompletionNotification)
                 {
                     EventHandler started = TaskStarted;
@@ -2527,16 +3348,14 @@ namespace CodeXPets
                     if (abnormalCompletion)
                     {
                         lastAbortedTitle = String.IsNullOrEmpty(completedTurn.Title)
-                            ? "发生异常的任务"
-                            : completedTurn.Title;
+                            ? "发生异常的任务" : completedTurn.Title;
                         EventHandler aborted = TaskAborted;
                         if (aborted != null) aborted(this, EventArgs.Empty);
                     }
                     else
                     {
                         lastCompletedTitle = String.IsNullOrEmpty(completedTurn.Title)
-                            ? "已完成的任务"
-                            : completedTurn.Title;
+                            ? "已完成的任务" : completedTurn.Title;
                         EventHandler completed = TaskCompleted;
                         if (completed != null) completed(this, EventArgs.Empty);
                     }
@@ -2550,11 +3369,16 @@ namespace CodeXPets
                 if (wasActive && !suppressCompletionNotification)
                 {
                     lastAbortedTitle = String.IsNullOrEmpty(abortedTurn.Title)
-                        ? "发生异常的任务"
-                        : abortedTurn.Title;
+                        ? "发生异常的任务" : abortedTurn.Title;
                     EventHandler aborted = TaskAborted;
                     if (aborted != null) aborted(this, EventArgs.Empty);
                 }
+            }
+            else
+            {
+                ActiveTurn activeTurn;
+                if (activeTurns.TryGetValue(turnId, out activeTurn))
+                    TouchTurn(activeTurn, eventUtc);
             }
             if (before != activeTurns.Count)
             {
@@ -2562,6 +3386,19 @@ namespace CodeXPets
                 if (changed != null) changed(this, EventArgs.Empty);
             }
             return true;
+        }
+
+        private void RecordEvent(string eventType, string sourcePath)
+        {
+            lastEventType = eventType;
+            lastEventFile = sourcePath;
+            lastEventUtc = DateTime.UtcNow;
+        }
+
+        private void RecordParseError(string operation, Exception exception)
+        {
+            parseErrorCount++;
+            lastError = operation + "：" + (exception == null ? "未知错误" : exception.Message);
         }
 
         private static bool IsAbnormalTaskCompletion(string lineStart)
@@ -2611,6 +3448,8 @@ namespace CodeXPets
                 IDictionary<string, object> payload = GetObjectMap(root, "payload");
                 if (payload == null || !String.Equals(GetString(payload, "type"), "function_call", StringComparison.Ordinal) ||
                     !String.Equals(GetString(payload, "name"), "update_plan", StringComparison.Ordinal)) return false;
+                RecordEvent("update_plan", sourcePath);
+                DateTime eventUtc = GetEventUtc(root);
 
                 string arguments = GetString(payload, "arguments");
                 IDictionary<string, object> argumentsRoot = String.IsNullOrEmpty(arguments) ? null :
@@ -2631,6 +3470,7 @@ namespace CodeXPets
                     }).OrderByDescending(delegate(ActiveTurn item) { return item.StartSequence; }).FirstOrDefault();
                 }
                 if (turn == null) return true;
+                TouchTurn(turn, eventUtc);
 
                 int completed = 0;
                 string currentStep = null;
@@ -2659,8 +3499,29 @@ namespace CodeXPets
                 }
                 return true;
             }
-            catch (ArgumentException) { return false; }
-            catch (InvalidOperationException) { return false; }
+            catch (ArgumentException ex)
+            {
+                if (LooksLikeCompleteJson(lineStart)) RecordParseError("解析 update_plan", ex);
+                return false;
+            }
+            catch (InvalidOperationException ex)
+            {
+                if (LooksLikeCompleteJson(lineStart)) RecordParseError("解析 update_plan", ex);
+                return false;
+            }
+        }
+
+        private static string NormalizeJsonLine(string value)
+        {
+            return String.IsNullOrEmpty(value) ? String.Empty :
+                value.TrimStart('\uFEFF', ' ', '\t', '\r');
+        }
+
+        private static bool LooksLikeCompleteJson(string value)
+        {
+            if (String.IsNullOrWhiteSpace(value)) return false;
+            string trimmed = value.TrimEnd();
+            return trimmed.Length > 1 && trimmed[trimmed.Length - 1] == '}';
         }
 
         private static IDictionary<string, object> GetObjectMap(IDictionary<string, object> map, string key)
@@ -2675,6 +3536,16 @@ namespace CodeXPets
             return map != null && map.TryGetValue(key, out value) && value != null ? value.ToString() : null;
         }
 
+        private static DateTime GetEventUtc(IDictionary<string, object> root)
+        {
+            string raw = GetString(root, "timestamp");
+            DateTimeOffset parsed;
+            if (!String.IsNullOrWhiteSpace(raw) && DateTimeOffset.TryParse(raw,
+                CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal |
+                DateTimeStyles.AdjustToUniversal, out parsed)) return parsed.UtcDateTime;
+            return DateTime.UtcNow;
+        }
+
         private void RemoveTurnsForFile(string path)
         {
             List<string> ids = activeTurns.Values
@@ -2686,76 +3557,103 @@ namespace CodeXPets
             if (changed != null) changed(this, EventArgs.Empty);
         }
 
-        private void SetTitleForFile(string path, string title)
+        private void SetTitleForFile(string path, string title, DateTime activityUtc)
+        {
+            ActiveTurn turn = activeTurns.Values
+                .Where(delegate(ActiveTurn item)
+                {
+                    return String.Equals(item.SourcePath, path, StringComparison.OrdinalIgnoreCase);
+                })
+                .OrderByDescending(delegate(ActiveTurn item) { return item.StartSequence; })
+                .FirstOrDefault();
+            if (turn == null) return;
+            TouchTurn(turn, activityUtc);
+            if (!String.IsNullOrEmpty(turn.Title)) return;
+            turn.Title = title;
+            EventHandler changed = StateChanged;
+            if (changed != null) changed(this, EventArgs.Empty);
+        }
+
+        private static void TouchTurn(ActiveTurn turn, DateTime activityUtc)
+        {
+            if (turn == null || activityUtc == DateTime.MinValue) return;
+            if (turn.LastActivityUtc == DateTime.MinValue || activityUtc > turn.LastActivityUtc)
+                turn.LastActivityUtc = activityUtc;
+        }
+
+        private void TouchTurnsForFile(string path, DateTime activityUtc)
+        {
+            foreach (ActiveTurn turn in activeTurns.Values)
+                if (String.Equals(turn.SourcePath, path, StringComparison.OrdinalIgnoreCase))
+                    TouchTurn(turn, activityUtc);
+        }
+
+        internal static bool IsTurnStale(DateTime lastActivityUtc, DateTime fileWriteUtc,
+            DateTime nowUtc, int graceSeconds)
+        {
+            if (graceSeconds <= 0) return false;
+            DateTime cutoff = nowUtc.AddSeconds(-graceSeconds);
+            return lastActivityUtc < cutoff && fileWriteUtc < cutoff;
+        }
+
+        private void ClearStaleTurns(DateTime nowUtc)
         {
             if (activeTurns.Count == 0) return;
+            List<string> staleIds = new List<string>();
             foreach (ActiveTurn turn in activeTurns.Values)
             {
-                if (String.Equals(turn.SourcePath, path, StringComparison.OrdinalIgnoreCase) &&
-                    String.IsNullOrEmpty(turn.Title))
-                {
-                    turn.Title = title;
-                    return;
-                }
+                DateTime fileWriteUtc = SafeLastWriteTimeUtc(turn.SourcePath);
+                if (IsTurnStale(turn.LastActivityUtc, fileWriteUtc, nowUtc,
+                    StaleTurnGraceSeconds)) staleIds.Add(turn.TurnId);
             }
+            if (staleIds.Count == 0) return;
+            foreach (string id in staleIds) activeTurns.Remove(id);
+            staleTurnCleanupCount += staleIds.Count;
+            EventHandler changed = StateChanged;
+            if (changed != null) changed(this, EventArgs.Empty);
         }
 
-        private static string UnescapeJson(string value)
+        public void Dispose()
         {
-            StringBuilder result = new StringBuilder(value.Length);
-            for (int i = 0; i < value.Length; i++)
-            {
-                if (value[i] == '\\' && i + 1 < value.Length)
-                {
-                    char next = value[i + 1];
-                    switch (next)
-                    {
-                        case 'n': result.Append('\n'); break;
-                        case 'r': result.Append('\r'); break;
-                        case 't': result.Append('\t'); break;
-                        case '\\': result.Append('\\'); break;
-                        case '"': result.Append('"'); break;
-                        default: result.Append(next); break;
-                    }
-                    i++;
-                }
-                else result.Append(value[i]);
-            }
-            return result.ToString();
+            disposed = true;
+            files.Clear();
+            activeTurns.Clear();
+            plansByFile.Clear();
         }
 
-        private void ClearOrphansWhenCodexIsGone()
-        {
-            if (activeTurns.Count == 0) return;
-            try
-            {
-                Process[] processes = Process.GetProcessesByName("codex");
-                bool any = processes.Length > 0;
-                foreach (Process process in processes) process.Dispose();
-                if (!any)
-                {
-                    activeTurns.Clear();
-                    EventHandler changed = StateChanged;
-                    if (changed != null) changed(this, EventArgs.Empty);
-                }
-            }
-            catch { }
-        }
-
-        public void Dispose() { disposed = true; files.Clear(); activeTurns.Clear(); }
         private sealed class TailState
         {
             public readonly string Path;
             public long Position;
             public readonly StringBuilder LineBuffer = new StringBuilder(512);
+            public readonly byte[] ByteBuffer = new byte[ReadBufferSize];
+            public readonly char[] CharacterBuffer = new char[ReadBufferSize];
+            public Decoder Utf8Decoder = Encoding.UTF8.GetDecoder();
+            public DateTime LastWriteUtc;
+            public DateTime LastActivityUtc;
             public bool SkipCurrentLine;
             public bool EventHandled;
-            public TailState(string path) { Path = path; }
+
+            public TailState(string path)
+            {
+                Path = path;
+                LastWriteUtc = SafeLastWriteTimeUtc(path);
+                LastActivityUtc = LastWriteUtc == DateTime.MinValue
+                    ? DateTime.UtcNow : LastWriteUtc;
+            }
+
             public void Reset()
             {
-                Position = 0; LineBuffer.Length = 0; SkipCurrentLine = false; EventHandled = false;
+                Position = 0;
+                LineBuffer.Length = 0;
+                Utf8Decoder = Encoding.UTF8.GetDecoder();
+                LastWriteUtc = DateTime.MinValue;
+                LastActivityUtc = DateTime.UtcNow;
+                SkipCurrentLine = false;
+                EventHandled = false;
             }
         }
+
         private sealed class ActiveTurn
         {
             public readonly string TurnId;
@@ -2763,11 +3661,14 @@ namespace CodeXPets
             public readonly long StartSequence;
             public string Title;
             public TaskPlanProgress Plan;
+            public DateTime LastActivityUtc;
+
             public ActiveTurn(string turnId, string sourcePath, long startSequence)
             {
                 TurnId = turnId;
                 SourcePath = sourcePath;
                 StartSequence = startSequence;
+                LastActivityUtc = DateTime.MinValue;
             }
         }
 
