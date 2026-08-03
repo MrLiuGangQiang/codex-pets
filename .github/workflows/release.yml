@@ -67,7 +67,8 @@ jobs:
           dotnet-version: 10.0.302
       - name: Verify release version
         run: test "v$(tr -d '[:space:]' < VERSION)" = "${GITHUB_REF_NAME}"
-      - name: Validate signing and notarization secrets
+      - name: Check signing secrets
+        id: signing
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -76,12 +77,17 @@ jobs:
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
         run: |
-          for name in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD \
-            MACOS_CODE_SIGN_IDENTITY APPLE_API_KEY_ID APPLE_API_ISSUER_ID \
-            APPLE_API_PRIVATE_KEY; do
-            test -n "${!name}" || { echo "Missing release secret: $name" >&2; exit 1; }
-          done
+          if [[ -n "${MACOS_CERTIFICATE_P12_BASE64:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" \
+            && -n "${MACOS_CODE_SIGN_IDENTITY:-}" && -n "${APPLE_API_KEY_ID:-}" \
+            && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE_API_PRIVATE_KEY:-}" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Using Developer ID signing/notarization."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Signing secrets missing; using ad-hoc unsigned release."
+          fi
       - name: Install Developer ID certificate and notary credentials
+        if: steps.signing.outputs.available == 'true'
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -111,12 +117,21 @@ jobs:
           rm -f "$CERTIFICATE_PATH"
       - name: Build, test, sign, notarize, and package
         env:
-          CODE_SIGN_IDENTITY: ${{ secrets.MACOS_CODE_SIGN_IDENTITY }}
-          APPLE_NOTARY_PROFILE: codexpets-release-notary
-          REQUIRE_NOTARIZATION: "1"
-        run: bash scripts/build-macos.sh "${{ matrix.rid }}"
+          SIGNING_AVAILABLE: ${{ steps.signing.outputs.available }}
+          MACOS_CODE_SIGN_IDENTITY: ${{ secrets.MACOS_CODE_SIGN_IDENTITY }}
+        run: |
+          if [[ "$SIGNING_AVAILABLE" == "true" ]]; then
+            export CODE_SIGN_IDENTITY="$MACOS_CODE_SIGN_IDENTITY"
+            export APPLE_NOTARY_PROFILE=codexpets-release-notary
+            export REQUIRE_NOTARIZATION=1
+          else
+            export CODE_SIGN_IDENTITY="-"
+            export APPLE_NOTARY_PROFILE=
+            export REQUIRE_NOTARIZATION=0
+          fi
+          bash scripts/build-macos.sh "${{ matrix.rid }}"
       - name: Remove temporary signing material
-        if: always()
+        if: always() && steps.signing.outputs.available == 'true'
         run: |
           if [[ -n "${MACOS_SIGNING_KEYCHAIN:-}" ]]; then
             security delete-keychain "$MACOS_SIGNING_KEYCHAIN" || true
