@@ -36,8 +36,8 @@ public sealed class AppLogicTests
     [Fact]
     public void BusyHeaderAndSessionCounterUseSeparateCompactLabels()
     {
-        Assert.Equal("进行中(1/3)•2/4", AppLogic.FormatBusyHeader("1/3", 1, 4));
-        Assert.Equal("进行中•2/4", AppLogic.FormatBusyHeader(null, 1, 4));
+        Assert.Equal("进行中(1/3) • 2/4", AppLogic.FormatBusyHeader("1/3", 1, 4));
+        Assert.Equal("进行中 • 2/4", AppLogic.FormatBusyHeader(null, 1, 4));
         Assert.Equal("进行中(1/3)", AppLogic.FormatBusyHeader("1/3", 0, 1));
     }
 
