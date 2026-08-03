@@ -31,5 +31,4 @@ Desktop.ini
 .DS_Store
 
 # macOS packaging intermediates
-*.app/
 *.iconset/

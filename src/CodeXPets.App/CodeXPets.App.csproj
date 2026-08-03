@@ -1,0 +1,47 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Icons\CodeXPets.ico</ApplicationIcon>
+    <AssemblyName>CodeXPets</AssemblyName>
+    <RootNamespace>CodeXPets.App</RootNamespace>
+    <Product>CodeXPets</Product>
+    <Description>Cross-platform Codex desktop pet</Description>
+    <Authors>CodeXPets Contributors</Authors>
+    <RepositoryUrl>https://github.com/MrLiuGangQiang/codex-pets</RepositoryUrl>
+    <PublishSingleFile Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == 'win-arm64'">true</PublishSingleFile>
+    <PublishSingleFile Condition="'$(PublishSingleFile)' == ''">false</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract Condition="'$(PublishSingleFile)' == 'true'">true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile Condition="'$(PublishSingleFile)' == 'true'">true</EnableCompressionInSingleFile>
+    <PublishTrimmed Condition="'$(PublishSingleFile)' == 'true'">true</PublishTrimmed>
+    <PublishTrimmed Condition="'$(PublishTrimmed)' == ''">false</PublishTrimmed>
+    <TrimMode Condition="'$(PublishTrimmed)' == 'true'">partial</TrimMode>
+    <ILLinkTreatWarningsAsErrors Condition="'$(PublishTrimmed)' == 'true'">false</ILLinkTreatWarningsAsErrors>
+    <TrimmerSingleWarn Condition="'$(PublishTrimmed)' == 'true'">true</TrimmerSingleWarn>
+    <InvariantGlobalization Condition="'$(PublishTrimmed)' == 'true'">true</InvariantGlobalization>
+    <UseSystemResourceKeys Condition="'$(PublishTrimmed)' == 'true'">true</UseSystemResourceKeys>
+    <DebuggerSupport Condition="'$(PublishTrimmed)' == 'true'">false</DebuggerSupport>
+    <EventSourceSupport Condition="'$(PublishTrimmed)' == 'true'">false</EventSourceSupport>
+    <HttpActivityPropagationSupport Condition="'$(PublishTrimmed)' == 'true'">false</HttpActivityPropagationSupport>
+    <MetadataUpdaterSupport Condition="'$(PublishTrimmed)' == 'true'">false</MetadataUpdaterSupport>
+    <UseSizeOptimizedLinq Condition="'$(PublishTrimmed)' == 'true'">true</UseSizeOptimizedLinq>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+    <PackageReference Include="SkiaSharp" Version="3.119.4" />
+    <PackageReference Include="AvaloniaUI.DiagnosticsSupport" Version="2.2.3" Condition="'$(Configuration)' == 'Debug'" />
+
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\CodeXPets.Core\CodeXPets.Core.csproj" />
+    <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+</Project>
+
