@@ -1,0 +1,30 @@
+root = true
+
+[*]
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.cs]
+indent_style = space
+indent_size = 4
+end_of_line = crlf
+
+[*.{csproj,props,slnx,axaml}]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+
+[*.ps1]
+charset = utf-8-bom
+indent_style = space
+indent_size = 4
+end_of_line = crlf
+
+[*.{sh,yml,yaml,md,plist,entitlements,json,py}]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+
+[*.py]
+indent_size = 4

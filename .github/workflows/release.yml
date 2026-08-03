@@ -10,51 +10,130 @@ permissions:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    name: Windows ${{ matrix.arch }} release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            rid: win-x64
+          - arch: arm64
+            runner: windows-11-arm
+            rid: win-arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
       - name: Verify release version
         shell: pwsh
         run: |
-          $version = (Get-Content VERSION -Raw).Trim()
+          $version = (Get-Content VERSION -Raw -Encoding UTF8).Trim()
           if ("v$version" -ne "${{ github.ref_name }}") {
             throw "VERSION ($version) does not match tag ${{ github.ref_name }}"
           }
       - name: Build, test, and package
         shell: pwsh
-        run: |
-          ./package.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./CodeXPets.SelfTest.exe
-          Copy-Item CodeXPets.exe dist/CodeXPets.exe -Force
+        run: ./package.ps1 -RuntimeIdentifier ${{ matrix.rid }}
       - uses: actions/upload-artifact@v4
         with:
-          name: release-windows
+          name: release-${{ matrix.rid }}
           path: |
-            dist/CodeXPets.exe
-            dist/CodeXPets-v*-win-portable.zip
+            dist/CodeXPets-v*-${{ matrix.rid }}.exe
+            dist/CodeXPets-v*-${{ matrix.rid }}.zip
           if-no-files-found: error
 
   macos:
-    runs-on: macos-14
+    name: macOS ${{ matrix.arch }} release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            rid: osx-arm64
+            package_arch: arm64
+          - arch: x64
+            runner: macos-15-intel
+            rid: osx-x64
+            package_arch: x64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
       - name: Verify release version
+        run: test "v$(tr -d '[:space:]' < VERSION)" = "${GITHUB_REF_NAME}"
+      - name: Validate signing and notarization secrets
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_CODE_SIGN_IDENTITY: ${{ secrets.MACOS_CODE_SIGN_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
         run: |
-          test "v$(tr -d '[:space:]' < VERSION)" = "${GITHUB_REF_NAME}"
-      - name: Test, build, sign, and package
-        run: bash Mac/build-mac.sh
+          for name in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD \
+            MACOS_CODE_SIGN_IDENTITY APPLE_API_KEY_ID APPLE_API_ISSUER_ID \
+            APPLE_API_PRIVATE_KEY; do
+            test -n "${!name}" || { echo "Missing release secret: $name" >&2; exit 1; }
+          done
+      - name: Install Developer ID certificate and notary credentials
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/codexpets-release.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/codexpets-signing.keychain-db"
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 -D > "$CERTIFICATE_PATH"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$API_KEY_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -A -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          xcrun notarytool store-credentials codexpets-release-notary \
+            --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID"
+          echo "MACOS_SIGNING_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "MACOS_API_KEY_PATH=$API_KEY_PATH" >> "$GITHUB_ENV"
+          rm -f "$CERTIFICATE_PATH"
+      - name: Build, test, sign, notarize, and package
+        env:
+          CODE_SIGN_IDENTITY: ${{ secrets.MACOS_CODE_SIGN_IDENTITY }}
+          APPLE_NOTARY_PROFILE: codexpets-release-notary
+          REQUIRE_NOTARIZATION: "1"
+        run: bash scripts/build-macos.sh "${{ matrix.rid }}"
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          if [[ -n "${MACOS_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$MACOS_SIGNING_KEYCHAIN" || true
+          fi
+          rm -f "${MACOS_API_KEY_PATH:-}"
       - uses: actions/upload-artifact@v4
         with:
-          name: release-macos
+          name: release-macos-${{ matrix.arch }}
           path: |
-            dist/CodeXPets-v*-macos-universal.dmg
-            dist/CodeXPets-v*-macos-universal.zip
+            dist/CodeXPets-v*-macos-${{ matrix.package_arch }}.zip
+            dist/CodeXPets-v*-macos-${{ matrix.package_arch }}.dmg
           if-no-files-found: error
 
   publish:
+    name: Publish GitHub release
     needs: [windows, macos]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -64,10 +143,15 @@ jobs:
       - name: Generate SHA-256 checksums
         run: |
           cd release
-          find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\0'             | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\0' \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" release/*             --repo "${GITHUB_REPOSITORY}"             --title "CodeXPets ${GITHUB_REF_NAME}"             --generate-notes             --verify-tag
+          gh release create "${GITHUB_REF_NAME}" release/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "CodeXPets ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag

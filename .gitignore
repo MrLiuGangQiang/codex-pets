@@ -1,12 +1,22 @@
+﻿# Local SDK installed by development bootstrap
+.dotnet/
+
+# Temporary Codex audit and scaffolding data
+.codex-audit/
+.scaffold/
+
 # Build outputs
 *.exe
 *.pdb
 *.dll
+*.deps.json
+*.runtimeconfig.json
 
 # Runtime diagnostics and generated previews
 startup-error.txt
 preview/
 dist/
+artifacts/
 
 # IDE and editor files
 .vs/
@@ -20,8 +30,6 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# Swift/macOS build outputs
-Mac/.build/
-Mac/.swiftpm/
+# macOS packaging intermediates
 *.app/
 *.iconset/

@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CodeXPets.App/CodeXPets.App.csproj" />
+    <Project Path="src/CodeXPets.Core/CodeXPets.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CodeXPets.Core.Tests/CodeXPets.Core.Tests.csproj" />
+  </Folder>
+</Solution>

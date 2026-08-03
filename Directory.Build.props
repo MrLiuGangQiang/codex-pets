@@ -1,0 +1,11 @@
+﻿<Project>
+  <PropertyGroup>
+    <CodeXPetsVersion>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)VERSION').Trim())</CodeXPetsVersion>
+    <Version>$(CodeXPetsVersion)</Version>
+    <AssemblyVersion>$(CodeXPetsVersion).0</AssemblyVersion>
+    <FileVersion>$(CodeXPetsVersion).0</FileVersion>
+    <InformationalVersion>$(CodeXPetsVersion)</InformationalVersion>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+</Project>

@@ -9,42 +9,70 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
-    name: Windows build and self-test
-    runs-on: windows-latest
+    name: Windows ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            rid: win-x64
+          - arch: arm64
+            runner: windows-11-arm
+            rid: win-arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - name: Build and test
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+      - name: Build, test, validate resources, and package
         shell: pwsh
-        run: |
-          ./build.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./CodeXPets.SelfTest.exe
-      - name: Package Windows portable build
-        shell: pwsh
-        run: ./package.ps1
+        run: ./package.ps1 -RuntimeIdentifier ${{ matrix.rid }}
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-portable
+          name: CodeXPets-${{ matrix.rid }}
           path: |
-            CodeXPets.exe
-            dist/CodeXPets-v*-win-portable.zip
-            dist/SHA256SUMS.txt
+            dist/CodeXPets-v*-${{ matrix.rid }}.exe
+            dist/CodeXPets-v*-${{ matrix.rid }}.zip
+            dist/SHA256SUMS-windows.txt
           if-no-files-found: error
+          retention-days: 7
 
   macos:
-    name: macOS Universal build and tests
-    runs-on: macos-14
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            rid: osx-arm64
+            package_arch: arm64
+          - arch: x64
+            runner: macos-15-intel
+            rid: osx-x64
+            package_arch: x64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - name: Test, build, sign, and package
-        run: bash Mac/build-mac.sh
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+      - name: Build, test, validate resources, sign, and package
+        run: bash scripts/build-macos.sh "${{ matrix.rid }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-universal
+          name: CodeXPets-macos-${{ matrix.arch }}
           path: |
-            dist/CodeXPets-v*-macos-universal.dmg
-            dist/CodeXPets-v*-macos-universal.zip
+            dist/CodeXPets-v*-macos-${{ matrix.package_arch }}.zip
+            dist/CodeXPets-v*-macos-${{ matrix.package_arch }}.dmg
             dist/SHA256SUMS-macos.txt
           if-no-files-found: error
+          retention-days: 7
