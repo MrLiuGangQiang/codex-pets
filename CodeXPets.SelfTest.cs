@@ -248,7 +248,7 @@ namespace CodeXPets
                     ref failures);
 
             Check("all event voices embedded", CompletionVoice.HasEmbeddedVoice(), ref failures);
-            Check("release version metadata available", String.Equals(AppInfo.Version, "3.0.0", StringComparison.Ordinal), ref failures);
+            Check("release version metadata available", String.Equals(AppInfo.Version, "3.0.1", StringComparison.Ordinal), ref failures);
 
             PetPositionState savedDockPosition = new PetPositionState(DockEdge.Left,
                 @"\\.\DISPLAY2", 0.5D, 0.375D);
@@ -592,7 +592,7 @@ namespace CodeXPets
                 using (CodeXPetsDiagnosticsForm diagnosticsForm =
                     new CodeXPetsDiagnosticsForm(monitor, testSettings))
                     utilityDialogsLoad = utilityDialogsLoad &&
-                        diagnosticsForm.Text.IndexOf("3.0.0", StringComparison.Ordinal) >= 0;
+                        diagnosticsForm.Text.IndexOf("3.0.1", StringComparison.Ordinal) >= 0;
             }
             catch (Exception ex)
             {

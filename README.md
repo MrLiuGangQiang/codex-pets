@@ -15,12 +15,13 @@ CodeXPets 是一个跨平台 Codex 桌面宠物，原生支持 **Windows** 与 *
 
 请从 GitHub Releases 下载最新正式版：
 
-- `CodeXPets-v3.0.0-win-portable.zip`：Windows 便携版，解压后运行 `CodeXPets.exe`。
+- `CodeXPets-v3.0.1-win-portable.zip`：Windows 便携版，解压后运行 `CodeXPets.exe`。
 - `CodeXPets.exe`：Windows 单文件主程序。
-- `CodeXPets-v3.0.0-macos-universal.zip`：macOS Universal 2 版，支持 Apple Silicon 与 Intel。
+- `CodeXPets-v3.0.1-macos-universal.dmg`：推荐的 macOS 安装镜像，打开后将应用拖入 Applications。
+- `CodeXPets-v3.0.1-macos-universal.zip`：macOS 备用压缩包，支持 Apple Silicon 与 Intel。
 - `SHA256SUMS.txt`：全部发布文件的 SHA-256 校验值。
 
-当前正式版本：**3.0.0**。
+当前正式版本：**3.0.1**。
 
 ## 使用
 
@@ -32,7 +33,7 @@ CodeXPets 是一个跨平台 Codex 桌面宠物，原生支持 **Windows** 与 *
 
 ### macOS
 
-1. 解压 macOS 发布包，将 `CodeXPets.app` 拖入“应用程序”。
+1. 打开 macOS DMG，将 `CodeXPets.app` 拖到镜像中的 `Applications` 快捷入口；也可以解压备用 ZIP 后手动拖入“应用程序”。
 2. 启动后程序常驻菜单栏；菜单提供与 Windows 版对应的显示、声音、登录启动、设置、诊断和更新入口。
 3. 当前个人发布包使用 ad-hoc 签名、未做 Apple Developer ID 公证。首次打开如被系统拦截，请在 Finder 中右键 `CodeXPets.app` 并选择“打开”。
 
@@ -100,7 +101,7 @@ cd ..
 bash Mac/build-mac.sh
 ```
 
-macOS 构建输出 `dist/CodeXPets.app` 和 `dist/CodeXPets-v3.0.0-macos-universal.zip`。详细说明见 `Mac/README.md`。
+macOS 构建输出 `dist/CodeXPets.app`、`dist/CodeXPets-v3.0.1-macos-universal.dmg` 和备用 ZIP。构建脚本会自动挂载 DMG，校验应用版本、Applications 快捷入口、Universal 2 架构、资源和代码签名。详细说明见 `Mac/README.md`。
 
 ## 说明
 

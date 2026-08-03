@@ -7,7 +7,7 @@ struct AppInfo {
     static let repository = URL(string: "https://github.com/MrLiuGangQiang/codex-pets")!
 
     static var version: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "3.0.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "3.0.1"
     }
 
     static var displayName: String { "\(productName) v\(version)" }

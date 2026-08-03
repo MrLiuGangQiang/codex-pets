@@ -8,7 +8,20 @@ BUILD_VERSION="${GITHUB_RUN_NUMBER:-1}"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/CodeXPets.app"
 ZIP_PATH="$DIST_DIR/CodeXPets-v${VERSION}-macos-universal.zip"
+DMG_PATH="$DIST_DIR/CodeXPets-v${VERSION}-macos-universal.dmg"
+DMG_STAGING_DIR="$DIST_DIR/.dmg-staging"
+DMG_MOUNT_DIR=""
+CHECKSUM_PATH="$DIST_DIR/SHA256SUMS-macos.txt"
 SKIP_TESTS=0
+
+cleanup() {
+  if [[ -n "${DMG_MOUNT_DIR:-}" ]]; then
+    hdiutil detach "$DMG_MOUNT_DIR" -quiet >/dev/null 2>&1 || true
+    rmdir "$DMG_MOUNT_DIR" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$DMG_STAGING_DIR"
+}
+trap cleanup EXIT
 
 if [[ "${1:-}" == "--skip-tests" ]]; then
   SKIP_TESTS=1
@@ -30,8 +43,8 @@ if [[ ! -x "$BINARY" ]]; then
 fi
 
 mkdir -p "$DIST_DIR"
-rm -rf "$APP_DIR"
-rm -f "$ZIP_PATH" "$DIST_DIR/SHA256SUMS-macos.txt"
+rm -rf "$APP_DIR" "$DMG_STAGING_DIR"
+rm -f "$ZIP_PATH" "$DMG_PATH" "$CHECKSUM_PATH"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BINARY" "$APP_DIR/Contents/MacOS/CodeXPets"
 chmod +x "$APP_DIR/Contents/MacOS/CodeXPets"
@@ -65,10 +78,57 @@ codesign --verify --deep --strict "$APP_DIR"
 "$APP_DIR/Contents/MacOS/CodeXPets" --validate-resources
 
 ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
-HASH="$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')"
-printf '%s  %s\n' "$HASH" "$(basename "$ZIP_PATH")" \
-  > "$DIST_DIR/SHA256SUMS-macos.txt"
+
+mkdir -p "$DMG_STAGING_DIR"
+ditto "$APP_DIR" "$DMG_STAGING_DIR/CodeXPets.app"
+ln -s /Applications "$DMG_STAGING_DIR/Applications"
+hdiutil create \
+  -volname "CodeXPets $VERSION" \
+  -srcfolder "$DMG_STAGING_DIR" \
+  -ov \
+  -format UDZO \
+  -imagekey zlib-level=9 \
+  "$DMG_PATH" >/dev/null
+hdiutil verify "$DMG_PATH" >/dev/null
+
+DMG_MOUNT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codexpets-dmg.XXXXXX")"
+hdiutil attach "$DMG_PATH" -readonly -nobrowse -mountpoint "$DMG_MOUNT_DIR" -quiet
+DMG_APP="$DMG_MOUNT_DIR/CodeXPets.app"
+
+if [[ ! -d "$DMG_APP" ]]; then
+  echo "DMG is missing CodeXPets.app" >&2
+  exit 1
+fi
+if [[ ! -L "$DMG_MOUNT_DIR/Applications" ]] || \
+   [[ "$(readlink "$DMG_MOUNT_DIR/Applications")" != "/Applications" ]]; then
+  echo "DMG is missing the Applications shortcut" >&2
+  exit 1
+fi
+
+DMG_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+  "$DMG_APP/Contents/Info.plist")"
+if [[ "$DMG_VERSION" != "$VERSION" ]]; then
+  echo "DMG app version mismatch: expected $VERSION, got $DMG_VERSION" >&2
+  exit 1
+fi
+
+plutil -lint "$DMG_APP/Contents/Info.plist"
+lipo "$DMG_APP/Contents/MacOS/CodeXPets" -verify_arch arm64 x86_64
+codesign --verify --deep --strict "$DMG_APP"
+"$DMG_APP/Contents/MacOS/CodeXPets" --validate-resources
+
+hdiutil detach "$DMG_MOUNT_DIR" -quiet
+rmdir "$DMG_MOUNT_DIR"
+DMG_MOUNT_DIR=""
+rm -rf "$DMG_STAGING_DIR"
+
+: > "$CHECKSUM_PATH"
+for package in "$DMG_PATH" "$ZIP_PATH"; do
+  hash="$(shasum -a 256 "$package" | awk '{print $1}')"
+  printf '%s  %s\n' "$hash" "$(basename "$package")" >> "$CHECKSUM_PATH"
+done
 
 echo "macOS app: $APP_DIR"
-echo "macOS package: $ZIP_PATH"
-echo "SHA256: $HASH"
+echo "macOS DMG: $DMG_PATH"
+echo "macOS ZIP: $ZIP_PATH"
+cat "$CHECKSUM_PATH"
