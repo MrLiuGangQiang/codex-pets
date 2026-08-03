@@ -32,7 +32,10 @@ bash Mac/build-mac.sh
 输出：
 
 - `dist/CodeXPets.app`
-- `dist/CodeXPets-v<version>-macos-universal.zip`
+- `dist/CodeXPets-v<version>-macos-universal.dmg`（推荐安装包，包含 Applications 快捷入口）
+- `dist/CodeXPets-v<version>-macos-universal.zip`（备用压缩包）
 - `dist/SHA256SUMS-macos.txt`
 
-发布包使用 ad-hoc 签名，未做 Apple Developer ID 公证。首次打开下载版时，如系统提示来源未知，请在 Finder 中右键应用并选择“打开”。
+构建脚本会创建并挂载 DMG，验证应用版本、Applications 快捷入口、arm64 + x86_64 架构、资源完整性与代码签名。
+
+发布包使用 ad-hoc 签名，未做 Apple Developer ID 公证。安装时打开 DMG，将 `CodeXPets.app` 拖到 `Applications`；首次打开如被系统拦截，请在 Finder 中右键应用并选择“打开”。
