@@ -378,7 +378,7 @@ void Renderer::draw_cloud(Graphics& graphics, const RenderState& state, double /
     }
 
     constexpr float large_w = 17.0f, large_h = 15.0f, small_w = 11.0f, small_h = 10.0f;
-    RectF large, small;
+    RectF large_dot, small_dot;
     const auto pet = visible_pet_bounds(state);
     if (state.docked) {
         const float inset = std::min(38.0f, visible_cloud.Width * 0.18f);
@@ -403,8 +403,8 @@ void Renderer::draw_cloud(Graphics& graphics, const RenderState& state, double /
         const PointF lc(cloud_anchor.X + ux * large_d, cloud_anchor.Y + uy * large_d);
         const PointF sc(cloud_anchor.X + ux * small_d - uy * perpendicular,
                         cloud_anchor.Y + uy * small_d + ux * perpendicular);
-        large = RectF(lc.X-large_w/2,lc.Y-large_h/2,large_w,large_h);
-        small = RectF(sc.X-small_w/2,sc.Y-small_h/2,small_w,small_h);
+        large_dot = RectF(lc.X-large_w/2,lc.Y-large_h/2,large_w,large_h);
+        small_dot = RectF(sc.X-small_w/2,sc.Y-small_h/2,small_w,small_h);
     } else {
         const float direction = state.mirror ? 1.0f : -1.0f;
         const float small_x = cloud.X + cloud.Width / 2.0f + direction * 11.0f;
@@ -420,11 +420,11 @@ void Renderer::draw_cloud(Graphics& graphics, const RenderState& state, double /
                                  visible_cloud.GetBottom() + 12.0f);
             small_y = std::max(desired, large_y + large_h + 1.0f);
         }
-        large = RectF(large_x-large_w/2,large_y,large_w,large_h);
-        small = RectF(small_x-small_w/2,small_y,small_w,small_h);
+        large_dot = RectF(large_x-large_w/2,large_y,large_w,large_h);
+        small_dot = RectF(small_x-small_w/2,small_y,small_w,small_h);
     }
-    draw_thought_dot(graphics, large);
-    draw_thought_dot(graphics, small);
+    draw_thought_dot(graphics, large_dot);
+    draw_thought_dot(graphics, small_dot);
 
     const float origin_x = std::round(visible_cloud.X + visible_cloud.Width * 0.10f);
     const float origin_y = std::round(visible_cloud.Y + visible_cloud.Height * 0.32f);

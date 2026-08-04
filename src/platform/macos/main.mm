@@ -480,8 +480,11 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
         if (error) *error = @"无法创建预览色彩空间";
         return NO;
     }
+    const CGBitmapInfo bitmapInfo = static_cast<CGBitmapInfo>(
+        static_cast<uint32_t>(kCGImageAlphaPremultipliedLast) |
+        static_cast<uint32_t>(kCGBitmapByteOrder32Big));
     CGContextRef bitmapContext = CGBitmapContextCreate(nullptr, width, height, 8, width * 4,
-        colorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        colorSpace, bitmapInfo);
     CGColorSpaceRelease(colorSpace);
     if (!bitmapContext) {
         if (error) *error = @"无法创建预览位图";
