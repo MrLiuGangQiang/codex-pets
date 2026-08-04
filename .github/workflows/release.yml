@@ -20,7 +20,7 @@ jobs:
       matrix:
         include:
           - arch: x64
-            runner: windows-2025
+            runner: windows-2022
             rid: win-x64
           - arch: arm64
             runner: windows-11-arm

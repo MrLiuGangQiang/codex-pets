@@ -211,16 +211,6 @@ NSButton* MakeButton(NSString* title, id target, SEL action, NSRect frame) {
     return button;
 }
 
-const char* ArchitectureName() {
-#if defined(__arm64__) || defined(__aarch64__)
-    return "arm64";
-#elif defined(__x86_64__)
-    return "x86_64";
-#else
-    return "unknown";
-#endif
-}
-
 std::string ArgumentAt(int argc, const char* const* argv, int index) {
     return index >= 0 && index < argc && argv[index] ? std::string(argv[index]) : std::string{};
 }
