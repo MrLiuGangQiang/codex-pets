@@ -1,102 +1,111 @@
-# CodeXPets 架构设计
+# CodeXPets 4.0 原生架构
 
-## 设计目标
-
-1. Windows x64/ARM64 与 macOS x64/ARM64 使用同一业务实现。
-2. 会话识别结果在不同平台保持一致。
-3. 平台 API 不进入 Core，Core 不引用 Avalonia。
-4. 任务状态只来自 Codex JSONL 会话文件，避免多套监控实现漂移。
-5. 资源、CPU 架构、版本、签名和发布产物都可以自动校验。
-6. 正式仓库只保留一套 .NET 10 + Avalonia 产品架构。
-
-## 依赖方向
+## 总览
 
 ```text
-CodeXPets.App  ───────>  CodeXPets.Core
-     │                        │
-     │ Avalonia               │ System.Text.Json / BCL
-     │ Win32 / Objective-C    │ 无 UI、无平台窗口依赖
-     └────────────────────────┘
+Codex sessions/*.jsonl
+          │
+          ▼
+  CodexSessionMonitor / MonitorWorker
+          │  500 ms 自适应轮询、增量偏移读取
+          ▼
+  MonitorSnapshot + MonitorEventKind
+          │
+          ▼
+  VisualStateCoordinator + AppLogic
+          │
+     ┌────┴────┐
+     ▼         ▼
+ Windows     macOS
+ Win32       AppKit
+ GDI+        Core Graphics
 ```
 
-- `CodeXPets.Core.Configuration`：Codex 路径、`CODEX_HOME` 与 JSON 设置。
-- `CodeXPets.Core.Monitoring`：任务模型、有界 JSONL 文件发现、增量读取、UTF-8 解码和事件归约。
-- `CodeXPets.Core.Application`：视觉状态、任务选择、吸附和精灵索引规则。
-- `CodeXPets.Core.Domain`：状态、位置和几何值对象。
-- `CodeXPets.App.Views`：透明窗口、桌宠 surface、设置与诊断窗口。
-- `CodeXPets.App.Services`：`MonitorWorker`、资源、声音和离屏预览。
-- `CodeXPets.App.Infrastructure`：单实例、旧设置迁移和 OS adapter。
+`src/core` 不依赖任何 UI 框架。平台层只负责窗口、输入、系统菜单、声音、登录启动和系统诊断。
 
-## 运行时数据流
+## 核心模块
 
-```text
-Codex sessions/**/*.jsonl
-          │ 创建 / 修改 / 重命名 / 删除
-          ▼
-  FileSystemWatcher（递归）
-          │ 变化信号
-          ▼
-MonitorWorker
-  ├─ 25 ms 事件防抖
-  ├─ 120 ms 最小轮询间隔
-  └─ 30 s 恢复轮询
-          │ Poll()
-          ▼
-CodexSessionMonitor
-  ├─ 当天及前两天快速发现
-  ├─ 每 120 s 完整发现
-  ├─ 最多跟踪最近修改的 40 个文件
-  ├─ 按文件位置读取新增字节
-  ├─ 有状态 UTF-8 解码与行缓冲
-  └─ 任务、标题、完成/异常与计划进度归约
-          │ MonitorSnapshot / MonitorEventKind
-          ▼
- Dispatcher.UIThread
-          ▼
-AppController ── VisualStateCoordinator / TrayIcon / SoundService / PetWindow
-```
+- `types.h`：平台无关的状态、位置和监控快照模型。
+- `json.*`：自研小型 JSON 读写器，支持设置和会话中需要的 JSON 类型及 Unicode 代理对。
+- `paths.*`：`CODEX_HOME`、用户目录、配置文件和 settings 路径。
+- `settings.*`：设置归一化、原子写入、旧 Windows/macOS 位置迁移。
+- `session_monitor.*`：JSONL 增量读取、活动 turn、异常、完成和计划进度。
+- `app_logic.*`：视觉状态、吸附、边缘触发、任务选择和动画帧规则。
+- `visual_state.*`：完成/异常通知窗口和新任务聚焦状态。
 
-`MonitorWorker` 只把文件变化转换为轮询信号，不直接解析 JSONL。多个连续文件事件会合并；即使操作系统遗漏通知、监听器暂时无法创建或监听缓冲区报错，30 秒恢复轮询仍会继续工作，并在后续尝试重新建立监听器。
+### 轮询而不是文件系统 watcher
 
-`CodexSessionMonitor` 为每个文件保存读取位置、UTF-8 解码器和未完成行缓冲。文件增长时只读取新增字节；文件被截断时重置该文件状态。初次读取历史内容时抑制旧完成通知，后续新增内容才产生实时任务事件。监控器只读会话文件，不修改 Codex 数据。
+原来的 UI 运行时和 watcher 都会带来较大的常驻内存和跨平台差异。原生版本每 500 ms 检查目录元数据，随后只读取最近文件的新增字节；每次扫描都保持有界的文件表，最多 40 个文件。这个设计牺牲了极少量响应延迟，换取更小的线程、句柄和平台适配成本，并且在 watcher 丢事件时可以自动恢复。
 
-监控线程不持有 UI 对象。`AppController` 接收不可变快照，并只在 Avalonia UI 线程更新窗口、托盘和声音状态。
+## Windows
 
-## 平台边界
+`src/platform/windows` 使用：
 
-`IPlatformService` 是唯一的窗口级 OS 边界：
+- Win32 分层透明窗口和 `WM_NCHITTEST` Alpha 穿透。
+- GDI+ 绘制文字、灯泡及精灵；云朵使用旧版 Skia 降采样后的 640×221 像素资源，以保持原有外观。
+- 通知区域图标、注册表登录启动、MCI MP3 播放。
+- `MonitorWorker` 事件通过隐藏消息窗口投递到 UI 线程。
+- 屏幕标识格式包含设备名和几何信息，兼容旧注册表中的 Base64 标识。
 
-- Windows：`WM_NCHITTEST` 透明区域穿透、`WS_EX_NOACTIVATE`、注册表启动项、Explorer、MessageBox。
-- macOS：CoreGraphics 光标、`setIgnoresMouseEvents:`、`SMAppService`、`open`。
+发布时使用静态运行库/原生系统库，不携带第三方 DLL。链接阶段打开尺寸优化和 dead code elimination。
 
-音频服务内部仅按平台选择 Windows MCI 或 macOS `afplay`。其余状态和资源逻辑完全共享。
+## macOS
 
-## 路径与设置
+`src/platform/macos/main.mm` 使用：
 
-- `CodexPaths` 每次从当前 OS 与 `CODEX_HOME` 解析默认路径。
-- 默认会话目录为 Codex Home 下的 `sessions`，也可以由设置覆盖。
-- Windows 文件路径比较不区分大小写；macOS 文件路径比较区分大小写。
-- 保存的位置由显示器标识、相对 X/Y 和吸附边组成，不直接保存某一平台的绝对路径。
-- 设置写入平台用户数据目录，并从临时文件原子替换。
+- `NSPanel` 透明无边框窗口，菜单栏 `NSStatusItem`。
+- `NSImage` 按需缓存精灵，云朵和灯泡使用 AppKit 矢量绘制。
+- `setIgnoresMouseEvents:` 配合 50 ms 全局鼠标轮询实现透明点击穿透。
+- 手动拖动、左/右吸附、局部边缘唤出和多显示器恢复。
+- `SMAppService` 登录启动，`NSSound` 播放语音，Mach task API 输出内存诊断。
+- 预览使用 Core Graphics bitmap context，不依赖大型离屏渲染库。
 
-## 资源合同
+### 坐标转换
 
-`--validate-resources` 不只检查文件存在，还检查：
+共享设置格式使用 top-origin 的 `RelativeY`：
 
-- 浮动精灵表 `1536x832`，8 列 × 4 行。
-- 扒边精灵表 `2048x256`，左右各 4 帧。
-- 所有托盘图标与应用图标尺寸。
-- PNG 可解码、背景透明。
-- 首帧和整表中白色身体、深色耳尾、暖色内耳和金黄色眼睛的像素阈值。
-- 三个语音资源非空。
+- Windows 工作区本来就是 top-origin。
+- AppKit 全局坐标是 bottom-origin，保存时使用
+  `RelativeY = (work.top - anchorY) / work.height`，恢复时反向转换。
+- 旧 macOS `NSUserDefaults` 中的 bottom-origin 值由
+  `deserialize_legacy_macos_position` 先镜像一次。
 
-这可以阻止带棋盘背景、错误尺寸或错误配色的 AI 中间图进入发布包。
+浮动模式保存窗口底部锚点；吸附模式保存屏幕边缘和鼠标的垂直坐标，而不是保存窗口被隐藏后的实际坐标，因此显示器分辨率变化后仍能稳定恢复。
 
-## 发布合同
+## 资源策略
 
-- `VERSION` 是程序集版本、包名和 Info.plist 版本的单一来源。
-- Windows x64/ARM64 发布为压缩 self-contained 单 EXE，禁止旁置运行时文件，并检查 apphost PE machine。
-- macOS 包检查 apphost 及所有 Mach-O 文件的目标架构。
-- 能在当前 runner 原生执行的产物必须通过 `--smoke-test`，并离屏渲染空闲、忙碌、完成、异常和左右扒边状态。
-- macOS Developer ID 构建使用 hardened runtime 与 JIT entitlement，并执行 notarization/stapling。
-- Release 汇总四个架构产物并重新生成统一 SHA-256。
+`assets` 只包含运行时真正需要的单帧 PNG 和三段 MP3：
+
+- `floating/`：4 个状态 × 8 帧。
+- `dock/`：左右扒边按需帧。
+- `icons/`：菜单栏/通知区域状态图标。
+- `audio/`：开始、完成、异常语音。
+
+2122×734 云朵原图不进入发布包；Windows 携带旧版运行时实际使用的 640×221 降采样资源。macOS 构建只复制运行时目录，并由 `make-macos-icon.sh` 使用系统 `sips`/`iconutil` 生成 `AppIcon.icns`。
+
+## 设置和迁移
+
+统一 JSON 设置文件通过临时文件加原子替换写入。启动时：
+
+1. 如果原生 settings.json 存在，读取并归一化。
+2. Windows 若没有新文件，尝试旧注册表路径。
+3. macOS 若没有新文件，尝试旧 `com.mrliugangqiang.codexpets` defaults 域。
+4. 迁移成功后立即写入原生 JSON，后续不再依赖旧架构。
+
+## 体积/内存边界
+
+原生程序没有可携带的托管运行时或 JIT。发布脚本对以下对象逐一执行 10 MiB 检查：
+
+- Windows EXE 和 ZIP。
+- macOS `.app`、ZIP 和 DMG。
+
+应用内不主动调用 `EmptyWorkingSet` 或类似 API。工作集中的系统共享代码页不是应用私有分配；诊断窗口同时显示工作集和 macOS `phys_footprint`/Windows PrivateUsage，便于区分两者。
+
+## 测试层次
+
+- `tests/native_tests.cpp`：核心路径、设置、JSON、状态机和 JSONL 生命周期。
+- `--validate-resources`：运行时资源存在性和尺寸合同。
+- `--smoke-test`：四种状态、左右吸附和离屏渲染。
+- `--startup-smoke-test`：在隔离配置下真实创建 Windows 后台消息窗口、桌宠窗口、托盘和监控线程，完成首次渲染后清理退出。
+- CTest：平台核心测试以及目标系统上的资源/冒烟命令。
+- 发布脚本：PE/Mach-O 架构、Info.plist、签名、公证、ZIP/DMG 结构和 SHA-256。

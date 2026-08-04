@@ -29,12 +29,14 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.302
-      - name: Build, test, validate resources, and package
+      - name: Toolchain versions
         shell: pwsh
-        run: ./package.ps1 -RuntimeIdentifier ${{ matrix.rid }}
+        run: |
+          cmake --version
+          Write-Host "Host architecture: $([Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+      - name: Build, test, validate, and package
+        shell: pwsh
+        run: ./package.ps1 -RuntimeIdentifier ${{ matrix.rid }} -Toolchain msvc
       - uses: actions/upload-artifact@v4
         with:
           name: CodeXPets-${{ matrix.rid }}
@@ -54,25 +56,25 @@ jobs:
           - arch: arm64
             runner: macos-15
             rid: osx-arm64
-            package_arch: arm64
           - arch: x64
             runner: macos-15-intel
             rid: osx-x64
-            package_arch: x64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.302
-      - name: Build, test, validate resources, sign, and package
+      - name: Toolchain versions
+        run: |
+          cmake --version
+          clang++ --version
+          uname -a
+      - name: Build, test, sign, and package
         run: bash scripts/build-macos.sh "${{ matrix.rid }}"
       - uses: actions/upload-artifact@v4
         with:
           name: CodeXPets-macos-${{ matrix.arch }}
           path: |
-            dist/CodeXPets-v*-macos-${{ matrix.package_arch }}.zip
-            dist/CodeXPets-v*-macos-${{ matrix.package_arch }}.dmg
+            dist/CodeXPets-v*-macos-${{ matrix.arch }}.zip
+            dist/CodeXPets-v*-macos-${{ matrix.arch }}.dmg
             dist/SHA256SUMS-macos.txt
           if-no-files-found: error
           retention-days: 7

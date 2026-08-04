@@ -1,16 +1,27 @@
-﻿# Local SDK installed by development bootstrap
+# Local toolchains and SDKs
 .dotnet/
+.tools/
 
-# Temporary Codex audit and scaffolding data
+# Temporary Codex audit/scaffolding data
 .codex-audit/
 .scaffold/
 
-# Build outputs
+# Native build outputs
+build/
+CMakeUserPresets.json
+compile_commands.json
+*.o
+*.obj
+*.a
+*.lib
 *.exe
 *.pdb
 *.dll
-*.deps.json
-*.runtimeconfig.json
+*.dylib
+*.dSYM/
+*.app/
+*.dmg
+*.zip
 
 # Runtime diagnostics and generated previews
 startup-error.txt
@@ -20,6 +31,7 @@ artifacts/
 
 # IDE and editor files
 .vs/
+.vscode/
 bin/
 obj/
 *.user

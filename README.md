@@ -1,191 +1,148 @@
 # CodeXPets
 
-CodeXPets 3.0.5 是一个使用 **.NET 10 + Avalonia 12.1.1** 构建的跨平台 Codex 桌面宠物。Windows 和 macOS 现在共用同一套 C# 核心、会话解析规则、状态机、绘制逻辑与设置模型，仅把窗口穿透、登录启动、系统菜单和声音播放等能力放到平台适配层。
+CodeXPets 4.0.0 是一个面向 Codex 的**原生桌面宠物**。本版本将原来的 .NET/Avalonia/SkiaSharp 架构完全替换为轻量 C++20 核心和系统原生 UI：
 
-桌宠形象固定为一只卡通化的 **白色英国短毛猫**：**深灰色耳朵、深灰色尾巴、暖粉色内耳、金黄色眼睛**。浮动、忙碌、完成、异常和左右扒边动画均沿用原 Windows 版的帧布局与交互节奏。
+- Windows：Win32 + GDI+
+- macOS：AppKit + Core Graphics
+- 核心：无第三方运行时、自研轻量 JSON 解析器、增量 JSONL 会话监控
+
+目标是**不牺牲功能的前提下尽量降低发布体积和内存占用**。发布脚本会拒绝超过 10 MiB 的 EXE、APP、ZIP 或 DMG；实际工作集会受操作系统图形框架、字体和显示器缩放影响，不能只由应用代码绝对控制。
 
 ## 支持矩阵
 
-| 操作系统 | CPU 架构 | Runtime Identifier | 发布文件 |
+| 系统 | 架构 | 构建/发布目标 | 文件 |
 |---|---:|---|---|
-| Windows | x64 | `win-x64` | `CodeXPets-v3.0.5-win-x64.exe` / `.zip` |
-| Windows | ARM64 | `win-arm64` | `CodeXPets-v3.0.5-win-arm64.exe` / `.zip` |
-| macOS | Intel x64 | `osx-x64` | `CodeXPets-v3.0.5-macos-x64.zip` / `.dmg` |
-| macOS | Apple Silicon ARM64 | `osx-arm64` | `CodeXPets-v3.0.5-macos-arm64.zip` / `.dmg` |
+| Windows | x64 | `win-x64` | `CodeXPets-v4.0.0-win-x64.exe` / `.zip` |
+| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.0.0-win-arm64.exe` / `.zip` |
+| macOS | Intel | `osx-x64` | `CodeXPets-v4.0.0-macos-x64.zip` / `.dmg` |
+| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.0.0-macos-arm64.zip` / `.dmg` |
 
-所有发布包均为 self-contained，不要求用户另行安装 .NET。Windows 版本是压缩的单 EXE；ZIP 备份中也只包含一个 `CodeXPets.exe`。首次运行时 .NET 会把 Avalonia/Skia 所需的少量原生库缓存到 `%TEMP%\.net`，程序所在目录始终只需要这一个 EXE。macOS 构建的最低系统版本为 **macOS 13**；这是登录启动适配层使用 `SMAppService` 的最低版本。
+macOS 最低支持 macOS 13。Windows 版本是一个自包含原生 EXE；macOS 版本是标准 `CodeXPets.app`。两者都不要求用户安装 .NET、Electron、Qt 或其他附加运行时。
 
-## 功能
+## 保留的功能
 
-- 通过 `FileSystemWatcher` 监听 Codex 会话目录，并对 JSONL 新增内容进行增量解析，识别空闲、进行中、完成、异常、标题和计划进度。
-- 文件系统事件经过防抖和最小轮询间隔合并，并保留周期恢复轮询，降低重复读取且避免遗漏任务。
-- Windows 通知区域图标与 macOS 菜单栏图标。
-- 透明、无边框、置顶且不抢焦点的桌面宠物窗口。
-- 云朵任务文字、自动换行、长文本滚动、多任务自动轮换与点击切换。
-- 多显示器位置记忆，显示器分辨率变化后优先按显示器名称恢复。
-- 左右边缘吸附、自动隐藏、固定高度局部边缘唤出、拖动解除吸附。
-- 设置、诊断、语音提醒、开机/登录启动、打开会话目录和更新入口。
-- 旧 Windows 注册表设置与旧 macOS `UserDefaults` 设置的一次性迁移。
-- 单实例运行、资源完整性校验、架构校验和发布包 SHA-256。
+- 读取 Codex `sessions` 目录中的 JSONL 文件，增量解析新增内容。
+- 识别任务开始、完成、异常、标题、`update_plan` 计划进度和过期任务。
+- Windows 通知区域图标、macOS 菜单栏图标。
+- 透明、无边框、置顶、不抢焦点的桌面宠物窗口。
+- 云朵文本、自动换行、长文本滚动、多任务自动轮换和点击切换。
+- 左右边缘吸附、局部边缘唤出、自动隐藏、拖动解除吸附。
+- 多显示器位置保存/恢复，支持显示器变化后的降级匹配。
+- 设置窗口、诊断窗口、语音提醒、登录启动、打开会话目录和更新入口。
+- Windows 旧注册表设置、macOS 旧 `NSUserDefaults` 设置以及旧位置格式迁移。
+- 单实例、资源完整性校验、离屏冒烟渲染、真实窗口启动冒烟和 SHA-256 校验。
 
-CodeXPets 只读取 Codex JSONL 会话文件，不会修改、移动或删除这些文件。
+CodeXPets 只读取 Codex 会话文件，不会修改、移动或删除这些文件。
+
+## 目录规则
+
+`CODEX_HOME` 优先级最高。未设置时：
+
+| 系统 | Codex Home | sessions | config |
+|---|---|---|---|
+| Windows | `%USERPROFILE%\\.codex` | `%USERPROFILE%\\.codex\\sessions` | `%USERPROFILE%\\.codex\\config.toml` |
+| macOS | `~/.codex` | `~/.codex/sessions` | `~/.codex/config.toml` |
+
+也可以在设置窗口中选择自定义 sessions 目录。
+
+设置文件位置：
+
+- Windows：`%LOCALAPPDATA%\\CodeXPets\\settings.json`
+- macOS：`~/Library/Application Support/CodeXPets/settings.json`
+
+## 运行监控策略
+
+为了避免 `FileSystemWatcher`、FSEvents 和大型 UI 运行时带来的额外常驻开销，原生版本采用轻量自适应轮询：
+
+- 默认每 500 ms 检查一次目录和最近跟踪的 JSONL 文件。
+- 只从保存的字节偏移继续读取新增内容。
+- 最多跟踪最近 40 个文件，并周期性执行恢复扫描。
+- 文件不存在、正在写入或 JSON 行不完整时会安全延后到下一轮。
+
+正常情况下状态变化延迟小于 1 秒，同时不要求安装额外后台服务。
 
 ## 使用
 
 ### Windows
 
-1. 下载与 CPU 匹配的单文件 EXE；ZIP 只是仅含同一个 `CodeXPets.exe` 的备用包。
-2. 直接运行 `CodeXPets-v3.0.5-win-x64.exe` 或 `CodeXPets-v3.0.5-win-arm64.exe`，无需安装 .NET、无需解压其他依赖。
-3. 右键通知区域图标可显示/隐藏桌宠、切换声音、设置开机启动、打开设置或诊断窗口。
-4. 如需固定入口，可自行把 EXE 放到长期目录后创建开始菜单或桌面快捷方式。
+1. 下载与 CPU 架构匹配的 EXE，直接运行。
+2. 右键通知区域图标可以显示/隐藏桌宠、切换语音、设置登录启动、打开设置和诊断。
+3. 拖动猫或云朵可以移动桌宠；靠近屏幕左/右边缘释放即可吸附。
 
 ### macOS
 
-1. 下载与 CPU 匹配的 DMG，打开后将 `CodeXPets.app` 拖入 `Applications`；ZIP 是备用分发格式。
-2. 启动后应用常驻菜单栏，不显示 Dock 图标。
-3. 正式 Release 工作流会使用 Developer ID 签名并完成 Apple 公证；个人 ad-hoc 构建首次启动时可能需要在 Finder 中右键选择“打开”。
+1. 打开 DMG，将 `CodeXPets.app` 拖入 `Applications`；ZIP 是备用格式。
+2. 应用常驻菜单栏，不显示 Dock 图标。
+3. 正式发布会使用 Developer ID 签名和 Apple 公证；个人构建可以使用 ad-hoc 签名。
 
-## Codex 会话监听
+## 从源码构建
 
-CodeXPets 的唯一任务状态来源是 Codex sessions 目录中的 `*.jsonl` 文件，不需要额外启动或配置其他事件服务。
+### Windows PowerShell
 
-- `FileSystemWatcher` 递归监听会话文件的创建、修改、重命名和删除。
-- 文件变化事件先进行约 25 毫秒防抖；连续读取之间至少间隔约 250 毫秒。
-- 无文件事件时每 30 秒执行一次恢复轮询；监听器创建失败或通知丢失时仍可继续发现变化。
-- `CodexSessionMonitor` 记录每个文件的读取位置，只读取新增字节，并使用有状态 UTF-8 解码处理跨读取块字符和不完整行。
-- 快速发现覆盖当天及前两天的日期目录；完整发现每 600 秒执行一次，并最多跟踪最近修改的 40 个文件。
-- 解析结果归一化为任务开始、完成、异常、标题和计划进度，再由 Avalonia UI 线程更新桌宠、云朵、托盘图标与提示音。
+本地若安装了 Zig 和 Ninja，脚本会优先使用轻量 Zig 工具链；GitHub Actions 使用 MSVC。
 
-## Codex 目录规则
+```powershell
+# 构建、测试、资源校验、离屏渲染和真实窗口启动冒烟测试
+./build.ps1
 
-`CODEX_HOME` 始终优先。未设置时：
+# 生成 Windows x64 EXE 和 ZIP
+./package.ps1 -RuntimeIdentifier win-x64
 
-| 平台 | Codex Home | sessions | config |
-|---|---|---|---|
-| Windows | `%USERPROFILE%\.codex` | `%USERPROFILE%\.codex\sessions` | `%USERPROFILE%\.codex\config.toml` |
-| macOS | `~/.codex` | `~/.codex/sessions` | `~/.codex/config.toml` |
+# 生成 Windows ARM64（需要 ARM64 主机或 MSVC 交叉工具链）
+./package.ps1 -RuntimeIdentifier win-arm64 -Toolchain msvc
+```
 
-也可以在设置窗口中选择自定义 sessions 目录。路径层会拒绝把 Windows 盘符路径用于 macOS，或把 Unix/macOS 绝对路径用于 Windows；文件身份比较在 Windows 上不区分大小写，在 macOS 上区分大小写。
+也可以直接使用 CMake：
 
-## 设置文件
+```powershell
+cmake -S . -B build/native-windows-x64-zig
+cmake --build build/native-windows-x64-zig --parallel
+ctest --test-dir build/native-windows-x64-zig --output-on-failure
+```
 
-- Windows：`%LOCALAPPDATA%\CodeXPets\settings.json`
-- macOS：`~/Library/Application Support/CodeXPets/settings.json`
+### macOS
 
-保存采用临时文件后原子替换。首次运行新架构时，程序会尝试迁移旧设置：
+需要 Xcode Command Line Tools、CMake、Clang；有 Ninja 时会自动使用 Ninja。
 
-- Windows：`HKCU\Software\CodeXPets` 与 `HKCU\Software\CodeXPets\Windows`
-- macOS：bundle id `com.mrliugangqiang.codexpets` 对应的 `UserDefaults`
+```bash
+bash scripts/build-macos.sh osx-arm64   # Apple Silicon
+bash scripts/build-macos.sh osx-x64     # Intel
+```
 
-## 架构
+脚本会完成 CMake 构建、CTest、资源校验、冒烟渲染、签名、ZIP/DMG、架构检查和 10 MiB 体积检查。签名变量：
+
+- `CODE_SIGN_IDENTITY`：默认 `-`（ad-hoc）
+- `APPLE_NOTARY_PROFILE`：Apple notarytool keychain profile
+- `REQUIRE_NOTARIZATION=1`：强制要求正式签名和公证
+
+## 原生命令行工具
+
+原生可执行文件支持：
 
 ```text
-CodeXPets.slnx
-├─ src/CodeXPets.Core/          # 平台无关：路径、设置、状态机与 JSONL 会话解析
-├─ src/CodeXPets.App/           # Avalonia UI、桌宠绘制、托盘、声音与平台适配器
-│  ├─ Infrastructure/
-│  │  ├─ WindowsPlatformService.cs
-│  │  └─ MacPlatformService.cs
-│  ├─ Services/
-│  └─ Views/
-├─ tests/CodeXPets.Core.Tests/  # 路径、状态、交互规则和会话生命周期回归测试
-├─ packaging/macos/             # Info.plist 与 hardened runtime entitlement
-├─ scripts/build-macos.sh       # macOS x64/ARM64 原生打包
-└─ package.ps1                  # Windows x64/ARM64 原生打包
+--version
+--validate-resources
+--smoke-test
+--preview <目录>
+--test-sound
 ```
 
-更详细的依赖方向、运行时数据流和平台边界见 `docs/architecture.md`。
+这些命令用于 CI 和发布前诊断，不会启动常驻桌宠。
 
+## 体积和内存优化
 
-## 构建
+- 不携带 .NET、JIT、Electron、Qt、SkiaSharp 或大型跨平台 UI 库。
+- Windows 恢复旧版像素云朵外观，构建资源使用与旧版相同的 Skia 降采样结果（640×221），避免携带 2122×734 原图。
+- 浮动精灵只缓存当前状态的 8 帧；扒边帧按需读取。
+- Windows 链接器使用 dead-strip/折叠等尺寸优化；macOS 使用 `-dead_strip`。
+- 发布脚本对 EXE、APP、ZIP、DMG 统一执行 10 MiB 硬限制。
 
-需要 .NET SDK `10.0.302`；仓库中的 `global.json` 固定该 feature band。
+Windows x64 原生构建的实测结果（同一台开发机、Release 构建，确认真实桌宠窗口和后台消息窗口均已创建，桌宠可见，空闲/忙碌/完成状态各连续采样）约为：EXE 1.27 MiB，私有内存 4.36–4.60 MiB，工作集 20.26–21.10 MiB，6 个线程。工作集包含系统共享的 GDI+/窗口代码页；不建议为了显示一个更小的数字强行清空工作集而造成页面抖动。macOS 的内存应在目标系统上通过“诊断信息”查看。
 
-### Windows
+## 架构文档
 
-```powershell
-# 构建、测试、校验全部资源并离屏渲染所有状态
-.\build.ps1
+详见 [`docs/architecture.md`](docs/architecture.md)。
 
-# 生成当前 Windows 可执行的两个架构包
-.\package.ps1 -RuntimeIdentifier all
+## 版权与致谢
 
-# 也可以只生成一个架构
-.\package.ps1 -RuntimeIdentifier win-x64
-.\package.ps1 -RuntimeIdentifier win-arm64
-```
-
-`package.ps1` 会：
-
-1. 构建并运行测试。
-2. 运行白色英短资源尺寸、透明背景、配色校验和全部浮动/扒边状态离屏渲染。
-3. 生成包含 .NET、Avalonia、Skia 和原生依赖的压缩 self-contained 单 EXE。
-4. 强制发布目录只能包含一个 `CodeXPets.exe`，并校验 PE machine：x64 为 `0x8664`，ARM64 为 `0xAA64`。
-5. 在宿主机能够原生执行该架构时运行发布产物冒烟测试。
-6. 删除调试符号，生成可直接运行的版本化 EXE、仅含一个 EXE 的 ZIP 和 `SHA256SUMS-windows.txt`。
-
-### macOS
-
-```bash
-# 当前机器架构
-bash scripts/build-macos.sh osx-arm64
-# 或
-bash scripts/build-macos.sh osx-x64
-
-# 同时生成两个架构（交叉架构仅发布，不默认执行冒烟测试）
-bash scripts/build-macos.sh all
-```
-
-脚本会生成标准 `CodeXPets.app`、ICNS、ZIP、DMG 和 `SHA256SUMS-macos.txt`，并用 `lipo` 检查 apphost 以及 bundle 内所有 Mach-O 文件。默认使用 ad-hoc 签名。
-
-正式签名与公证：
-
-```bash
-export CODE_SIGN_IDENTITY='Developer ID Application: ...'
-export APPLE_NOTARY_PROFILE='codexpets-release-notary'
-export REQUIRE_NOTARIZATION=1
-bash scripts/build-macos.sh osx-arm64
-```
-
-hardened runtime 使用 `packaging/macos/CodeXPets.entitlements` 中最小化的 JIT entitlement。脚本先公证并 staple 应用，再生成最终 ZIP/DMG；DMG 也会签名、公证和 staple。
-
-## 开发命令
-
-```powershell
-# 输出版本
-.\.dotnet\dotnet.exe src\CodeXPets.App\bin\Release\net10.0\CodeXPets.dll --version
-
-# 校验资源，包括白身、深色耳尾、暖色内耳、金黄色眼睛
-.\.dotnet\dotnet.exe src\CodeXPets.App\bin\Release\net10.0\CodeXPets.dll --validate-resources
-
-# 启动并离屏渲染空闲、忙碌、完成、异常和左右扒边状态
-.\.dotnet\dotnet.exe src\CodeXPets.App\bin\Release\net10.0\CodeXPets.dll --smoke-test
-
-# 离屏生成全部状态预览
-.\.dotnet\dotnet.exe src\CodeXPets.App\bin\Release\net10.0\CodeXPets.dll --preview .\preview
-
-# 实际播放并等待 Windows/macOS 提示音完成
-.\.dotnet\dotnet.exe src\CodeXPets.App\bin\Release\net10.0\CodeXPets.dll --test-sound start
-.\.dotnet\dotnet.exe src\CodeXPets.App\bin\Release\net10.0\CodeXPets.dll --test-sound complete
-.\.dotnet\dotnet.exe src\CodeXPets.App\bin\Release\net10.0\CodeXPets.dll --test-sound error
-```
-
-## CI 与发版
-
-GitHub Actions 在四个原生 runner 上分别验证和打包：
-
-- `windows-2025` → `win-x64`
-- `windows-11-arm` → `win-arm64`
-- `macos-15-intel` → `osx-x64`
-- `macos-15` → `osx-arm64`
-
-标签 `v<VERSION>` 会触发 Release 工作流。macOS 正式发布需要配置：
-
-- `MACOS_CERTIFICATE_P12_BASE64`
-- `MACOS_CERTIFICATE_PASSWORD`
-- `MACOS_CODE_SIGN_IDENTITY`
-- `APPLE_API_KEY_ID`
-- `APPLE_API_ISSUER_ID`
-- `APPLE_API_PRIVATE_KEY`
-
-最终 Release 包含四个平台/架构构建和统一的 `SHA256SUMS.txt`。
+资源和第三方声明见 [`CREDITS.md`](CREDITS.md)。

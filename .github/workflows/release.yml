@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   windows:
     name: Windows ${{ matrix.arch }} release
@@ -24,9 +28,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.302
       - name: Verify release version
         shell: pwsh
         run: |
@@ -36,7 +37,7 @@ jobs:
           }
       - name: Build, test, and package
         shell: pwsh
-        run: ./package.ps1 -RuntimeIdentifier ${{ matrix.rid }}
+        run: ./package.ps1 -RuntimeIdentifier ${{ matrix.rid }} -Toolchain msvc
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.rid }}
@@ -54,17 +55,12 @@ jobs:
           - arch: arm64
             runner: macos-15
             rid: osx-arm64
-            package_arch: arm64
           - arch: x64
             runner: macos-15-intel
             rid: osx-x64
-            package_arch: x64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.302
       - name: Verify release version
         run: test "v$(tr -d '[:space:]' < VERSION)" = "${GITHUB_REF_NAME}"
       - name: Check signing secrets
@@ -81,10 +77,8 @@ jobs:
             && -n "${MACOS_CODE_SIGN_IDENTITY:-}" && -n "${APPLE_API_KEY_ID:-}" \
             && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE_API_PRIVATE_KEY:-}" ]]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
-            echo "Using Developer ID signing/notarization."
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "Signing secrets missing; using ad-hoc unsigned release."
           fi
       - name: Install Developer ID certificate and notary credentials
         if: steps.signing.outputs.available == 'true'
@@ -106,7 +100,8 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" \
             -P "$MACOS_CERTIFICATE_PASSWORD" -A -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH"
           security default-keychain -d user -s "$KEYCHAIN_PATH"
           xcrun notarytool store-credentials codexpets-release-notary \
@@ -114,7 +109,6 @@ jobs:
             --issuer "$APPLE_API_ISSUER_ID"
           echo "MACOS_SIGNING_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           echo "MACOS_API_KEY_PATH=$API_KEY_PATH" >> "$GITHUB_ENV"
-          rm -f "$CERTIFICATE_PATH"
       - name: Build, test, sign, notarize, and package
         env:
           SIGNING_AVAILABLE: ${{ steps.signing.outputs.available }}
@@ -125,7 +119,7 @@ jobs:
             export APPLE_NOTARY_PROFILE=codexpets-release-notary
             export REQUIRE_NOTARIZATION=1
           else
-            export CODE_SIGN_IDENTITY="-"
+            export CODE_SIGN_IDENTITY=-
             export APPLE_NOTARY_PROFILE=
             export REQUIRE_NOTARIZATION=0
           fi
@@ -136,13 +130,15 @@ jobs:
           if [[ -n "${MACOS_SIGNING_KEYCHAIN:-}" ]]; then
             security delete-keychain "$MACOS_SIGNING_KEYCHAIN" || true
           fi
-          rm -f "${MACOS_API_KEY_PATH:-}"
+          if [[ -n "${MACOS_API_KEY_PATH:-}" ]]; then
+            rm -f "$MACOS_API_KEY_PATH"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: release-macos-${{ matrix.arch }}
           path: |
-            dist/CodeXPets-v*-macos-${{ matrix.package_arch }}.zip
-            dist/CodeXPets-v*-macos-${{ matrix.package_arch }}.dmg
+            dist/CodeXPets-v*-macos-${{ matrix.arch }}.zip
+            dist/CodeXPets-v*-macos-${{ matrix.arch }}.dmg
           if-no-files-found: error
 
   publish:
@@ -158,7 +154,7 @@ jobs:
       - name: Generate SHA-256 checksums
         run: |
           cd release
-          find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\0' \
+          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\0' \
             | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: Create GitHub Release

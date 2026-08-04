@@ -1,56 +1,55 @@
 ﻿param(
     [ValidateSet('win-x64', 'win-arm64', 'all')]
-    [string]$RuntimeIdentifier = 'all',
+    [string]$RuntimeIdentifier = 'win-x64',
+    [ValidateSet('auto', 'msvc', 'zig')]
+    [string]$Toolchain = 'auto',
     [switch]$SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
-$env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
-$env:DOTNET_NOLOGO = '1'
 $utf8 = [Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
+$env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'User') + ';' +
+    [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + $env:PATH
 
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$dist = Join-Path $root 'dist'
-$distFull = [IO.Path]::GetFullPath($dist)
-New-Item -ItemType Directory -Force -Path $distFull | Out-Null
-$localDotnet = Join-Path $root '.dotnet\dotnet.exe'
-$dotnet = if (Test-Path -LiteralPath $localDotnet) {
-    $localDotnet
-} else {
-    $command = Get-Command dotnet -ErrorAction SilentlyContinue
-    if (-not $command) { throw '需要 .NET 10 SDK。' }
-    $command.Source
-}
+$root = [IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
+$dist = [IO.Path]::GetFullPath((Join-Path $root 'dist'))
+New-Item -ItemType Directory -Force -Path $dist | Out-Null
 $version = (Get-Content -LiteralPath (Join-Path $root 'VERSION') -Raw -Encoding UTF8).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION 格式无效：$version" }
-$appProject = Join-Path $root 'src\CodeXPets.App\CodeXPets.App.csproj'
+$limit = 10MB
 $rids = if ($RuntimeIdentifier -eq 'all') { @('win-x64', 'win-arm64') } else { @($RuntimeIdentifier) }
+if ($Toolchain -eq 'auto') {
+    $hasZig = [bool](Get-Command zig -ErrorAction SilentlyContinue)
+    $hasNinja = [bool](Get-Command ninja -ErrorAction SilentlyContinue)
+    $hostArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    $allTargetsAreNative = $true
+    foreach ($rid in $rids) {
+        $targetArchitecture = if ($rid -eq 'win-arm64') { 'arm64' } else { 'x64' }
+        if ($targetArchitecture -ne $hostArchitecture) { $allTargetsAreNative = $false; break }
+    }
+    $Toolchain = if ($allTargetsAreNative -and $hasZig -and $hasNinja -and -not $env:GITHUB_ACTIONS) {
+        'zig'
+    } else {
+        'msvc'
+    }
+}
+$created = [Collections.Generic.List[string]]::new()
 
-& (Join-Path $root 'build.ps1') -Configuration Release -SkipTests:$SkipTests
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-function Assert-DistChild([string]$Path) {
+function Assert-DistPath([string]$Path) {
     $resolved = [IO.Path]::GetFullPath($Path)
-    if (-not $resolved.StartsWith($distFull + [IO.Path]::DirectorySeparatorChar,
+    if (-not $resolved.StartsWith($dist + [IO.Path]::DirectorySeparatorChar,
         [StringComparison]::OrdinalIgnoreCase)) {
         throw "拒绝操作 dist 之外的路径：$resolved"
     }
     return $resolved
 }
 
-function Reset-SafeDirectory([string]$Path) {
-    $resolved = Assert-DistChild $Path
-    if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path $resolved | Out-Null
-    return $resolved
-}
-
 function Get-PeMachine([string]$Path) {
     $stream = [IO.File]::OpenRead($Path)
-    $reader = New-Object IO.BinaryReader($stream)
+    $reader = [IO.BinaryReader]::new($stream)
     try {
         if ($reader.ReadUInt16() -ne 0x5A4D) { throw "不是 PE 文件：$Path" }
         $stream.Position = 0x3C
@@ -62,87 +61,45 @@ function Get-PeMachine([string]$Path) {
     finally { $reader.Dispose() }
 }
 
-function Invoke-NativeSmokeTest([string]$Executable) {
-    $process = Start-Process -FilePath $Executable -ArgumentList '--smoke-test' `
-        -Wait -PassThru -NoNewWindow
-    if ($process.ExitCode -ne 0) {
-        throw "冒烟测试失败（退出码 $($process.ExitCode)）：$Executable"
-    }
-}
-
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-
-$created = @()
 foreach ($rid in $rids) {
-    $artifactPattern = '^CodeXPets-v.+-' + [Regex]::Escape($rid) + '\.(exe|zip)$'
-    $staleArtifacts = Get-ChildItem -LiteralPath $distFull -File |
-        Where-Object { $_.Name -match $artifactPattern }
-    foreach ($artifact in $staleArtifacts) {
-        [IO.File]::Delete((Assert-DistChild $artifact.FullName))
-    }
-
-    $stage = Reset-SafeDirectory (Join-Path $distFull "stage-$rid")
-    & $dotnet publish $appProject -c Release -r $rid --self-contained true -o $stage `
-        -p:DebugType=None -p:DebugSymbols=false
+    $architecture = if ($rid -eq 'win-arm64') { 'arm64' } else { 'x64' }
+    & (Join-Path $root 'build.ps1') -Configuration Release -Architecture $architecture `
+        -Toolchain $Toolchain -SkipTests:$SkipTests
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    Get-ChildItem -LiteralPath $stage -Recurse -File -Filter '*.pdb' | ForEach-Object {
-        Remove-Item -LiteralPath $_.FullName -Force
-    }
+    $buildRoot = Get-Item (Join-Path $root "build\native-windows-$architecture-$Toolchain")
+    if (-not $buildRoot) { throw "未找到 $rid 构建目录。" }
+    $sourceExe = Get-ChildItem -LiteralPath $buildRoot.FullName -Recurse -File -Filter 'CodeXPets.exe' |
+        Where-Object { $_.FullName -notmatch '[\\/]CMakeFiles[\\/]' } |
+        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if (-not $sourceExe) { throw "未找到 $rid 可执行文件。" }
 
-    $exe = Join-Path $stage 'CodeXPets.exe'
-    if (-not (Test-Path -LiteralPath $exe)) { throw "缺少单文件发布程序：$exe" }
-    $publishedFiles = @(Get-ChildItem -LiteralPath $stage -Recurse -File)
-    if ($publishedFiles.Count -ne 1 -or
-        -not [string]::Equals($publishedFiles[0].FullName, $exe,
-            [StringComparison]::OrdinalIgnoreCase)) {
-        $unexpected = ($publishedFiles | ForEach-Object FullName) -join [Environment]::NewLine
-        throw "Windows 发布目录必须只包含 CodeXPets.exe：$unexpected"
-    }
     $expectedMachine = if ($rid -eq 'win-arm64') { 0xAA64 } else { 0x8664 }
-    $actualMachine = Get-PeMachine $exe
+    $actualMachine = Get-PeMachine $sourceExe.FullName
     if ($actualMachine -ne $expectedMachine) {
-        throw ('架构校验失败：{0} machine=0x{1:X4} expected=0x{2:X4}' -f $rid,$actualMachine,$expectedMachine)
+        throw ('架构不匹配：{0}，期望 0x{1:X4}，实际 0x{2:X4}' -f $rid, $expectedMachine, $actualMachine)
+    }
+    if ($sourceExe.Length -gt $limit) {
+        throw ('可执行文件超过 10 MiB：{0:N2} MiB' -f ($sourceExe.Length / 1MB))
     }
 
-    $fileVersion = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
-    if ($fileVersion -notlike "$version*") {
-        throw "版本校验失败：$rid fileVersion=$fileVersion expected=$version"
+    $directExe = Assert-DistPath (Join-Path $dist "CodeXPets-v$version-$rid.exe")
+    Copy-Item -LiteralPath $sourceExe.FullName -Destination $directExe -Force
+    $zip = Assert-DistPath (Join-Path $dist "CodeXPets-v$version-$rid.zip")
+    Compress-Archive -LiteralPath $sourceExe.FullName -DestinationPath $zip -CompressionLevel Optimal -Force
+    if ((Get-Item -LiteralPath $zip).Length -gt $limit) {
+        throw ('ZIP 超过 10 MiB：{0:N2} MiB' -f ((Get-Item -LiteralPath $zip).Length / 1MB))
     }
-
-    $hostArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
-    $canRun = ($rid -eq 'win-x64' -and $hostArchitecture -in @('X64', 'Arm64')) -or
-              ($rid -eq 'win-arm64' -and $hostArchitecture -eq 'Arm64')
-    if ($canRun) { Invoke-NativeSmokeTest $exe }
-
-    $singleExe = Join-Path $distFull "CodeXPets-v$version-$rid.exe"
-    Copy-Item -LiteralPath $exe -Destination $singleExe -Force
-
-    $zip = Join-Path $distFull "CodeXPets-v$version-$rid.zip"
-    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-    Compress-Archive -LiteralPath $exe -DestinationPath $zip -CompressionLevel Optimal
-    $archive = [IO.Compression.ZipFile]::OpenRead($zip)
-    try {
-        if ($archive.Entries.Count -ne 1 -or $archive.Entries[0].FullName -ne 'CodeXPets.exe') {
-            $entries = ($archive.Entries | ForEach-Object FullName) -join ', '
-            throw "ZIP 必须只包含 CodeXPets.exe，实际内容：$entries"
-        }
-    }
-    finally { $archive.Dispose() }
-
-    $created += $singleExe
-    $created += $zip
-    Write-Host "单文件程序：$singleExe"
-    Write-Host "单文件 ZIP：$zip"
-
-    $verifiedStage = Assert-DistChild $stage
-    [IO.Directory]::Delete($verifiedStage, $true)
+    $created.Add($directExe)
+    $created.Add($zip)
+    Write-Host ('Created {0} ({1:N2} MiB)' -f $directExe, ((Get-Item $directExe).Length / 1MB))
+    Write-Host ('Created {0} ({1:N2} MiB)' -f $zip, ((Get-Item $zip).Length / 1MB))
 }
 
-$checksum = Join-Path $distFull 'SHA256SUMS-windows.txt'
+$checksum = Assert-DistPath (Join-Path $dist 'SHA256SUMS-windows.txt')
 $lines = foreach ($file in $created) {
-    $hash = Get-FileHash -LiteralPath $file -Algorithm SHA256
-    "$($hash.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($file))"
+    $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$hash  $([IO.Path]::GetFileName($file))"
 }
-$lines | Set-Content -LiteralPath $checksum -Encoding ASCII
-Write-Host "校验文件：$checksum"
+[IO.File]::WriteAllLines($checksum, $lines, $utf8)
+Get-Content -LiteralPath $checksum

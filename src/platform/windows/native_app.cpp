@@ -1,0 +1,1506 @@
+#include "native_app.h"
+
+#include "../../../src/core/app_logic.h"
+#include "../../../src/core/platform_text.h"
+#include "../../../src/core/paths.h"
+#include "resource_ids.h"
+
+#include <windows.h>
+#include <commctrl.h>
+#include <mmsystem.h>
+#include <psapi.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <windowsx.h>
+#include <wincrypt.h>
+#include <shellscalingapi.h>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <fstream>
+#include <sstream>
+
+
+namespace codexpets::windows {
+namespace {
+constexpr wchar_t kPetClassName[] = L"CodeXPets.NativePet";
+constexpr wchar_t kMessageClassName[] = L"CodeXPets.NativeMessage";
+constexpr wchar_t kSettingsClassName[] = L"CodeXPets.NativeSettings";
+constexpr wchar_t kMutexName[] = L"Local\\CodeXPets.Native.SingleInstance";
+constexpr wchar_t kReleaseUrl[] = L"https://github.com/MrLiuGangQiang/codex-pets/releases/latest";
+constexpr UINT kMonitorMessage = WM_APP + 20;
+constexpr UINT kTrayCallback = WM_APP + 21;
+constexpr UINT kSettingsApply = 3001;
+constexpr UINT kSettingsCancel = 3002;
+constexpr UINT kSettingsDefaults = 3003;
+constexpr UINT kSettingsBrowse = 3004;
+constexpr UINT kMenuStatus = 4000;
+constexpr UINT kMenuPet = 4001;
+constexpr UINT kMenuSound = 4002;
+constexpr UINT kMenuStartup = 4003;
+constexpr UINT kMenuFolder = 4004;
+constexpr UINT kMenuSettings = 4005;
+constexpr UINT kMenuUpdate = 4007;
+constexpr UINT kMenuExit = 4008;
+constexpr UINT kSettingsHover = 4101;
+constexpr UINT kSettingsIdle = 4102;
+constexpr UINT kSettingsReveal = 4103;
+constexpr UINT kSettingsNotification = 4104;
+constexpr UINT kSettingsRoot = 4105;
+constexpr UINT kSettingsSound = 4106;
+constexpr UINT kSettingsHeader = 4107;
+constexpr UINT kSettingsHint = 4108;
+
+constexpr double kDockVisibleCenterLogical = 52.0;
+
+int dock_visible_center_px(double scale) noexcept {
+    return static_cast<int>(std::lround(kDockVisibleCenterLogical * scale));
+}
+
+bool segment_intersects_rect(PointD from, PointD to, const RectD& rect) noexcept {
+    double t0 = 0.0;
+    double t1 = 1.0;
+    const double dx = to.x - from.x;
+    const double dy = to.y - from.y;
+    const std::array<double, 4> p{-dx, dx, -dy, dy};
+    const std::array<double, 4> q{from.x - rect.left(), rect.right() - from.x,
+                                  from.y - rect.top(), rect.bottom() - from.y};
+    for (std::size_t i = 0; i < p.size(); ++i) {
+        if (std::abs(p[i]) < 1e-12) {
+            if (q[i] < 0.0) return false;
+            continue;
+        }
+        const double r = q[i] / p[i];
+        if (p[i] < 0.0) {
+            if (r > t1) return false;
+            if (r > t0) t0 = r;
+        } else {
+            if (r < t0) return false;
+            if (r < t1) t1 = r;
+        }
+    }
+    return true;
+}
+
+int read_edit_int(HWND parent, int control, int fallback) {
+    wchar_t buffer[64]{};
+    GetDlgItemTextW(parent, control, buffer, static_cast<int>(std::size(buffer)));
+    wchar_t* end = nullptr;
+    const auto value = wcstol(buffer, &end, 10);
+    return end != buffer ? static_cast<int>(value) : fallback;
+}
+
+void set_edit_int(HWND parent, int control, int value) {
+    SetDlgItemTextW(parent, control, std::to_wstring(value).c_str());
+}
+
+void set_control_font(HWND control) {
+    SendMessageW(control, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+}
+
+void add_menu_item(HMENU menu, UINT id, std::wstring_view text, bool enabled = true) {
+    MENUITEMINFOW info{sizeof(info)};
+    info.fMask = MIIM_ID | MIIM_STRING | MIIM_STATE;
+    info.wID = id;
+    info.dwTypeData = const_cast<wchar_t*>(text.data());
+    info.fState = enabled ? MFS_ENABLED : MFS_DISABLED;
+    InsertMenuItemW(menu, GetMenuItemCount(menu), TRUE, &info);
+}
+
+void add_menu_separator(HMENU menu) {
+    MENUITEMINFOW info{sizeof(info)};
+    info.fMask = MIIM_FTYPE;
+    info.fType = MFT_SEPARATOR;
+    InsertMenuItemW(menu, GetMenuItemCount(menu), TRUE, &info);
+}
+
+std::string decode_base64_utf8(std::wstring_view encoded) {
+    DWORD size{};
+    if (!CryptStringToBinaryW(encoded.data(), static_cast<DWORD>(encoded.size()),
+                              CRYPT_STRING_BASE64, nullptr, &size, nullptr, nullptr) || size == 0) return {};
+    std::string result(size, '\0');
+    if (!CryptStringToBinaryW(encoded.data(), static_cast<DWORD>(encoded.size()),
+                              CRYPT_STRING_BASE64, reinterpret_cast<BYTE*>(result.data()),
+                              &size, nullptr, nullptr)) return {};
+    result.resize(size);
+    return result;
+}
+
+std::string win32_error(std::string_view action, DWORD code) {
+    std::string result(action);
+    result += "（Win32 错误 ";
+    result += std::to_string(code);
+    result += "）";
+    return result;
+}
+
+bool register_window_class(const WNDCLASSEXW& window_class,
+                           std::string_view action,
+                           std::string* error) {
+    if (RegisterClassExW(&window_class)) return true;
+    const auto code = GetLastError();
+    if (code == ERROR_CLASS_ALREADY_EXISTS) return true;
+    if (error) *error = win32_error(action, code);
+    return false;
+}
+
+} // namespace
+
+NativeApp::NativeApp(HINSTANCE instance, std::vector<std::wstring> arguments)
+    : instance_(instance), arguments_(std::move(arguments)), settings_store_() {}
+
+NativeApp::~NativeApp() { shutdown(); }
+
+std::wstring NativeApp::to_wide(std::string_view value) { return utf8_to_wide(value); }
+std::string NativeApp::to_utf8(std::wstring_view value) { return wide_to_utf8(value); }
+
+void NativeApp::write_stdout(std::string_view value) {
+    const auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!handle || handle == INVALID_HANDLE_VALUE) return;
+    DWORD written{};
+    WriteFile(handle, value.data(), static_cast<DWORD>(value.size()), &written, nullptr);
+}
+
+int NativeApp::run() {
+    std::string error;
+    if (!initialize(&error)) {
+        if (duplicate_instance_) return 0;
+        if (!error.empty()) MessageBoxW(nullptr, to_wide(error).c_str(), L"CodeXPets", MB_ICONERROR | MB_OK);
+        return 1;
+    }
+    MSG message{};
+    while (!shutting_down_) {
+        const auto result = GetMessageW(&message, nullptr, 0, 0);
+        if (result <= 0) break;
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    shutdown();
+    return 0;
+}
+
+bool NativeApp::initialize(std::string* error) {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    const bool startup_smoke_test = std::find(arguments_.begin(), arguments_.end(),
+                                              L"--startup-smoke-test") != arguments_.end();
+    expression_demo_ = std::find(arguments_.begin(), arguments_.end(),
+                                 L"--expression-demo") != arguments_.end();
+    instance_mutex_ = CreateMutexW(nullptr, FALSE, startup_smoke_test ? nullptr : kMutexName);
+    const auto mutex_error = GetLastError();
+    if (!instance_mutex_) {
+        if (error) *error = win32_error("无法创建单实例锁", mutex_error);
+        return false;
+    }
+    if (!startup_smoke_test && mutex_error == ERROR_ALREADY_EXISTS) {
+        duplicate_instance_ = true;
+        MessageBoxW(nullptr, L"CodeXPets 已经在运行。", L"CodeXPets", MB_ICONINFORMATION | MB_OK);
+        return false;
+    }
+
+    if (!std::filesystem::exists(settings_store_.settings_file_path())) {
+        AppSettings migrated;
+        for (const wchar_t* key_path : {L"Software\\CodeXPets", L"Software\\CodeXPets\\Windows"}) {
+            HKEY key{};
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, key_path, 0, KEY_READ, &key) != ERROR_SUCCESS) continue;
+            auto read_int_value = [&](const wchar_t* name, int fallback) {
+                DWORD value{}, size = sizeof(value), type{};
+                return RegQueryValueExW(key, name, nullptr, &type,
+                                        reinterpret_cast<BYTE*>(&value), &size) == ERROR_SUCCESS &&
+                       (type == REG_DWORD || type == REG_QWORD) ? static_cast<int>(value) : fallback;
+            };
+            migrated.dock_hover_height = read_int_value(L"DockHoverHeight", migrated.dock_hover_height);
+            migrated.dock_idle_hide_seconds = read_int_value(L"DockIdleHideSeconds", migrated.dock_idle_hide_seconds);
+            migrated.dock_reveal_seconds = read_int_value(L"DockRevealSeconds", migrated.dock_reveal_seconds);
+            migrated.dock_notification_seconds = read_int_value(L"DockNotificationSeconds", migrated.dock_notification_seconds);
+            migrated.sound_enabled = read_int_value(L"SoundEnabled", migrated.sound_enabled ? 1 : 0) != 0;
+            wchar_t root[4096]{}; DWORD root_size = sizeof(root); DWORD type{};
+            if (RegQueryValueExW(key, L"SessionsRoot", nullptr, &type,
+                                 reinterpret_cast<BYTE*>(root), &root_size) == ERROR_SUCCESS &&
+                (type == REG_SZ || type == REG_EXPAND_SZ) && root[0] != L'\0') {
+                migrated.sessions_root = std::filesystem::path(root);
+            }
+            wchar_t position[4096]{}; DWORD position_size = sizeof(position); type = 0;
+            if (RegQueryValueExW(key, L"PetPositionV1", nullptr, &type,
+                                 reinterpret_cast<BYTE*>(position), &position_size) == ERROR_SUCCESS &&
+                type == REG_SZ && position[0] != L'\0') {
+                std::wstring value(position);
+                std::vector<std::wstring> parts;
+                std::size_t start{};
+                while (start <= value.size()) {
+                    const auto end = value.find(L';', start);
+                    parts.push_back(value.substr(start, end == std::wstring::npos ? end : end - start));
+                    if (end == std::wstring::npos) break;
+                    start = end + 1;
+                }
+                if (parts.size() == 5 && parts[0] == L"1") {
+                    PetPositionState p;
+                    p.dock_edge = parts[1] == L"L" ? DockEdge::Left : parts[1] == L"R" ? DockEdge::Right : DockEdge::None;
+                    wchar_t* end = nullptr;
+                    p.relative_x = wcstod(parts[3].c_str(), &end);
+                    p.relative_y = wcstod(parts[4].c_str(), &end);
+                    p.screen_identifier = decode_base64_utf8(parts[2]);
+                    if (p.screen_identifier.empty()) p.screen_identifier = to_utf8(parts[2]);
+                    p.normalize();
+                    migrated.pet_position = p;
+                }
+            }
+            RegCloseKey(key);
+        }
+        migrated.normalize();
+        settings_ = migrated;
+        save_settings();
+    } else settings_ = settings_store_.load();
+    settings_.normalize();
+
+    if (!renderer_.initialize(instance_, error)) return false;
+    if (!renderer_.validate(error)) return false;
+    if (!create_message_window(error) || !create_pet_window(error)) return false;
+    create_tray_icon();
+    place_default();
+    restore_saved_position();
+    if (!expression_demo_) start_monitor();
+    initialized_ = true;
+    ShowWindow(pet_window_, expression_demo_ || settings_.pet_visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+    SetTimer(pet_window_, timer_id_, 50, nullptr);
+    if (expression_demo_) show_expression_demo_state(0, Clock::now());
+    else {
+        refresh_visual(true);
+        render_and_present();
+    }
+    return true;
+}
+
+bool NativeApp::create_message_window(std::string* error) {
+    WNDCLASSEXW wc{sizeof(wc)};
+    wc.lpfnWndProc = message_window_proc;
+    wc.hInstance = instance_;
+    wc.lpszClassName = kMessageClassName;
+    if (!register_window_class(wc, "注册后台消息窗口类失败", error)) return false;
+    message_window_ = CreateWindowExW(0, kMessageClassName, L"CodeXPets message", 0,
+                                      0, 0, 0, 0, HWND_MESSAGE, nullptr, instance_, this);
+    if (!message_window_) {
+        const auto code = GetLastError();
+        if (error) *error = win32_error("创建后台消息窗口失败", code);
+        return false;
+    }
+    return true;
+}
+
+bool NativeApp::create_pet_window(std::string* error) {
+    WNDCLASSEXW wc{sizeof(wc)};
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = pet_window_proc;
+    wc.hInstance = instance_;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon = renderer_.application_icon();
+    wc.lpszClassName = kPetClassName;
+    if (!register_window_class(wc, "注册桌宠窗口类失败", error)) return false;
+    pet_window_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                                  kPetClassName, L"CodeXPets", WS_POPUP,
+                                  0, 0, Renderer::LogicalWidth, Renderer::LogicalHeight,
+                                  nullptr, nullptr, instance_, this);
+    if (!pet_window_) {
+        const auto code = GetLastError();
+        if (error) *error = win32_error("创建桌宠窗口失败", code);
+        return false;
+    }
+    SendMessageW(pet_window_, WM_SETICON, ICON_SMALL,
+                 reinterpret_cast<LPARAM>(renderer_.application_icon()));
+    SendMessageW(pet_window_, WM_SETICON, ICON_BIG,
+                 reinterpret_cast<LPARAM>(renderer_.application_icon()));
+    return true;
+}
+
+void NativeApp::start_monitor() {
+    monitor_worker_ = std::make_unique<MonitorWorker>(settings_.sessions_root,
+        [this](std::vector<MonitorEventKind> events, MonitorSnapshot snapshot) {
+            {
+                std::lock_guard lock(pending_mutex_);
+                pending_updates_.push_back(PendingUpdate{std::move(events), std::move(snapshot)});
+            }
+            if (message_window_) PostMessageW(message_window_, kMonitorMessage, 0, 0);
+        });
+    monitor_worker_->start();
+}
+
+void NativeApp::create_tray_icon() {
+    tray_ = NOTIFYICONDATAW{};
+    tray_.cbSize = sizeof(tray_);
+    tray_.hWnd = message_window_;
+    tray_.uID = 1;
+    tray_.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    tray_.uCallbackMessage = kTrayCallback;
+    tray_.hIcon = renderer_.tray_icon(ReminderState::Idle, 0);
+    lstrcpynW(tray_.szTip, L"CodeXPets · 空闲", ARRAYSIZE(tray_.szTip));
+    tray_added_ = Shell_NotifyIconW(NIM_ADD, &tray_) == TRUE;
+    if (tray_added_) {
+        tray_state_ = ReminderState::Idle;
+        tray_frame_ = 0;
+        tray_tip_ = tray_.szTip;
+    }
+}
+
+void NativeApp::remove_tray_icon() noexcept {
+    if (tray_added_) Shell_NotifyIconW(NIM_DELETE, &tray_);
+    tray_added_ = false;
+}
+
+void NativeApp::shutdown() noexcept {
+    if (shutdown_complete_) return;
+    shutdown_complete_ = true;
+    shutting_down_ = true;
+    if (pet_window_) KillTimer(pet_window_, timer_id_);
+    if (monitor_worker_) monitor_worker_->stop();
+    save_position();
+    remove_tray_icon();
+    if (settings_window_) DestroyWindow(settings_window_);
+    if (pet_window_) DestroyWindow(pet_window_);
+    if (message_window_) DestroyWindow(message_window_);
+    renderer_.shutdown();
+    if (instance_mutex_) CloseHandle(instance_mutex_);
+    instance_mutex_ = nullptr;
+}
+
+NativeApp::ScreenInfo NativeApp::screen_from_point(POINT point) const {
+    ScreenInfo result;
+    result.monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+    MONITORINFOEXW info{sizeof(info)};
+    if (result.monitor && GetMonitorInfoW(result.monitor, &info)) {
+        result.work = info.rcWork;
+        result.identifier = screen_identifier(result.monitor, info);
+    } else {
+        result.work = RECT{0, 0, 1920, 1080};
+    }
+    result.dpi = pet_window_ ? GetDpiForWindow(pet_window_) : 96;
+    if (result.dpi == 0) result.dpi = 96;
+    return result;
+}
+
+NativeApp::ScreenInfo NativeApp::screen_for_identifier(std::wstring_view identifier) const {
+    struct Context { std::wstring wanted; ScreenInfo result; } context{std::wstring(identifier), {}};
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+        auto& context = *reinterpret_cast<Context*>(data);
+        if (context.result.monitor) return FALSE;
+        MONITORINFOEXW info{sizeof(info)};
+        if (!GetMonitorInfoW(monitor, &info)) return TRUE;
+        const auto exact = std::wstring(context.wanted);
+        const auto generated = std::wstring(info.szDevice) + L"|" +
+            std::to_wstring(info.rcMonitor.left) + L"," + std::to_wstring(info.rcMonitor.top) + L"," +
+            std::to_wstring(info.rcMonitor.right - info.rcMonitor.left) + L"," +
+            std::to_wstring(info.rcMonitor.bottom - info.rcMonitor.top);
+        const auto separator = exact.find(L'|');
+        const auto display_name = separator == std::wstring::npos ? exact : exact.substr(0, separator);
+        if (exact == generated || display_name == info.szDevice) {
+            context.result.monitor = monitor;
+            context.result.work = info.rcWork;
+            context.result.identifier = generated;
+            UINT dpi_x{}, dpi_y{};
+            if (GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpi_x, &dpi_y) != S_OK) dpi_x = 96;
+            context.result.dpi = dpi_x == 0 ? 96 : dpi_x;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&context));
+    if (!context.result.monitor) {
+        POINT point{0, 0};
+        return screen_from_point(point);
+    }
+    return context.result;
+}
+
+NativeApp::ScreenInfo NativeApp::dock_screen() const {
+    if (dock_screen_cache_key_ != dock_screen_identifier_) {
+        dock_screen_cache_key_ = dock_screen_identifier_;
+        dock_screen_cache_ = screen_for_identifier(dock_screen_identifier_);
+    }
+    return dock_screen_cache_;
+}
+
+std::wstring NativeApp::screen_identifier(HMONITOR, const MONITORINFOEXW& info) const {
+    return std::wstring(info.szDevice) + L"|" +
+        std::to_wstring(info.rcMonitor.left) + L"," + std::to_wstring(info.rcMonitor.top) + L"," +
+        std::to_wstring(info.rcMonitor.right - info.rcMonitor.left) + L"," +
+        std::to_wstring(info.rcMonitor.bottom - info.rcMonitor.top);
+}
+
+POINT NativeApp::cursor_position() const {
+    POINT point{};
+    GetCursorPos(&point);
+    return point;
+}
+
+void NativeApp::place_default() {
+    POINT origin{0, 0};
+    const auto screen = screen_from_point(origin);
+    const auto dpi = static_cast<double>(screen.dpi) / 96.0;
+    const auto width = static_cast<int>(std::lround(Renderer::LogicalWidth * dpi));
+    const auto height = static_cast<int>(std::lround(Renderer::LogicalHeight * dpi));
+    SetWindowPos(pet_window_, HWND_TOPMOST,
+                 std::max(screen.work.left, screen.work.right - width - static_cast<int>(24 * dpi)),
+                 std::max(screen.work.top, screen.work.bottom - height - static_cast<int>(24 * dpi)),
+                 width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void NativeApp::restore_saved_position() {
+    if (!settings_.pet_position) return;
+    const auto saved = *settings_.pet_position;
+    const auto screen = screen_for_identifier(to_wide(saved.screen_identifier));
+    const auto dpi = static_cast<double>(screen.dpi) / 96.0;
+    const auto width = static_cast<int>(std::lround(Renderer::LogicalWidth * dpi));
+    const auto height = static_cast<int>(std::lround(Renderer::LogicalHeight * dpi));
+    dock_edge_ = saved.dock_edge;
+    dock_screen_identifier_ = screen.identifier;
+    if (dock_edge_ != DockEdge::None) {
+        dock_coordinate_ = screen.work.top + static_cast<int>(std::lround(saved.relative_y *
+                                                                           (screen.work.bottom - screen.work.top)));
+        dock_visibility_ = 1.0;
+        update_window_position();
+    } else {
+        const auto x = screen.work.left + static_cast<int>(std::lround(saved.relative_x *
+                                                                         (screen.work.right - screen.work.left))) - width / 2;
+        const auto y = screen.work.top + static_cast<int>(std::lround(saved.relative_y *
+                                                                         (screen.work.bottom - screen.work.top))) - height;
+        SetWindowPos(pet_window_, HWND_TOPMOST,
+                     std::clamp(x, screen.work.left, std::max(screen.work.left, screen.work.right - width)),
+                     std::clamp(y, screen.work.top, std::max(screen.work.top, screen.work.bottom - height)),
+                     width, height, SWP_NOACTIVATE);
+    }
+}
+
+void NativeApp::update_window_position() {
+    const auto point = cursor_position();
+    auto screen = dock_edge_ == DockEdge::None
+        ? screen_from_point(point) : dock_screen();
+    const auto dpi = static_cast<double>(screen.dpi) / 96.0;
+    const auto width = static_cast<int>(std::lround(Renderer::LogicalWidth * dpi));
+    const auto height = static_cast<int>(std::lround(Renderer::LogicalHeight * dpi));
+    if (dock_edge_ == DockEdge::None) return;
+    const auto visible_center = dock_visible_center_px(dpi);
+    auto y = dock_coordinate_ - visible_center;
+    const auto x = dock_edge_ == DockEdge::Left ? screen.work.left : screen.work.right - width;
+    y = std::clamp(y, static_cast<int>(screen.work.top),
+                   std::max(static_cast<int>(screen.work.top), static_cast<int>(screen.work.bottom) - height));
+    SetWindowPos(pet_window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+}
+
+void NativeApp::clamp_to_work_area() {
+    RECT rect{};
+    GetWindowRect(pet_window_, &rect);
+    auto screen = screen_from_point(POINT{rect.left + (rect.right - rect.left) / 2,
+                                          rect.top + (rect.bottom - rect.top) / 2});
+    const auto width = rect.right - rect.left;
+    const auto height = rect.bottom - rect.top;
+    const auto x = std::clamp(rect.left, screen.work.left, std::max(screen.work.left, screen.work.right - width));
+    const auto y = std::clamp(rect.top, screen.work.top, std::max(screen.work.top, screen.work.bottom - height));
+    SetWindowPos(pet_window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+}
+
+void NativeApp::save_position() {
+    if (!pet_window_ || !IsWindow(pet_window_)) return;
+    RECT rect{};
+    GetWindowRect(pet_window_, &rect);
+    const POINT center{rect.left + (rect.right - rect.left) / 2, rect.top + (rect.bottom - rect.top) / 2};
+    const auto screen = dock_edge_ == DockEdge::None
+        ? screen_from_point(center) : dock_screen();
+    const auto work_width = std::max(1, static_cast<int>(screen.work.right - screen.work.left));
+    const auto work_height = std::max(1, static_cast<int>(screen.work.bottom - screen.work.top));
+    PetPositionState position;
+    position.dock_edge = dock_edge_;
+    position.screen_identifier = to_utf8(screen.identifier);
+    if (dock_edge_ == DockEdge::None) {
+        position.relative_x = static_cast<double>(center.x - screen.work.left) / work_width;
+        position.relative_y = static_cast<double>(rect.bottom - screen.work.top) / work_height;
+    } else {
+        position.relative_x = dock_edge_ == DockEdge::Left ? 0.0 : 1.0;
+        position.relative_y = static_cast<double>(dock_coordinate_ - screen.work.top) / work_height;
+    }
+    position.normalize();
+    settings_.pet_position = position;
+    save_settings();
+}
+
+void NativeApp::save_settings() {
+    std::string ignored;
+    settings_store_.save(settings_, &ignored);
+}
+
+void NativeApp::handle_monitor_event(MonitorEventKind event, int preferred_task_index) {
+    const auto now = Clock::now();
+    switch (event) {
+        case MonitorEventKind::TaskStarted:
+            visual_coordinator_.record_started(preferred_task_index);
+            show_pet(settings_.pet_visible);
+            if (settings_.sound_enabled) play_sound(NotificationSound::Started);
+            break;
+        case MonitorEventKind::TaskCompleted:
+            visual_coordinator_.record_completed(now,
+                std::chrono::seconds(app_logic::cloud_notification_seconds(
+                    ReminderState::Completed, settings_.dock_notification_seconds)));
+            show_pet(settings_.pet_visible);
+            if (settings_.sound_enabled) play_sound(NotificationSound::Completed);
+            break;
+        case MonitorEventKind::TaskAborted:
+            visual_coordinator_.record_aborted(now,
+                std::chrono::seconds(app_logic::cloud_notification_seconds(
+                    ReminderState::Error, settings_.dock_notification_seconds)));
+            show_pet(settings_.pet_visible);
+            if (settings_.sound_enabled) play_sound(NotificationSound::Error);
+            break;
+        case MonitorEventKind::TaskInterrupted:
+            visual_coordinator_.record_interrupted(now,
+                std::chrono::seconds(app_logic::cloud_notification_seconds(
+                    ReminderState::Interrupted, settings_.dock_notification_seconds)));
+            show_pet(settings_.pet_visible);
+            break;
+        case MonitorEventKind::StateChanged:
+            break;
+        case MonitorEventKind::PlanUpdated:
+            visual_coordinator_.record_started(preferred_task_index);
+            break;
+    }
+}
+
+void NativeApp::handle_monitor_update(const PendingUpdate& update) {
+    const bool first = !has_snapshot_;
+    snapshot_ = update.snapshot;
+    has_snapshot_ = true;
+    for (const auto event : update.events) {
+        const auto preferred_task_index = event == MonitorEventKind::PlanUpdated
+            ? snapshot_.latest_plan_update_active_title_index
+            : event == MonitorEventKind::TaskStarted
+                ? snapshot_.latest_event_active_title_index
+                : -1;
+        handle_monitor_event(event, preferred_task_index);
+    }
+    if (first || !update.events.empty()) refresh_visual(true);
+}
+
+void NativeApp::process_monitor_updates() {
+    std::deque<PendingUpdate> updates;
+    {
+        std::lock_guard lock(pending_mutex_);
+        updates.swap(pending_updates_);
+    }
+    for (const auto& update : updates) handle_monitor_update(update);
+}
+
+void NativeApp::show_expression_demo_state(int index, Clock::time_point now) {
+    static constexpr std::array<ReminderState, 5> states{{
+        ReminderState::Idle, ReminderState::Busy, ReminderState::Completed,
+        ReminderState::Error, ReminderState::Interrupted
+    }};
+    expression_demo_index_ = std::clamp(index, 0, static_cast<int>(states.size()) - 1);
+    expression_demo_next_ = now + std::chrono::seconds(4);
+    visual_coordinator_ = VisualStateCoordinator{};
+    snapshot_ = MonitorSnapshot{};
+    snapshot_.active_titles.clear();
+    snapshot_.active_plan_progress_labels.clear();
+    snapshot_.active_count = 0;
+    const auto state = states[static_cast<std::size_t>(expression_demo_index_)];
+    switch (state) {
+        case ReminderState::Busy:
+            snapshot_.active_count = 1;
+            snapshot_.active_titles = {"表情测试：正在认真工作"};
+            snapshot_.active_plan_progress_labels = {std::optional<std::string>("2/5")};
+            snapshot_.total_plan_step_count = 5;
+            snapshot_.completed_plan_step_count = 2;
+            visual_coordinator_.record_started();
+            break;
+        case ReminderState::Completed:
+            snapshot_.last_completed_title = "表情测试：任务顺利完成";
+            visual_coordinator_.record_completed(now, std::chrono::hours(1));
+            break;
+        case ReminderState::Error:
+            snapshot_.last_aborted_title = "表情测试：任务失败";
+            visual_coordinator_.record_aborted(now, std::chrono::hours(1));
+            break;
+        case ReminderState::Interrupted:
+            snapshot_.last_interrupted_title = "表情测试：任务被中断";
+            visual_coordinator_.record_interrupted(now, std::chrono::hours(1));
+            break;
+        case ReminderState::Idle:
+        default:
+            break;
+    }
+    dock_last_content_change_ = now;
+    dock_hover_reveal_until_ = now + std::chrono::hours(1);
+    dock_visibility_ = 1.0;
+    refresh_visual(true);
+    update_tray_icon();
+    render_and_present();
+}
+
+void NativeApp::refresh_visual(bool force_text) {
+    const auto now = Clock::now();
+    const auto visual_state = visual_coordinator_.select(snapshot_.active_count, now);
+    if (force_text && dock_edge_ != DockEdge::None && visual_state != ReminderState::Idle) {
+        dock_last_content_change_ = now;
+        dock_thought_until_ = now + std::chrono::seconds(
+            app_logic::cloud_notification_seconds(visual_state, settings_.dock_notification_seconds));
+        dock_visibility_ = 1.0;
+    }
+    std::string previously_selected_title;
+    if (selected_task_index_ >= 0 &&
+        selected_task_index_ < static_cast<int>(displayed_task_titles_.size())) {
+        previously_selected_title = displayed_task_titles_[static_cast<std::size_t>(selected_task_index_)];
+    }
+    if (visual_state != last_visual_state_) {
+        animation_tick_ = 0;
+        animation_accumulator_ = 0;
+        scroll_offset_ = 0;
+        scroll_hold_seconds_ = 1.9;
+        scroll_at_end_ = false;
+        session_rotation_seconds_ = 0;
+        last_visual_state_ = visual_state;
+    }
+
+    std::string status;
+    if (visual_state == ReminderState::Error) {
+        status = "异常";
+    } else if (visual_state == ReminderState::Interrupted) {
+        status = "已中断";
+    } else if (visual_state == ReminderState::Completed) {
+        status = "已完成";
+    } else if (visual_state == ReminderState::Busy) {
+        std::string busy_progress;
+        std::optional<std::string_view> aggregate_progress;
+        if (snapshot_.total_plan_step_count > 0) {
+            busy_progress = std::to_string(snapshot_.completed_plan_step_count) + "/" +
+                            std::to_string(snapshot_.total_plan_step_count);
+            aggregate_progress = busy_progress;
+        }
+        status = app_logic::format_busy_header(aggregate_progress,
+            snapshot_.latest_event_active_title_index, snapshot_.active_count);
+    } else {
+        status = "空闲";
+    }
+    std::vector<std::string> titles;
+    std::vector<std::optional<std::string>> progress_labels;
+    if (visual_state == ReminderState::Error) {
+        titles.push_back(app_logic::format_abnormal_task_text(snapshot_.last_aborted_title));
+    } else if (visual_state == ReminderState::Interrupted) {
+        titles.push_back(app_logic::format_interrupted_task_text(snapshot_.last_interrupted_title));
+    } else if (visual_state == ReminderState::Completed && !snapshot_.last_completed_title.empty()) {
+        titles.push_back(snapshot_.last_completed_title);
+    } else {
+        titles = snapshot_.active_titles;
+        progress_labels = snapshot_.active_plan_progress_labels;
+    }
+    if (titles.empty() && visual_state == ReminderState::Busy) titles.push_back("正在处理任务…");
+
+    const bool select_newest = visual_coordinator_.show_newest_task_on_next_refresh() &&
+                               visual_state == ReminderState::Busy;
+    const auto preferred = app_logic::select_preferred_task_index(
+        select_newest, visual_coordinator_.preferred_task_index());
+    selected_task_index_ = app_logic::reconcile_task_selection(
+        visual_state, titles, selected_task_index_, previously_selected_title, select_newest, preferred);
+    displayed_task_titles_ = titles;
+    if (select_newest) visual_coordinator_.consume_newest_task_focus();
+
+    const std::string thought = visual_state == ReminderState::Error ? "任务出现异常了。" :
+                                visual_state == ReminderState::Interrupted ? "任务已中断了。" :
+                                visual_state == ReminderState::Completed ? "任务完成啦！" :
+                                visual_state == ReminderState::Busy ?
+                                    (snapshot_.active_titles.empty() ? "正在认真处理你的任务…" : snapshot_.active_titles.front()) :
+                                    "主人，现在没有在进行中的任务!别让我歇着!";
+    RenderState render_state;
+    render_state.state = visual_state;
+    render_state.docked = dock_edge_ != DockEdge::None;
+    render_state.bubble_visible = app_logic::should_show_thought_bubble(
+        render_state.docked, visual_state, now, dock_thought_until_);
+    render_state.dock_edge = dock_edge_;
+    render_state.bubble_below = render_state.docked &&
+        dock_coordinate_ < screen_from_point(cursor_position()).work.top + 150;
+    render_state.mirror = render_state.docked ? false : [&] {
+        RECT rect{}; GetWindowRect(pet_window_, &rect);
+        const auto screen = screen_from_point(POINT{rect.left + (rect.right - rect.left) / 2,
+                                                    rect.top + (rect.bottom - rect.top) / 2});
+        return (rect.left + rect.right) / 2 < (screen.work.left + screen.work.right) / 2;
+    }();
+    render_state.dock_visibility = dock_visibility_;
+    render_state.animation_tick = animation_tick_;
+    render_state.selected_task_index = selected_task_index_;
+    render_state.scroll_offset = scroll_offset_;
+    render_state.status_text = status;
+    render_state.thought_text = thought;
+    render_state.task_titles = std::move(titles);
+    render_state.progress_labels = std::move(progress_labels);
+
+    const auto new_signature = render_state.status_text + "\x1f" + render_state.thought_text +
+        std::to_string(static_cast<int>(render_state.state)) + std::to_string(selected_task_index_);
+    if (force_text || new_signature != last_status_signature_) {
+        last_status_signature_ = new_signature;
+        last_status_text_ = render_state.status_text;
+        update_tray_icon();
+    }
+    render_and_present();
+}
+
+void NativeApp::render_and_present() {
+    if (!pet_window_ || !IsWindow(pet_window_)) return;
+    const auto dpi = GetDpiForWindow(pet_window_);
+    const auto scale = dpi == 0 ? 1.0 : static_cast<double>(dpi) / 96.0;
+    RenderState state;
+    state.state = last_visual_state_;
+    state.docked = dock_edge_ != DockEdge::None;
+    state.bubble_visible = app_logic::should_show_thought_bubble(
+        state.docked, state.state, Clock::now(), dock_thought_until_);
+    state.dock_edge = dock_edge_;
+    state.dock_visibility = dock_visibility_;
+    state.animation_tick = animation_tick_;
+    state.selected_task_index = selected_task_index_;
+    state.scroll_offset = scroll_offset_;
+    state.status_text = last_status_text_;
+    state.thought_text = last_visual_state_ == ReminderState::Error ? "任务出现异常了。" :
+                         last_visual_state_ == ReminderState::Interrupted ? "任务已中断了。" :
+                         last_visual_state_ == ReminderState::Completed ? "任务完成啦！" :
+                         last_visual_state_ == ReminderState::Busy ?
+                             (snapshot_.active_titles.empty() ? "正在认真处理你的任务…" : snapshot_.active_titles.front()) :
+                             "主人，现在没有在进行中的任务!别让我歇着!";
+    if (last_visual_state_ == ReminderState::Error) state.task_titles = {app_logic::format_abnormal_task_text(snapshot_.last_aborted_title)};
+    else if (last_visual_state_ == ReminderState::Interrupted) state.task_titles = {app_logic::format_interrupted_task_text(snapshot_.last_interrupted_title)};
+    else if (last_visual_state_ == ReminderState::Completed && !snapshot_.last_completed_title.empty()) state.task_titles = {snapshot_.last_completed_title};
+    else state.task_titles = snapshot_.active_titles;
+    state.progress_labels = snapshot_.active_plan_progress_labels;
+    RECT rect{}; GetWindowRect(pet_window_, &rect);
+    const auto screen = screen_from_point(POINT{rect.left + (rect.right - rect.left) / 2,
+                                                rect.top + (rect.bottom - rect.top) / 2});
+    state.bubble_below = state.docked && dock_coordinate_ < screen.work.top + 150;
+    state.mirror = !state.docked && ((rect.left + rect.right) / 2 < (screen.work.left + screen.work.right) / 2);
+    std::string error;
+    if (!renderer_.render(state, scale, &error)) return;
+    SIZE size{renderer_.pixel_width(), renderer_.pixel_height()};
+    POINT source{0, 0};
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UpdateLayeredWindow(pet_window_, nullptr, nullptr, &size, renderer_.dc(), &source,
+                        0, &blend, ULW_ALPHA);
+}
+
+void NativeApp::update_tray_icon() {
+    if (!tray_added_) return;
+    const int frame = last_visual_state_ == ReminderState::Busy
+        ? std::abs(animation_tick_ / 2) % 8 : 0;
+    const auto tip = std::wstring(L"CodeXPets · ") + to_wide(last_status_text_);
+    if (tray_state_ == last_visual_state_ && tray_frame_ == frame && tray_tip_ == tip) return;
+    tray_.hIcon = renderer_.tray_icon(last_visual_state_, frame);
+    tray_.uFlags = NIF_ICON | NIF_TIP;
+    lstrcpynW(tray_.szTip, tip.c_str(), ARRAYSIZE(tray_.szTip));
+    if (Shell_NotifyIconW(NIM_MODIFY, &tray_)) {
+        tray_state_ = last_visual_state_;
+        tray_frame_ = frame;
+        tray_tip_ = tip;
+    }
+}
+
+void NativeApp::on_timer() {
+    if (!initialized_) return;
+    if (!expression_demo_) process_monitor_updates();
+    const auto now = Clock::now();
+    if (expression_demo_ && now >= expression_demo_next_) {
+        show_expression_demo_state((expression_demo_index_ + 1) % 5, now);
+    }
+    auto elapsed = std::chrono::duration<double>(now - last_tick_).count();
+    last_tick_ = now;
+    elapsed = std::clamp(elapsed, 0.001, 0.25);
+    animation_accumulator_ += elapsed;
+    bool changed = false;
+    while (animation_accumulator_ >= 0.12) {
+        animation_accumulator_ -= 0.12;
+        animation_tick_ = (animation_tick_ + 1) % 6400;
+        changed = true;
+    }
+
+    bool dock_changed = false;
+    if (dock_edge_ != DockEdge::None) {
+        const auto cursor = cursor_position();
+        const bool hovered_now = dock_hovering(cursor);
+        const bool hovered_path = !hovered_now && has_last_hover_cursor_ &&
+            dock_hover_path_crosses(last_hover_cursor_, cursor);
+        if (hovered_now || hovered_path) {
+            dock_hover_reveal_until_ = now + std::chrono::seconds(settings_.dock_reveal_seconds);
+        }
+        has_last_hover_cursor_ = true;
+        last_hover_cursor_ = cursor;
+        dock_changed = update_dock_visibility(elapsed, hovered_now || hovered_path);
+    }
+
+    const bool bubble_visible = app_logic::should_show_thought_bubble(
+        dock_edge_ != DockEdge::None, last_visual_state_, now, dock_thought_until_);
+    if (bubble_visible) {
+        if (displayed_task_titles_.size() > 1) {
+            session_rotation_seconds_ += elapsed;
+            if (session_rotation_seconds_ >= 6.0) {
+                const auto steps = std::max(1, static_cast<int>(session_rotation_seconds_ / 6.0));
+                session_rotation_seconds_ -= steps * 6.0;
+                selected_task_index_ = (selected_task_index_ + steps) %
+                    static_cast<int>(displayed_task_titles_.size());
+                scroll_offset_ = 0;
+                scroll_hold_seconds_ = 1.9;
+                scroll_at_end_ = false;
+                changed = true;
+            }
+        } else session_rotation_seconds_ = 0;
+        const auto text = displayed_task_titles_.empty() ?
+            (last_visual_state_ == ReminderState::Busy ? std::string("正在认真处理你的任务…") :
+             last_visual_state_ == ReminderState::Error ? app_logic::format_abnormal_task_text(snapshot_.last_aborted_title) :
+             last_visual_state_ == ReminderState::Interrupted ? app_logic::format_interrupted_task_text(snapshot_.last_interrupted_title) :
+             last_visual_state_ == ReminderState::Completed ? snapshot_.last_completed_title :
+             std::string("主人，现在没有在进行中的任务!别让我歇着!")) :
+            displayed_task_titles_[static_cast<std::size_t>(std::clamp(selected_task_index_, 0,
+                                      static_cast<int>(displayed_task_titles_.size()) - 1))];
+        const auto approximate_lines = std::max(1, static_cast<int>(text.size() / 24) +
+                                                   static_cast<int>(std::count(text.begin(), text.end(), '\n')));
+        const auto max_scroll = std::max(0.0, (approximate_lines - 3) * 15.0);
+        if (max_scroll > 0.0) {
+            if (scroll_hold_seconds_ > 0) scroll_hold_seconds_ = std::max(0.0, scroll_hold_seconds_ - elapsed);
+            else if (!scroll_at_end_) {
+                scroll_offset_ = std::min(max_scroll, scroll_offset_ + 15.0 * elapsed);
+                if (scroll_offset_ >= max_scroll) { scroll_at_end_ = true; scroll_hold_seconds_ = 1.7; }
+                changed = true;
+            } else {
+                scroll_offset_ = 0; scroll_hold_seconds_ = 1.9; scroll_at_end_ = false; changed = true;
+            }
+        } else if (scroll_offset_ != 0.0) { scroll_offset_ = 0; changed = true; }
+    } else {
+        session_rotation_seconds_ = 0;
+        if (scroll_offset_ != 0.0) { scroll_offset_ = 0.0; changed = true; }
+    }
+
+    const auto next_state = visual_coordinator_.select(snapshot_.active_count, now);
+    if (next_state != last_visual_state_) { refresh_visual(true); return; }
+    if (changed || dock_changed) {
+        update_tray_icon();
+        render_and_present();
+    }
+}
+
+bool NativeApp::update_dock_visibility(double elapsed_seconds, bool hovering) {
+    if (dock_edge_ == DockEdge::None) return false;
+    const auto now = Clock::now();
+    const auto show = app_logic::should_show_dock(
+        dock_last_content_change_, now, dragging_ || drag_pending_, hovering,
+        dock_hover_reveal_until_, settings_.dock_idle_hide_seconds);
+    const auto target = show ? 1.0 : 0.0;
+    const auto duration = target > dock_visibility_ ? 0.30 : 0.55;
+    if (std::abs(target - dock_visibility_) < 0.001) {
+        const bool changed = dock_visibility_ != target;
+        dock_visibility_ = target;
+        return changed;
+    }
+    const auto before = dock_visibility_;
+    const auto step = elapsed_seconds / duration;
+    dock_visibility_ += (target > dock_visibility_ ? step : -step);
+    dock_visibility_ = std::clamp(dock_visibility_, 0.0, 1.0);
+    return std::abs(before - dock_visibility_) > 0.0001;
+}
+
+std::optional<RectD> NativeApp::dock_hover_rect() const {
+    if (dock_edge_ == DockEdge::None) return std::nullopt;
+    const auto screen = dock_screen();
+    const auto dpi = GetDpiForWindow(pet_window_);
+    const auto scale = dpi == 0 ? 1.0 : static_cast<double>(dpi) / 96.0;
+    const RectD work{static_cast<double>(screen.work.left),
+                     static_cast<double>(screen.work.top),
+                     static_cast<double>(screen.work.right - screen.work.left),
+                     static_cast<double>(screen.work.bottom - screen.work.top)};
+    return app_logic::dock_hover_bounds(
+        dock_edge_, work, static_cast<double>(dock_coordinate_), scale,
+        dock_visibility_ <= 0.01, settings_.dock_hover_height);
+}
+
+bool NativeApp::dock_hovering(POINT cursor) const {
+    if (dock_edge_ == DockEdge::None) return false;
+    const auto bounds = dock_hover_rect();
+    if (bounds && bounds->contains(PointD{static_cast<double>(cursor.x), static_cast<double>(cursor.y)})) {
+        return true;
+    }
+    if (!pet_window_ || !IsWindow(pet_window_)) return false;
+    POINT local = cursor;
+    if (ScreenToClient(pet_window_, &local)) {
+        return renderer_.hit_test_alpha(local.x, local.y);
+    }
+    return false;
+}
+
+bool NativeApp::dock_hover_path_crosses(POINT from, POINT to) const {
+    if (dock_edge_ == DockEdge::None) return false;
+    const auto bounds = dock_hover_rect();
+    if (bounds) {
+        const PointD from_point{static_cast<double>(from.x), static_cast<double>(from.y)};
+        const PointD to_point{static_cast<double>(to.x), static_cast<double>(to.y)};
+        if (segment_intersects_rect(from_point, to_point, *bounds)) return true;
+    }
+    return dock_hovering(from) || dock_hovering(to);
+}
+
+void NativeApp::reveal_dock_for_interaction() {
+    if (dock_edge_ == DockEdge::None) return;
+    const auto now = Clock::now();
+    dock_visibility_ = 1.0;
+    dock_last_content_change_ = now;
+    dock_thought_until_ = last_visual_state_ == ReminderState::Idle
+        ? Clock::time_point::min()
+        : now + std::chrono::seconds(app_logic::cloud_notification_seconds(
+            last_visual_state_, settings_.dock_notification_seconds));
+    dock_hover_reveal_until_ = now + std::chrono::seconds(settings_.dock_reveal_seconds);
+    render_and_present();
+}
+
+void NativeApp::begin_drag(POINT cursor) {
+    POINT local = cursor;
+    ScreenToClient(pet_window_, &local);
+    if (!renderer_.hit_test_alpha(local.x, local.y)) return;
+    drag_pending_ = true;
+    dragging_ = false;
+    drag_started_docked_ = dock_edge_ != DockEdge::None;
+    drag_start_cursor_ = cursor;
+    last_cursor_ = cursor;
+    RECT rect{}; GetWindowRect(pet_window_, &rect);
+    drag_start_position_ = POINT{rect.left, rect.top};
+    if (drag_started_docked_) { dock_visibility_ = 1.0; render_and_present(); }
+    SetCapture(pet_window_);
+}
+
+void NativeApp::move_drag(POINT cursor) {
+    if (!drag_pending_) return;
+    last_cursor_ = cursor;
+    auto dx = cursor.x - drag_start_cursor_.x;
+    auto dy = cursor.y - drag_start_cursor_.y;
+    if (!dragging_ && std::abs(dx) + std::abs(dy) < 4) return;
+    if (!dragging_ && dock_edge_ != DockEdge::None) {
+        const auto dpi = GetDpiForWindow(pet_window_);
+        const auto scale = dpi == 0 ? 1.0 : static_cast<double>(dpi) / 96.0;
+        const auto width = static_cast<int>(std::lround(Renderer::LogicalWidth * scale));
+        const auto height = static_cast<int>(std::lround(Renderer::LogicalHeight * scale));
+        const auto y_offset = std::max(24, static_cast<int>(std::lround(70.0 * scale)));
+        const auto new_x = cursor.x - width / 2;
+        const auto new_y = cursor.y - height + y_offset;
+        SetWindowPos(pet_window_, HWND_TOPMOST, new_x, new_y, width, height, SWP_NOACTIVATE);
+        drag_start_cursor_ = cursor;
+        drag_start_position_ = POINT{new_x, new_y};
+        dx = 0;
+        dy = 0;
+        dock_edge_ = DockEdge::None;
+        dock_screen_identifier_.clear();
+        dock_visibility_ = 1.0;
+        dock_thought_until_ = Clock::time_point::min();
+        dock_hover_reveal_until_ = Clock::time_point::min();
+        has_last_hover_cursor_ = false;
+    }
+    dragging_ = true;
+    RECT rect{}; GetWindowRect(pet_window_, &rect);
+    SetWindowPos(pet_window_, HWND_TOPMOST, drag_start_position_.x + dx, drag_start_position_.y + dy,
+                 rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
+    render_and_present();
+}
+
+void NativeApp::finish_drag(POINT cursor) {
+    if (!drag_pending_) return;
+    const auto moved = dragging_;
+    const auto started_docked = drag_started_docked_;
+    drag_pending_ = false;
+    dragging_ = false;
+    drag_started_docked_ = false;
+    ReleaseCapture();
+    if (!moved) {
+        if (started_docked) reveal_dock_for_interaction();
+        return;
+    }
+    try_snap_or_clamp(cursor);
+    save_position();
+}
+
+void NativeApp::try_snap_or_clamp(POINT cursor) {
+    const auto screen = screen_from_point(cursor);
+    const auto dpi = static_cast<double>(screen.dpi) / 96.0;
+    const auto distance = std::max(24.0, 36.0 * dpi);
+    const auto edge = app_logic::select_snap_edge(
+        PointD{static_cast<double>(cursor.x), static_cast<double>(cursor.y)},
+        RectD{static_cast<double>(screen.work.left), static_cast<double>(screen.work.top),
+               static_cast<double>(screen.work.right - screen.work.left),
+               static_cast<double>(screen.work.bottom - screen.work.top)}, distance);
+    if (edge != DockEdge::None) {
+        RECT rect{};
+        GetWindowRect(pet_window_, &rect);
+        const auto visible_center = dock_visible_center_px(dpi);
+        dock_edge_ = edge;
+        dock_screen_identifier_ = screen.identifier;
+        dock_coordinate_ = rect.top + visible_center;
+        dock_visibility_ = 1.0;
+        dock_last_content_change_ = Clock::now();
+        update_window_position();
+    } else {
+        dock_edge_ = DockEdge::None;
+        dock_screen_identifier_.clear();
+        dock_thought_until_ = Clock::time_point::min();
+        dock_hover_reveal_until_ = Clock::time_point::min();
+        has_last_hover_cursor_ = false;
+        clamp_to_work_area();
+    }
+    refresh_visual(true);
+}
+
+void NativeApp::show_pet(bool visible) {
+    const bool changed = settings_.pet_visible != visible;
+    settings_.pet_visible = visible;
+    if (visible) {
+        ShowWindow(pet_window_, SW_SHOWNOACTIVATE);
+        SetWindowPos(pet_window_, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    } else ShowWindow(pet_window_, SW_HIDE);
+    if (changed) save_settings();
+}
+
+void NativeApp::toggle_sound() {
+    settings_.sound_enabled = !settings_.sound_enabled;
+    save_settings();
+}
+
+bool NativeApp::is_autostart_enabled() const {
+    HKEY key{};
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_READ, &key) != ERROR_SUCCESS) return false;
+    wchar_t value[4096]{}; DWORD size = sizeof(value); DWORD type{};
+    const auto result = RegQueryValueExW(key, L"CodeXPets", nullptr, &type,
+                                         reinterpret_cast<BYTE*>(value), &size);
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && value[0] != L'\0';
+}
+
+void NativeApp::set_autostart_enabled(bool enabled) {
+    HKEY key{};
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                        0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return;
+    if (enabled) {
+        wchar_t path[32768]{};
+        const auto length = GetModuleFileNameW(instance_, path, ARRAYSIZE(path));
+        std::wstring command = L"\"" + std::wstring(path, length) + L"\"";
+        RegSetValueExW(key, L"CodeXPets", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(command.c_str()),
+                       static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+    } else RegDeleteValueW(key, L"CodeXPets");
+    RegCloseKey(key);
+}
+
+void NativeApp::toggle_startup() {
+    set_autostart_enabled(!is_autostart_enabled());
+}
+
+void NativeApp::open_sessions_folder() {
+    ShellExecuteW(pet_window_, L"open", settings_.sessions_root.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void NativeApp::open_latest_release() {
+    ShellExecuteW(pet_window_, L"open", kReleaseUrl, nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+std::wstring NativeApp::audio_path(NotificationSound sound) {
+    std::wstring name = sound == NotificationSound::Started ? L"voice-start.mp3" :
+                        sound == NotificationSound::Completed ? L"voice-complete.mp3" : L"voice-error.mp3";
+    auto directory = settings_store_.settings_file_path().parent_path() / L"audio";
+    const auto path = directory / name;
+    if (!std::filesystem::exists(path)) {
+        std::string ignored;
+        renderer_.extract_audio(sound, path, &ignored);
+    }
+    return path.native();
+}
+
+void NativeApp::play_sound(NotificationSound sound) {
+    const auto path = audio_path(sound);
+    mciSendStringW(L"close codexpets_voice", nullptr, 0, nullptr);
+    const auto open = std::wstring(L"open \"") + path + L"\" type mpegvideo alias codexpets_voice";
+    if (mciSendStringW(open.c_str(), nullptr, 0, nullptr) == 0) {
+        mciSendStringW(L"play codexpets_voice", nullptr, 0, nullptr);
+    }
+}
+
+void NativeApp::show_error(std::wstring title, std::wstring text) {
+    MessageBoxW(pet_window_, text.c_str(), title.c_str(), MB_ICONERROR | MB_OK);
+}
+
+void NativeApp::show_settings() {
+    if (settings_window_ && IsWindow(settings_window_)) {
+        ShowWindow(settings_window_, SW_SHOWNORMAL);
+        SetForegroundWindow(settings_window_);
+        return;
+    }
+    WNDCLASSEXW wc{sizeof(wc)};
+    wc.lpfnWndProc = settings_window_proc;
+    wc.hInstance = instance_;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = kSettingsClassName;
+    RegisterClassExW(&wc);
+    settings_window_ = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
+                                       kSettingsClassName, L"CodeXPets 设置",
+                                       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                                       CW_USEDEFAULT, CW_USEDEFAULT, 560, 470,
+                                       pet_window_, nullptr, instance_, this);
+    if (!settings_window_) return;
+    ShowWindow(settings_window_, SW_SHOWNORMAL);
+    UpdateWindow(settings_window_);
+}
+
+HMENU NativeApp::build_menu(bool /*context_menu*/) {
+    const auto menu = CreatePopupMenu();
+    add_menu_item(menu, kMenuStatus, std::wstring(L"状态：") + to_wide(last_status_text_), false);
+    add_menu_separator(menu);
+    add_menu_item(menu, kMenuPet, L"显示桌面宠物");
+    add_menu_item(menu, kMenuSound, L"播放语音提醒");
+    add_menu_item(menu, kMenuStartup, L"开机自动运行");
+    add_menu_item(menu, kMenuFolder, L"打开 Codex 会话目录");
+    add_menu_item(menu, kMenuSettings, L"设置…");
+    add_menu_item(menu, kMenuUpdate, L"查看更新…");
+    add_menu_separator(menu);
+    add_menu_item(menu, kMenuExit, L"退出");
+    update_menu_checks(menu);
+    return menu;
+}
+
+void NativeApp::update_menu_checks(HMENU menu) {
+    CheckMenuItem(menu, kMenuPet, MF_BYCOMMAND | (settings_.pet_visible ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu, kMenuSound, MF_BYCOMMAND | (settings_.sound_enabled ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu, kMenuStartup, MF_BYCOMMAND | (is_autostart_enabled() ? MF_CHECKED : MF_UNCHECKED));
+}
+
+LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+        case WM_CREATE: {
+            auto* header = CreateWindowExW(0, L"STATIC", L"桌面宠物与 Codex 会话监听",
+                                           WS_CHILD | WS_VISIBLE, 20, 18, 500, 28, hwnd,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsHeader)), instance_, nullptr);
+            set_control_font(header);
+            const std::array<std::pair<int, const wchar_t*>, 4> labels{{
+                {kSettingsHover, L"边缘触发高度（像素）"}, {kSettingsIdle, L"吸附自动隐藏（秒，0=关闭）"},
+                {kSettingsReveal, L"鼠标唤出保持（秒）"}, {kSettingsNotification, L"任务状态云朵保持（秒）"}}};
+            for (int i = 0; i < 4; ++i) {
+                auto* label = CreateWindowExW(0, L"STATIC", labels[static_cast<std::size_t>(i)].second,
+                    WS_CHILD | WS_VISIBLE, 24, 66 + i * 38, 230, 24, hwnd, nullptr, instance_, nullptr);
+                set_control_font(label);
+                auto* edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                    WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL, 270, 63 + i * 38, 100, 26, hwnd,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(labels[static_cast<std::size_t>(i)].first)), instance_, nullptr);
+                set_control_font(edit);
+            }
+            set_edit_int(hwnd, kSettingsHover, settings_.dock_hover_height);
+            set_edit_int(hwnd, kSettingsIdle, settings_.dock_idle_hide_seconds);
+            set_edit_int(hwnd, kSettingsReveal, settings_.dock_reveal_seconds);
+            set_edit_int(hwnd, kSettingsNotification, settings_.dock_notification_seconds);
+            auto* root_label = CreateWindowExW(0, L"STATIC", L"Codex sessions 目录",
+                WS_CHILD | WS_VISIBLE, 24, 224, 230, 24, hwnd, nullptr, instance_, nullptr);
+            set_control_font(root_label);
+            auto* root = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", settings_.sessions_root.c_str(),
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 24, 250, 430, 26, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsRoot)), instance_, nullptr);
+            set_control_font(root);
+            auto* browse = CreateWindowExW(0, L"BUTTON", L"选择…", WS_CHILD | WS_VISIBLE,
+                462, 249, 70, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsBrowse)), instance_, nullptr);
+            set_control_font(browse);
+            auto* sound = CreateWindowExW(0, L"BUTTON", L"播放语音提醒", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                24, 292, 180, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsSound)), instance_, nullptr);
+            set_control_font(sound);
+            SendMessageW(sound, BM_SETCHECK, settings_.sound_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+            auto* hint = CreateWindowExW(0, L"STATIC",
+                L"程序只读取 JSONL，不修改 Codex 会话文件；设置会写入用户数据目录。",
+                WS_CHILD | WS_VISIBLE, 24, 326, 500, 34, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsHint)), instance_, nullptr);
+            set_control_font(hint);
+            auto* defaults = CreateWindowExW(0, L"BUTTON", L"恢复默认", WS_CHILD | WS_VISIBLE,
+                24, 370, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsDefaults)), instance_, nullptr);
+            auto* cancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE,
+                370, 370, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsCancel)), instance_, nullptr);
+            auto* apply = CreateWindowExW(0, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                455, 370, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsApply)), instance_, nullptr);
+            set_control_font(defaults); set_control_font(cancel); set_control_font(apply);
+            return 0;
+        }
+        case WM_COMMAND: {
+            const auto id = LOWORD(wparam);
+            if (id == kSettingsDefaults) {
+                AppSettings defaults;
+                set_edit_int(hwnd, kSettingsHover, defaults.dock_hover_height);
+                set_edit_int(hwnd, kSettingsIdle, defaults.dock_idle_hide_seconds);
+                set_edit_int(hwnd, kSettingsReveal, defaults.dock_reveal_seconds);
+                set_edit_int(hwnd, kSettingsNotification, defaults.dock_notification_seconds);
+                SetDlgItemTextW(hwnd, kSettingsRoot, defaults.sessions_root.c_str());
+                SendDlgItemMessageW(hwnd, kSettingsSound, BM_SETCHECK, BST_CHECKED, 0);
+                return 0;
+            }
+            if (id == kSettingsBrowse) {
+                BROWSEINFOW info{}; info.hwndOwner = hwnd; info.lpszTitle = L"选择 Codex sessions 目录";
+                info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+                const auto item = SHBrowseForFolderW(&info);
+                if (item) {
+                    wchar_t path[MAX_PATH * 8]{};
+                    if (SHGetPathFromIDListW(item, path)) SetDlgItemTextW(hwnd, kSettingsRoot, path);
+                    CoTaskMemFree(item);
+                }
+                return 0;
+            }
+            if (id == kSettingsCancel) { DestroyWindow(hwnd); return 0; }
+            if (id == kSettingsApply) {
+                AppSettings next = settings_;
+                next.dock_hover_height = read_edit_int(hwnd, kSettingsHover, next.dock_hover_height);
+                next.dock_idle_hide_seconds = read_edit_int(hwnd, kSettingsIdle, next.dock_idle_hide_seconds);
+                next.dock_reveal_seconds = read_edit_int(hwnd, kSettingsReveal, next.dock_reveal_seconds);
+                next.dock_notification_seconds = read_edit_int(hwnd, kSettingsNotification, next.dock_notification_seconds);
+                wchar_t root[32768]{}; GetDlgItemTextW(hwnd, kSettingsRoot, root, ARRAYSIZE(root));
+                next.sessions_root = std::filesystem::path(root);
+                next.sound_enabled = SendDlgItemMessageW(hwnd, kSettingsSound, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                next.normalize();
+                const auto root_changed = next.sessions_root != settings_.sessions_root;
+                settings_ = next;
+                save_settings();
+                if (root_changed) {
+                    if (monitor_worker_) monitor_worker_->stop();
+                    {
+                        std::lock_guard lock(pending_mutex_);
+                        pending_updates_.clear();
+                    }
+                    snapshot_ = MonitorSnapshot{};
+                    has_snapshot_ = false;
+                    visual_coordinator_ = VisualStateCoordinator{};
+                    displayed_task_titles_.clear();
+                    selected_task_index_ = 0;
+                    dock_thought_until_ = Clock::time_point::min();
+                    start_monitor();
+                }
+                DestroyWindow(hwnd);
+                refresh_visual(true);
+                return 0;
+            }
+            break;
+        }
+        case WM_CLOSE: DestroyWindow(hwnd); return 0;
+        case WM_DESTROY: settings_window_ = nullptr; return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void NativeApp::exit_application() {
+    shutting_down_ = true;
+    PostQuitMessage(0);
+}
+
+LRESULT CALLBACK NativeApp::pet_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    NativeApp* app = reinterpret_cast<NativeApp*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        app = static_cast<NativeApp*>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+    }
+    return app ? app->pet_proc(hwnd, message, wparam, lparam) : DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+LRESULT CALLBACK NativeApp::message_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    NativeApp* app = reinterpret_cast<NativeApp*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        app = static_cast<NativeApp*>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+    }
+    return app ? app->message_proc(hwnd, message, wparam, lparam) : DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+LRESULT CALLBACK NativeApp::settings_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    NativeApp* app = reinterpret_cast<NativeApp*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        app = static_cast<NativeApp*>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+    }
+    return app ? app->settings_proc(hwnd, message, wparam, lparam) : DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+LRESULT NativeApp::pet_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+        case WM_NCHITTEST: {
+            POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ScreenToClient(hwnd, &point);
+            return renderer_.hit_test_alpha(point.x, point.y) ? HTCLIENT : HTTRANSPARENT;
+        }
+        case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+        case WM_LBUTTONDOWN: {
+            POINT cursor = cursor_position();
+            POINT local = cursor; ScreenToClient(hwnd, &local);
+            if (!renderer_.hit_test_alpha(local.x, local.y)) return 0;
+            const auto dpi = GetDpiForWindow(hwnd);
+            const auto scale = dpi == 0 ? 1.0 : static_cast<double>(dpi) / 96.0;
+            const PointD logical{local.x / scale, local.y / scale};
+            float cloud_x = (Renderer::LogicalWidth - 270.0f) / 2.0f;
+            if (dock_edge_ != DockEdge::None) cloud_x += dock_edge_ == DockEdge::Left ? -48.0f : 48.0f;
+            RECT window_rect{}; GetWindowRect(hwnd, &window_rect);
+            const auto screen = screen_from_point(POINT{
+                window_rect.left + (window_rect.right - window_rect.left) / 2,
+                window_rect.top + (window_rect.bottom - window_rect.top) / 2});
+            const bool bubble_below = dock_edge_ != DockEdge::None &&
+                dock_coordinate_ < screen.work.top + 150;
+            const double cloud_y = bubble_below
+                ? Renderer::LogicalHeight - 110.0 - 45.0 - (dock_edge_ != DockEdge::None ? 2.0 : 0.0)
+                : 45.0 + (dock_edge_ != DockEdge::None ? 6.0 : 0.0);
+            const RectD bubble{cloud_x, cloud_y, 270, 110};
+            const RectD content{cloud_x + 81, cloud_y + 37.4, 156, 45};
+            const bool bubble_visible = app_logic::should_show_thought_bubble(
+                dock_edge_ != DockEdge::None, last_visual_state_, Clock::now(), dock_thought_until_);
+            if (app_logic::is_task_switch_point(dock_edge_ != DockEdge::None, bubble_visible,
+                    last_visual_state_, static_cast<int>(displayed_task_titles_.size()),
+                    bubble, content, logical)) {
+                if (displayed_task_titles_.size() > 1) {
+                    selected_task_index_ = (selected_task_index_ + 1) %
+                        static_cast<int>(displayed_task_titles_.size());
+                    scroll_offset_ = 0; scroll_hold_seconds_ = 1.9; scroll_at_end_ = false;
+                    reveal_dock_for_interaction(); refresh_visual(true);
+                }
+                return 0;
+            }
+            begin_drag(cursor);
+            return 0;
+        }
+        case WM_MOUSEMOVE:
+            move_drag(cursor_position());
+            return 0;
+        case WM_LBUTTONUP:
+            finish_drag(cursor_position());
+            return 0;
+        case WM_RBUTTONUP: {
+            const auto menu = build_menu(true);
+            const auto point = cursor_position();
+            SetForegroundWindow(hwnd);
+            const auto command = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
+                                                point.x, point.y, 0, hwnd, nullptr);
+            DestroyMenu(menu);
+            if (command) SendMessageW(message_window_, WM_COMMAND, command, 0);
+            return 0;
+        }
+        case WM_TIMER:
+            if (wparam == timer_id_) { on_timer(); return 0; }
+            break;
+        case WM_CLOSE:
+            exit_application(); return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+LRESULT NativeApp::message_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == kMonitorMessage) { process_monitor_updates(); return 0; }
+    if (message == kTrayCallback) {
+        if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
+            const auto menu = build_menu(false);
+            const auto point = cursor_position();
+            SetForegroundWindow(hwnd);
+            const auto command = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
+                                                point.x, point.y, 0, hwnd, nullptr);
+            DestroyMenu(menu);
+            if (command) SendMessageW(message_window_, WM_COMMAND, command, 0);
+        } else if (lparam == WM_LBUTTONDBLCLK) show_pet(!settings_.pet_visible);
+        return 0;
+    }
+    if (message == WM_COMMAND) {
+        switch (LOWORD(wparam)) {
+            case kMenuPet: show_pet(!settings_.pet_visible); break;
+            case kMenuSound: toggle_sound(); break;
+            case kMenuStartup: toggle_startup(); break;
+            case kMenuFolder: open_sessions_folder(); break;
+            case kMenuSettings: show_settings(); break;
+            case kMenuUpdate: open_latest_release(); break;
+            case kMenuExit: exit_application(); break;
+            default: break;
+        }
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+int NativeApp::run_utility(HINSTANCE instance, const std::vector<std::wstring>& arguments) {
+    auto has = [&](std::wstring_view value) {
+        return std::find(arguments.begin(), arguments.end(), value) != arguments.end();
+    };
+    if (has(L"--version")) {
+        write_stdout(std::string(CODEXPETS_VERSION) + "\n");
+        return 0;
+    }
+    if (has(L"--startup-smoke-test")) {
+        NativeApp app(instance, arguments);
+        std::string startup_error;
+        if (!app.initialize(&startup_error)) {
+            write_stdout("startup-smoke-test: " + startup_error + "\n");
+            return 1;
+        }
+        app.shutdown();
+        write_stdout("startup-smoke-test: ok\n");
+        return 0;
+    }
+    Renderer renderer;
+    std::string error;
+    if (!renderer.initialize(instance, &error)) { write_stdout(error + "\n"); return 1; }
+    auto finish = [&](int code) { renderer.shutdown(); return code; };
+    if (has(L"--validate-resources")) {
+        const auto ok = renderer.validate(&error);
+        if (ok) write_stdout("resources: ok\n"); else write_stdout("resources: " + error + "\n");
+        return finish(ok ? 0 : 1);
+    }
+    if (has(L"--smoke-test") || has(L"--preview")) {
+        RenderState state;
+        state.task_titles = {"原生渲染检查"};
+        state.progress_labels = {std::optional<std::string>("1/3")};
+        const std::array<std::pair<ReminderState, const char*>, 5> states{{
+            {ReminderState::Idle, "idle"}, {ReminderState::Busy, "busy"},
+            {ReminderState::Completed, "completed"}, {ReminderState::Error, "error"},
+            {ReminderState::Interrupted, "interrupted"}}};
+        std::filesystem::path preview_folder;
+        const auto preview_it = std::find(arguments.begin(), arguments.end(), L"--preview");
+        if (preview_it != arguments.end() && std::next(preview_it) != arguments.end()) {
+            preview_folder = std::filesystem::path(*std::next(preview_it));
+            std::filesystem::create_directories(preview_folder);
+        }
+        for (const auto& [visual, name] : states) {
+            state.state = visual; state.status_text = name;
+            state.animation_tick = (visual == ReminderState::Busy || visual == ReminderState::Completed) ? 18 : 0;
+            if (preview_folder.empty()) {
+                if (!renderer.render(state, 1.0, &error)) return finish(1);
+            } else if (!renderer.save_preview(preview_folder / (std::string(name) + ".png"), state, 1.0, &error)) {
+                write_stdout(error + "\n"); return finish(1);
+            }
+        }
+        state.docked = true;
+        for (const auto& [visual, name] : states) {
+            state.state = visual;
+            state.animation_tick = visual == ReminderState::Idle ? 0 : 18;
+            for (const auto edge : {DockEdge::Left, DockEdge::Right}) {
+                state.dock_edge = edge;
+                const auto side = edge == DockEdge::Left ? "left" : "right";
+                state.status_text = std::string("dock-") + name + "-" + side;
+                if (preview_folder.empty()) {
+                    if (!renderer.render(state, 1.0, &error)) return finish(1);
+                } else if (!renderer.save_preview(
+                               preview_folder / (std::string("dock-") + side + "-" + name + ".png"),
+                               state, 1.0, &error)) {
+                    return finish(1);
+                }
+            }
+        }
+        write_stdout(preview_folder.empty() ? "smoke-test: ok\n" : "preview: ok\n");
+        return finish(0);
+    }
+    if (has(L"--test-sound")) {
+        const auto folder = std::filesystem::temp_directory_path() / L"CodeXPetsNativeAudio";
+        for (const auto sound : {NotificationSound::Started, NotificationSound::Completed, NotificationSound::Error}) {
+            const auto name = sound == NotificationSound::Started ? L"start.mp3" : sound == NotificationSound::Completed ? L"complete.mp3" : L"error.mp3";
+            const auto path = folder / name;
+            if (!renderer.extract_audio(sound, path, &error)) return finish(1);
+            const auto command = std::wstring(L"open \"") + path.native() + L"\" type mpegvideo alias codexpets_test";
+            if (mciSendStringW(command.c_str(), nullptr, 0, nullptr) != 0) return finish(1);
+            mciSendStringW(L"play codexpets_test wait", nullptr, 0, nullptr);
+            mciSendStringW(L"close codexpets_test", nullptr, 0, nullptr);
+        }
+        write_stdout("sound: ok\n");
+        return finish(0);
+    }
+    return finish(0);
+}
+
+} // namespace codexpets::windows
