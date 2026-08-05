@@ -11,51 +11,41 @@ CodeXPets 是一个面向 Codex 的**原生桌面宠物**。它以只读方式�
 
 <table>
   <tr>
-    <td align="center"><strong>空闲</strong><br><img src="docs/screenshots/idle.png" alt="CodeXPets 空闲状态" width="280"></td>
-    <td align="center"><strong>工作中</strong><br><img src="docs/screenshots/busy.png" alt="CodeXPets 工作中状态" width="280"></td>
-    <td align="center"><strong>已完成</strong><br><img src="docs/screenshots/completed.png" alt="CodeXPets 已完成状态" width="280"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>异常</strong><br><img src="docs/screenshots/error.png" alt="CodeXPets 异常状态" width="280"></td>
-    <td align="center"><strong>已中断</strong><br><img src="docs/screenshots/interrupted.png" alt="CodeXPets 已中断状态" width="280"></td>
-    <td align="center">五种状态会随 Codex 任务生命周期自动切换。</td>
+    <td align="center"><strong>空闲</strong><br><img src="docs/screenshots/idle.png" alt="CodeXPets 空闲状态" width="180"></td>
+    <td align="center"><strong>工作中</strong><br><img src="docs/screenshots/busy.png" alt="CodeXPets 工作中状态" width="180"></td>
+    <td align="center"><strong>已完成</strong><br><img src="docs/screenshots/completed.png" alt="CodeXPets 已完成状态" width="180"></td>
+    <td align="center"><strong>异常</strong><br><img src="docs/screenshots/error.png" alt="CodeXPets 异常状态" width="180"></td>
+    <td align="center"><strong>已中断</strong><br><img src="docs/screenshots/interrupted.png" alt="CodeXPets 已中断状态" width="180"></td>
   </tr>
 </table>
-
 ## 左右边缘吸附
 
-宠物可以拖到屏幕左侧或右侧边缘，吸附后保留云朵提示，并支持自动隐藏与边缘唤出。以下展示左右吸附下的全部五种状态：
+宠物可以拖到屏幕左侧或右侧边缘，吸附后保留云朵提示，并支持自动隐藏与边缘唤出。为减少首页占用空间，左右吸附的五种状态按紧凑矩阵展示：
 
 <table>
   <tr>
-    <th>状态</th>
+    <th>方向 / 状态</th>
+    <th>空闲</th>
+    <th>工作中</th>
+    <th>已完成</th>
+    <th>异常</th>
+    <th>已中断</th>
+  </tr>
+  <tr>
     <th>左侧吸附</th>
+    <td><img src="docs/screenshots/dock-left-idle.png" alt="CodeXPets 空闲状态左侧吸附" width="150"></td>
+    <td><img src="docs/screenshots/dock-left-busy.png" alt="CodeXPets 工作中状态左侧吸附" width="150"></td>
+    <td><img src="docs/screenshots/dock-left-completed.png" alt="CodeXPets 已完成状态左侧吸附" width="150"></td>
+    <td><img src="docs/screenshots/dock-left-error.png" alt="CodeXPets 异常状态左侧吸附" width="150"></td>
+    <td><img src="docs/screenshots/dock-left-interrupted.png" alt="CodeXPets 已中断状态左侧吸附" width="150"></td>
+  </tr>
+  <tr>
     <th>右侧吸附</th>
-  </tr>
-  <tr>
-    <td align="center"><strong>空闲</strong></td>
-    <td align="center"><img src="docs/screenshots/dock-left-idle.png" alt="CodeXPets 空闲状态左侧吸附" width="360"></td>
-    <td align="center"><img src="docs/screenshots/dock-right-idle.png" alt="CodeXPets 空闲状态右侧吸附" width="360"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>工作中</strong></td>
-    <td align="center"><img src="docs/screenshots/dock-left-busy.png" alt="CodeXPets 工作中状态左侧吸附" width="360"></td>
-    <td align="center"><img src="docs/screenshots/dock-right-busy.png" alt="CodeXPets 工作中状态右侧吸附" width="360"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>已完成</strong></td>
-    <td align="center"><img src="docs/screenshots/dock-left-completed.png" alt="CodeXPets 已完成状态左侧吸附" width="360"></td>
-    <td align="center"><img src="docs/screenshots/dock-right-completed.png" alt="CodeXPets 已完成状态右侧吸附" width="360"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>异常</strong></td>
-    <td align="center"><img src="docs/screenshots/dock-left-error.png" alt="CodeXPets 异常状态左侧吸附" width="360"></td>
-    <td align="center"><img src="docs/screenshots/dock-right-error.png" alt="CodeXPets 异常状态右侧吸附" width="360"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>已中断</strong></td>
-    <td align="center"><img src="docs/screenshots/dock-left-interrupted.png" alt="CodeXPets 已中断状态左侧吸附" width="360"></td>
-    <td align="center"><img src="docs/screenshots/dock-right-interrupted.png" alt="CodeXPets 已中断状态右侧吸附" width="360"></td>
+    <td><img src="docs/screenshots/dock-right-idle.png" alt="CodeXPets 空闲状态右侧吸附" width="150"></td>
+    <td><img src="docs/screenshots/dock-right-busy.png" alt="CodeXPets 工作中状态右侧吸附" width="150"></td>
+    <td><img src="docs/screenshots/dock-right-completed.png" alt="CodeXPets 已完成状态右侧吸附" width="150"></td>
+    <td><img src="docs/screenshots/dock-right-error.png" alt="CodeXPets 异常状态右侧吸附" width="150"></td>
+    <td><img src="docs/screenshots/dock-right-interrupted.png" alt="CodeXPets 已中断状态右侧吸附" width="150"></td>
   </tr>
 </table>
 ## 主要功能
