@@ -1,91 +1,130 @@
 # CodeXPets
 
-CodeXPets 4.1.0 是一个面向 Codex 的**原生桌面宠物**。本版本将原来的 .NET/Avalonia/SkiaSharp 架构完全替换为轻量 C++20 核心和系统原生 UI：
+CodeXPets 是一个面向 Codex 的**原生桌面宠物**。它以只读方式监听本机 Codex 会话，把任务的空闲、执行、完成、异常和中断状态，实时显示为猫咪动画与云朵消息。
 
-- Windows：Win32 + GDI+
-- macOS：AppKit + Core Graphics
-- 核心：无第三方运行时、自研轻量 JSON 解析器、增量 JSONL 会话监控
+- **状态一眼可见**：不用切回终端，也能看到 Codex 是否正在工作、计划执行到哪一步以及任务是否结束。
+- **常驻但不打扰**：透明、无边框、置顶且不抢焦点，可拖动、吸附到屏幕左右边缘并自动隐藏。
+- **本地优先**：会话解析在本机完成，只读取 Codex 的 JSONL 会话文件，不修改、移动或删除它们。
+- **原生轻量**：C++20 核心，Windows 使用 Win32 + GDI+，macOS 使用 AppKit + Core Graphics，无需安装 .NET、Electron、Qt 等额外运行时。
 
-目标是**不牺牲功能的前提下尽量降低发布体积和内存占用**。发布脚本会拒绝超过 10 MiB 的 EXE、APP、ZIP 或 DMG；实际工作集会受操作系统图形框架、字体和显示器缩放影响，不能只由应用代码绝对控制。
+## 宠物状态预览
 
-## 支持矩阵
+<table>
+  <tr>
+    <td align="center"><strong>空闲</strong><br><img src="docs/screenshots/idle.png" alt="CodeXPets 空闲状态" width="280"></td>
+    <td align="center"><strong>工作中</strong><br><img src="docs/screenshots/busy.png" alt="CodeXPets 工作中状态" width="280"></td>
+    <td align="center"><strong>已完成</strong><br><img src="docs/screenshots/completed.png" alt="CodeXPets 已完成状态" width="280"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>异常</strong><br><img src="docs/screenshots/error.png" alt="CodeXPets 异常状态" width="280"></td>
+    <td align="center"><strong>已中断</strong><br><img src="docs/screenshots/interrupted.png" alt="CodeXPets 已中断状态" width="280"></td>
+    <td align="center">五种状态会随 Codex 任务生命周期自动切换。</td>
+  </tr>
+</table>
 
-| 系统 | 架构 | 构建/发布目标 | 文件 |
+## 主要功能
+
+### Codex 任务监控
+
+- 自动发现并监听 Codex `sessions` 目录中的 JSONL 会话。
+- 增量读取新增内容，通常可在 1 秒内反映任务状态变化。
+- 识别任务开始、完成、异常、中断、任务标题和项目名称。
+- 展示 `update_plan` 计划进度，例如 `1/3`。
+- 支持同时跟踪多个任务，自动轮换展示，也可以点击云朵切换。
+- 长文本自动换行和滚动，任务变化时优先展示最新内容。
+
+### 桌面宠物交互
+
+- 透明、无边框、始终置顶，不抢占当前应用焦点。
+- 可拖动猫咪或云朵移动位置。
+- 靠近屏幕左侧或右侧释放后自动吸附。
+- 吸附状态支持自动隐藏、边缘唤出和拖动解除吸附。
+- 自动保存宠物位置、所在显示器、吸附方向和垂直位置。
+- 支持多显示器及显示器分辨率变化后的安全恢复。
+
+### 系统集成
+
+- Windows 常驻通知区域，macOS 常驻菜单栏。
+- 可快速显示或隐藏宠物、开启或关闭声音、打开设置和会话目录。
+- 支持登录系统后自动启动。
+- 内置任务开始、完成和异常语音提醒。
+- 提供更新入口、资源校验和单实例运行保护。
+
+### 小爱音箱播报（可选）
+
+- 可把 Codex 的开始、完成、异常和中断事件主动播报到小爱音箱。
+- 设置页支持浏览器登录、扫描设备、选择目标音箱和测试播报。
+- Windows 使用一次性 WebView2 会话，macOS 使用非持久化 WKWebView 会话。
+- 授权信息只保存在 Windows 凭据管理器或 macOS Keychain，不保存小米账号密码。
+- 功能默认关闭；未启用时不会发起相关网络请求。
+
+## 状态说明
+
+| 状态 | 宠物表现 | 含义 |
+|---|---|---|
+| 空闲 | 安静等待 | 当前没有正在执行的 Codex 任务 |
+| 工作中 | 行走动画 | 存在活动任务，并显示标题或计划进度 |
+| 已完成 | 开心表情 | 最近的任务已正常完成 |
+| 异常 | 流泪表情 | 任务执行失败或异常结束 |
+| 已中断 | 惊讶表情 | 任务被用户或系统中断 |
+
+## 支持平台
+
+当前版本：**4.1.0**
+
+| 系统 | 架构 | 构建目标 | 发布文件 |
 |---|---:|---|---|
 | Windows | x64 | `win-x64` | `CodeXPets-v4.1.0-win-x64.exe` / `.zip` |
 | Windows | ARM64 | `win-arm64` | `CodeXPets-v4.1.0-win-arm64.exe` / `.zip` |
 | macOS | Intel | `osx-x64` | `CodeXPets-v4.1.0-macos-x64.zip` / `.dmg` |
 | macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.1.0-macos-arm64.zip` / `.dmg` |
 
-macOS 最低支持 macOS 13。Windows 版本是一个自包含原生 EXE；macOS 版本是标准 `CodeXPets.app`。两者都不要求用户安装 .NET、Electron、Qt 或其他附加运行时。
+macOS 最低支持 macOS 13。Windows 版本为自包含原生 EXE，macOS 版本为标准 `CodeXPets.app`。
 
-## 保留的功能
-
-- 读取 Codex `sessions` 目录中的 JSONL 文件，增量解析新增内容。
-- 识别任务开始、完成、异常、标题、`update_plan` 计划进度和过期任务。
-- Windows 通知区域图标、macOS 菜单栏图标。
-- 透明、无边框、置顶、不抢焦点的桌面宠物窗口。
-- 云朵文本、自动换行、长文本滚动、多任务自动轮换和点击切换。
-- 左右边缘吸附、局部边缘唤出、自动隐藏、拖动解除吸附。
-- 多显示器位置保存/恢复，支持显示器变化后的降级匹配。
-- 设置窗口、语音提醒、登录启动、打开会话目录和更新入口。
-- Windows 旧注册表设置、macOS 旧 `NSUserDefaults` 设置以及旧位置格式迁移。
-- 单实例、资源完整性校验、离屏冒烟渲染、真实窗口启动冒烟和 SHA-256 校验。
-
-CodeXPets 只读取 Codex 会话文件，不会修改、移动或删除这些文件。
-
-## 目录规则
-
-`CODEX_HOME` 优先级最高。未设置时：
-
-| 系统 | Codex Home | sessions | config |
-|---|---|---|---|
-| Windows | `%USERPROFILE%\\.codex` | `%USERPROFILE%\\.codex\\sessions` | `%USERPROFILE%\\.codex\\config.toml` |
-| macOS | `~/.codex` | `~/.codex/sessions` | `~/.codex/config.toml` |
-
-也可以在设置窗口中选择自定义 sessions 目录。
-
-设置文件位置：
-
-- Windows：`%LOCALAPPDATA%\\CodeXPets\\settings.json`
-- macOS：`~/Library/Application Support/CodeXPets/settings.json`
-
-### 可选的小爱音箱主动播报
-
-在“设置”中可以启用小爱音箱主动播报。Windows 点击“浏览器登录”后，会在内置 Edge WebView2 窗口中完成小米账号验证；macOS 使用系统 WKWebView 完成同样的登录流程。两端登录都使用一次性、非持久化的浏览器会话，登录完成后不会留下网页缓存或账号密码。扫描后选择目标音箱（也可填写设备 ID 或米家显示名称），再点击“测试播报”。保存后，Codex 的开始、完成、错误和中断事件会同步发送到音箱。
-
-该功能通过小米 MiNA 接口发送 TTS 命令，并非直接向音箱发起本地 HTTP 请求。播报内容使用“开始工作、任务完成、执行出错、任务被中断”等事件提示，并追加当前项目名称，不再播报 `Codex` 或具体任务标题。登录授权信息仅保存在 Windows 凭据管理器或 macOS Keychain 中，不会写入 `settings.json`，也不会保存小米账号密码。Windows 的 WebView2 loader 已嵌入 EXE，不需要旁置 DLL；macOS 不需要额外运行库。目标音箱留空时，账号下只有一台在线小爱音箱才会自动选中；多台音箱必须显式选择，避免播报到错误设备。功能默认关闭，未启用时不会产生网络请求。
-
-## 运行监控策略
-
-为了避免 `FileSystemWatcher`、FSEvents 和大型 UI 运行时带来的额外常驻开销，原生版本采用轻量自适应轮询：
-
-- 默认每 500 ms 检查一次目录和最近跟踪的 JSONL 文件。
-- 只从保存的字节偏移继续读取新增内容。
-- 最多跟踪最近 40 个文件，并周期性执行恢复扫描。
-- 文件不存在、正在写入或 JSON 行不完整时会安全延后到下一轮。
-
-正常情况下状态变化延迟小于 1 秒，同时不要求安装额外后台服务。
-
-## 使用
+## 使用方法
 
 ### Windows
 
-1. 下载与 CPU 架构匹配的 EXE，直接运行。
-2. 右键通知区域图标可以显示/隐藏桌宠、切换语音、设置登录启动和打开设置。
-3. 拖动猫或云朵可以移动桌宠；靠近屏幕左/右边缘释放即可吸附。
+1. 下载与 CPU 架构匹配的 EXE，直接运行，无需安装。
+2. 右键通知区域图标可显示或隐藏宠物、切换声音、设置登录启动和打开设置。
+3. 拖动猫咪或云朵可调整位置；拖到屏幕左侧或右侧即可吸附。
 
 ### macOS
 
-1. 打开 DMG，将 `CodeXPets.app` 拖入 `Applications`；ZIP 是备用格式。
-2. 应用常驻菜单栏，不显示 Dock 图标。
-3. 正式发布会使用 Developer ID 签名和 Apple 公证；个人构建可以使用 ad-hoc 签名。
+1. 打开 DMG，将 `CodeXPets.app` 拖入 `Applications`；也可以使用 ZIP 包。
+2. 启动后应用常驻菜单栏，不显示 Dock 图标。
+3. 通过菜单栏图标管理显示、声音、登录启动、设置和退出。
+
+## 会话与设置目录
+
+`CODEX_HOME` 的优先级最高。未设置时使用以下默认目录：
+
+| 系统 | Codex Home | sessions | config |
+|---|---|---|---|
+| Windows | `%USERPROFILE%\.codex` | `%USERPROFILE%\.codex\sessions` | `%USERPROFILE%\.codex\config.toml` |
+| macOS | `~/.codex` | `~/.codex/sessions` | `~/.codex/config.toml` |
+
+也可以在设置窗口中选择自定义 `sessions` 目录。
+
+CodeXPets 自身设置保存在：
+
+- Windows：`%LOCALAPPDATA%\CodeXPets\settings.json`
+- macOS：`~/Library/Application Support/CodeXPets/settings.json`
+
+## 轻量运行设计
+
+- 默认每 500 ms 检查会话目录和最近跟踪的 JSONL 文件。
+- 只从已记录的字节偏移继续读取新增内容，不重复加载完整会话。
+- 最多跟踪最近 40 个文件，并周期性执行恢复扫描。
+- 文件正在写入、JSON 行不完整或文件暂时不可用时，会安全延后到下一轮。
+- 浮动宠物只缓存当前状态的动画帧，吸附资源按需加载。
+- 发布流程对 Windows EXE/ZIP 和 macOS APP/ZIP/DMG 执行 10 MiB 体积限制。
 
 ## 从源码构建
 
 ### Windows PowerShell
 
-本地若安装了 Zig 和 Ninja，脚本会优先使用轻量 Zig 工具链；GitHub Actions 使用 MSVC。
+需要 CMake；本机安装 Zig 和 Ninja 时，构建脚本会优先使用轻量 Zig 工具链，也可以使用 MSVC。
 
 ```powershell
 # 构建、测试、资源校验、离屏渲染和真实窗口启动冒烟测试
@@ -94,7 +133,7 @@ CodeXPets 只读取 Codex 会话文件，不会修改、移动或删除这些文
 # 生成 Windows x64 EXE 和 ZIP
 ./package.ps1 -RuntimeIdentifier win-x64
 
-# 生成 Windows ARM64（需要 ARM64 主机或 MSVC 交叉工具链）
+# 生成 Windows ARM64 包
 ./package.ps1 -RuntimeIdentifier win-arm64 -Toolchain msvc
 ```
 
@@ -108,22 +147,22 @@ ctest --test-dir build/native-windows-x64-zig --output-on-failure
 
 ### macOS
 
-需要 Xcode Command Line Tools、CMake、Clang；有 Ninja 时会自动使用 Ninja。
+需要 Xcode Command Line Tools、CMake 和 Clang；安装 Ninja 后会自动使用 Ninja。
 
 ```bash
 bash scripts/build-macos.sh osx-arm64   # Apple Silicon
 bash scripts/build-macos.sh osx-x64     # Intel
 ```
 
-脚本会完成 CMake 构建、CTest、资源校验、冒烟渲染、签名、ZIP/DMG、架构检查和 10 MiB 体积检查。签名变量：
+构建脚本会执行 CMake 构建、CTest、资源校验、渲染冒烟测试、签名、ZIP/DMG 打包、架构检查和体积检查。
 
-- `CODE_SIGN_IDENTITY`：默认 `-`（ad-hoc）
-- `APPLE_NOTARY_PROFILE`：Apple notarytool keychain profile
-- `REQUIRE_NOTARIZATION=1`：强制要求正式签名和公证
+签名相关环境变量：
 
-## 原生命令行工具
+- `CODE_SIGN_IDENTITY`：默认 `-`，使用 ad-hoc 签名。
+- `APPLE_NOTARY_PROFILE`：Apple `notarytool` Keychain Profile。
+- `REQUIRE_NOTARIZATION=1`：要求正式签名和 Apple 公证。
 
-原生可执行文件支持：
+## 命令行工具
 
 ```text
 --version
@@ -131,24 +170,13 @@ bash scripts/build-macos.sh osx-x64     # Intel
 --smoke-test
 --preview <目录>
 --test-sound
+--expression-demo
 ```
 
-这些命令用于 CI 和发布前校验，不会启动常驻桌宠。Windows 另支持 `--startup-smoke-test`；两端都支持 `--expression-demo` 轮换预览五种桌宠状态。
+这些命令用于版本检查、资源验证、五状态渲染、预览图生成、声音测试和状态轮换演示。Windows 还支持 `--startup-smoke-test`，用于在隔离配置中验证真实窗口、通知区域和监控线程启动。
 
-## 体积和内存优化
+## 文档
 
-- 不携带 .NET、JIT、Electron、Qt、SkiaSharp 或大型跨平台 UI 库。
-- Windows 与 macOS 都使用同一份像素云朵资源；发布包只携带运行时所需的云朵资源，不会把未使用的源素材带入发布包。
-- 浮动精灵只缓存当前状态的 8 帧；扒边帧按需读取。
-- Windows 链接器使用 dead-strip/折叠等尺寸优化；macOS 使用 `-dead_strip`。
-- 发布脚本对 EXE、APP、ZIP、DMG 统一执行 10 MiB 硬限制。
-
-Windows x64 原生构建的实测结果（同一台开发机、Release 构建，确认真实桌宠窗口和后台消息窗口均已创建，桌宠可见，空闲/忙碌/完成状态各连续采样）约为：EXE 1.27 MiB，私有内存 4.36–4.60 MiB，工作集 20.26–21.10 MiB，6 个线程。工作集包含系统共享的 GDI+/窗口代码页；不建议为了显示一个更小的数字强行清空工作集而造成页面抖动。macOS 的实际内存应在目标系统的活动监视器中复核。
-
-## 架构文档
-
-详见 [`docs/architecture.md`](docs/architecture.md)。
-
-## 版权与致谢
-
-资源和第三方声明见 [`CREDITS.md`](CREDITS.md)。
+- [架构说明](docs/architecture.md)
+- [版本记录](CHANGELOG.md)
+- [资源与第三方声明](CREDITS.md)
