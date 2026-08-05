@@ -7,9 +7,6 @@
 #include <stdexcept>
 #include <string>
 
-namespace codexpets::macos {
-namespace {
-
 @interface XiaoAiRedirectDelegate : NSObject <NSURLSessionTaskDelegate>
 @property(nonatomic) BOOL followRedirects;
 @end
@@ -25,6 +22,9 @@ namespace {
     completionHandler(self.followRedirects ? request : nil);
 }
 @end
+
+namespace codexpets::macos {
+namespace {
 
 XiaoAiHttpResponse request(const XiaoAiHttpRequest& input) {
     @autoreleasepool {
@@ -76,7 +76,8 @@ XiaoAiHttpResponse request(const XiaoAiHttpRequest& input) {
             const char* text = response_error.localizedDescription.UTF8String;
             throw std::runtime_error(text ? text : "小米网络请求失败");
         }
-        auto* http = static_cast<NSHTTPURLResponse*>(response);
+        NSHTTPURLResponse* http = [response isKindOfClass:NSHTTPURLResponse.class]
+            ? static_cast<NSHTTPURLResponse*>(response) : nil;
         if (!http) throw std::runtime_error("小米响应无效");
 
         XiaoAiHttpResponse result;
@@ -84,10 +85,12 @@ XiaoAiHttpResponse request(const XiaoAiHttpRequest& input) {
         if (response_data.length > 0) {
             result.body.assign(static_cast<const char*>(response_data.bytes), response_data.length);
         }
-        for (id key in http.allHeaderFields) {
+        for (NSString* key in http.allHeaderFields) {
             id value = http.allHeaderFields[key];
-            const char* name = [key.description UTF8String];
-            const char* text = [value.description UTF8String];
+            NSString* keyDescription = [key description];
+            NSString* valueDescription = [value description];
+            const char* name = keyDescription.UTF8String;
+            const char* text = valueDescription.UTF8String;
             if (name && text) result.headers.emplace_back(name, text);
         }
         return result;
