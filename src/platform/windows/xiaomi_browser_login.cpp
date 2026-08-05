@@ -185,6 +185,9 @@ protected:
         AddRef();
         return S_OK;
     }
+protected:
+    virtual ~CallbackRefCount() = default;
+
 private:
     std::atomic<ULONG> references_{1};
 };
@@ -313,6 +316,9 @@ private:
         case WM_SIZE: self->resize(); return 0;
         case WM_TIMER:
             if (wparam == kCookiePollTimer) self->collect_cookies();
+            return 0;
+        case kFinishMessage:
+            self->finalize_finish();
             return 0;
         case WM_CLOSE: self->finish({}, "已取消小米网页登录"); return 0;
         case WM_NCDESTROY:
@@ -473,8 +479,25 @@ private:
 
     void finish(std::string cookies, std::string error) {
         if (finished_) return;
-        const auto keep_alive = shared_from_this();
         finished_ = true;
+        pending_cookies_ = std::move(cookies);
+        pending_error_ = std::move(error);
+
+        // WebView2 may invoke this method from inside a browser callback.  Do not
+        // close/reset the controller or invoke the application callback reentrantly;
+        // EmbeddedBrowserWebView can still be using the callback stack at this point.
+        if (hwnd_) {
+            if (!finish_posted_) {
+                finish_posted_ = true;
+                PostMessageW(hwnd_, kFinishMessage, 0, 0);
+            }
+            return;
+        }
+        finalize_finish();
+    }
+
+    void finalize_finish() {
+        const auto keep_alive = shared_from_this();
         if (hwnd_) KillTimer(hwnd_, kCookiePollTimer);
         if (webview_ && navigation_handler_) {
             webview_->remove_NavigationCompleted(navigation_token_);
@@ -491,12 +514,13 @@ private:
         auto folder = std::move(folder_);
         g_login.reset();
         remove_user_data_folder(std::move(folder));
-        if (done) done(std::move(cookies), std::move(error));
+        if (done) done(std::move(pending_cookies_), std::move(pending_error_));
         (void)keep_alive;
     }
 
     static constexpr UINT_PTR kCookiePollTimer = 1;
     static constexpr UINT kCookiePollIntervalMs = 750;
+static constexpr UINT kFinishMessage = WM_APP + 0x241;
 
     HWND owner_{};
     HWND hwnd_{};
@@ -514,6 +538,9 @@ private:
     bool has_passport_session_{};
     bool has_mina_service_token_{};
     bool finished_{};
+    bool finish_posted_{};
+    std::string pending_cookies_;
+    std::string pending_error_;
 };
 } // namespace
 
