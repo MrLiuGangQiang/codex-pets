@@ -24,12 +24,38 @@ CodeXPets 是一个面向 Codex 的**原生桌面宠物**。它以只读方式�
 
 ## 左右边缘吸附
 
-宠物可以拖到屏幕左侧或右侧边缘，吸附后保留云朵提示，并支持自动隐藏与边缘唤出：
+宠物可以拖到屏幕左侧或右侧边缘，吸附后保留云朵提示，并支持自动隐藏与边缘唤出。以下展示左右吸附下的全部五种状态：
 
 <table>
   <tr>
-    <td align="center"><strong>左侧吸附</strong><br><img src="docs/screenshots/dock-left-idle.png" alt="CodeXPets 左侧吸附状态" width="420"></td>
-    <td align="center"><strong>右侧吸附</strong><br><img src="docs/screenshots/dock-right-idle.png" alt="CodeXPets 右侧吸附状态" width="420"></td>
+    <th>状态</th>
+    <th>左侧吸附</th>
+    <th>右侧吸附</th>
+  </tr>
+  <tr>
+    <td align="center"><strong>空闲</strong></td>
+    <td align="center"><img src="docs/screenshots/dock-left-idle.png" alt="CodeXPets 空闲状态左侧吸附" width="360"></td>
+    <td align="center"><img src="docs/screenshots/dock-right-idle.png" alt="CodeXPets 空闲状态右侧吸附" width="360"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>工作中</strong></td>
+    <td align="center"><img src="docs/screenshots/dock-left-busy.png" alt="CodeXPets 工作中状态左侧吸附" width="360"></td>
+    <td align="center"><img src="docs/screenshots/dock-right-busy.png" alt="CodeXPets 工作中状态右侧吸附" width="360"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>已完成</strong></td>
+    <td align="center"><img src="docs/screenshots/dock-left-completed.png" alt="CodeXPets 已完成状态左侧吸附" width="360"></td>
+    <td align="center"><img src="docs/screenshots/dock-right-completed.png" alt="CodeXPets 已完成状态右侧吸附" width="360"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>异常</strong></td>
+    <td align="center"><img src="docs/screenshots/dock-left-error.png" alt="CodeXPets 异常状态左侧吸附" width="360"></td>
+    <td align="center"><img src="docs/screenshots/dock-right-error.png" alt="CodeXPets 异常状态右侧吸附" width="360"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>已中断</strong></td>
+    <td align="center"><img src="docs/screenshots/dock-left-interrupted.png" alt="CodeXPets 已中断状态左侧吸附" width="360"></td>
+    <td align="center"><img src="docs/screenshots/dock-right-interrupted.png" alt="CodeXPets 已中断状态右侧吸附" width="360"></td>
   </tr>
 </table>
 ## 主要功能
