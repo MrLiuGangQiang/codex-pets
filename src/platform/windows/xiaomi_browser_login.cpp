@@ -3,11 +3,19 @@
 #include "resource_ids.h"
 #include "../../../src/core/platform_text.h"
 
-#include <WebView2.h>
 #include <shlobj.h>
+#include <wrl.h>
+#ifndef interface
+#define CODEXPETS_DEFINED_INTERFACE_MACRO
+#define interface struct
+#endif
+#include <WebView2.h>
+#ifdef CODEXPETS_DEFINED_INTERFACE_MACRO
+#undef interface
+#undef CODEXPETS_DEFINED_INTERFACE_MACRO
+#endif
 
 #include <algorithm>
-#include <wrl.h>
 
 #include <atomic>
 #include <filesystem>

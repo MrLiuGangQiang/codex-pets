@@ -735,7 +735,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
     bool _expressionDemo;
     int _expressionDemoIndex;
     Clock::time_point _expressionDemoNext;
-    std::atomic_bool _terminating{false};
+    std::atomic_bool _terminating;
 }
 - (void)loadOrMigrateSettings;
 - (void)saveSettings;
@@ -833,6 +833,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
         _lastTick = Clock::now();
         _scrollHold = 1.9;
         _lastMouseReception = -1;
+        _terminating.store(false, std::memory_order_relaxed);
         _expressionDemoIndex = -1;
         _expressionDemoNext = Clock::time_point::min();
     }
@@ -1201,7 +1202,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
 
 - (void)enqueueMonitorUpdate:(PendingMacUpdate)update {
     if (_terminating.load(std::memory_order_acquire)) return;
-    _pendingMonitorUpdates.push(std::move(update));
+    (void)_pendingMonitorUpdates.push(std::move(update));
 }
 
 - (void)processMonitorUpdates {

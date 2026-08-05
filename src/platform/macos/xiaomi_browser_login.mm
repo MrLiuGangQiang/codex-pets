@@ -3,20 +3,14 @@
 #import <AppKit/AppKit.h>
 #import <WebKit/WebKit.h>
 
-#include <algorithm>
 #include <functional>
 #include <string>
 #include <utility>
 
 namespace codexpets::macos {
-namespace {
 
-constexpr char kLoginUrl[] =
-    "https://account.xiaomi.com/pass/serviceLogin?sid=micoapi&_locale=zh_CN";
-constexpr char kMinaUrl[] = "https://api2.mina.mi.com/";
-
-std::string cookie_header(NSArray<NSHTTPCookie*>* cookies, bool* has_mina_token,
-                          bool* has_user) {
+std::string xiaoai_cookie_header(NSArray<NSHTTPCookie*>* cookies, bool* has_mina_token,
+                                 bool* has_user) {
     std::string result;
     std::string user_id;
     std::string service_token;
@@ -46,6 +40,14 @@ std::string cookie_header(NSArray<NSHTTPCookie*>* cookies, bool* has_mina_token,
     return result;
 }
 
+} // namespace codexpets::macos
+
+namespace {
+constexpr char kLoginUrl[] =
+    "https://account.xiaomi.com/pass/serviceLogin?sid=micoapi&_locale=zh_CN";
+constexpr char kMinaUrl[] = "https://api2.mina.mi.com/";
+}
+
 @interface XiaomiBrowserLogin : NSObject <WKNavigationDelegate, NSWindowDelegate> {
     NSWindow* _window;
     WKWebView* _webView;
@@ -59,7 +61,7 @@ std::string cookie_header(NSArray<NSHTTPCookie*>* cookies, bool* has_mina_token,
 - (void)show;
 @end
 
-__strong XiaomiBrowserLogin* g_login = nil;
+static __strong XiaomiBrowserLogin* g_login = nil;
 
 @implementation XiaomiBrowserLogin
 
@@ -105,7 +107,8 @@ __strong XiaomiBrowserLogin* g_login = nil;
         if (!strongSelf || strongSelf->_finished) return;
         bool has_mina_token = false;
         bool has_user = false;
-        const auto header = cookie_header(cookies, &has_mina_token, &has_user);
+        const auto header = codexpets::macos::xiaoai_cookie_header(
+            cookies, &has_mina_token, &has_user);
         if (!header.empty()) {
             [strongSelf finish:header error:@""];
         } else if (has_user && !has_mina_token && !strongSelf->_requestedMina) {
@@ -141,7 +144,7 @@ __strong XiaomiBrowserLogin* g_login = nil;
 
 @end
 
-} // namespace
+namespace codexpets::macos {
 
 void start_xiaomi_browser_login(
     NSWindow* owner, std::string user_data_folder,
