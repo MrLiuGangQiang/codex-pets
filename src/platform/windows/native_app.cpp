@@ -3,6 +3,8 @@
 #include "../../../src/core/app_logic.h"
 #include "../../../src/core/platform_text.h"
 #include "../../../src/core/paths.h"
+#include "../../../src/core/presentation.h"
+#include "../../../src/core/render_layout.h"
 #include "resource_ids.h"
 
 #include <windows.h>
@@ -52,37 +54,6 @@ constexpr UINT kSettingsRoot = 4105;
 constexpr UINT kSettingsSound = 4106;
 constexpr UINT kSettingsHeader = 4107;
 constexpr UINT kSettingsHint = 4108;
-
-constexpr double kDockVisibleCenterLogical = 52.0;
-
-int dock_visible_center_px(double scale) noexcept {
-    return static_cast<int>(std::lround(kDockVisibleCenterLogical * scale));
-}
-
-bool segment_intersects_rect(PointD from, PointD to, const RectD& rect) noexcept {
-    double t0 = 0.0;
-    double t1 = 1.0;
-    const double dx = to.x - from.x;
-    const double dy = to.y - from.y;
-    const std::array<double, 4> p{-dx, dx, -dy, dy};
-    const std::array<double, 4> q{from.x - rect.left(), rect.right() - from.x,
-                                  from.y - rect.top(), rect.bottom() - from.y};
-    for (std::size_t i = 0; i < p.size(); ++i) {
-        if (std::abs(p[i]) < 1e-12) {
-            if (q[i] < 0.0) return false;
-            continue;
-        }
-        const double r = q[i] / p[i];
-        if (p[i] < 0.0) {
-            if (r > t1) return false;
-            if (r > t0) t0 = r;
-        } else {
-            if (r < t0) return false;
-            if (r < t1) t1 = r;
-        }
-    }
-    return true;
-}
 
 int read_edit_int(HWND parent, int control, int fallback) {
     wchar_t buffer[64]{};
@@ -315,13 +286,30 @@ bool NativeApp::create_pet_window(std::string* error) {
 }
 
 void NativeApp::start_monitor() {
+    monitor_message_posted_.store(false, std::memory_order_release);
     monitor_worker_ = std::make_unique<MonitorWorker>(settings_.sessions_root,
         [this](std::vector<MonitorEventKind> events, MonitorSnapshot snapshot) {
+            constexpr auto max_pending_events = monitor_pending_event_limit;
+            bool post_message = false;
             {
                 std::lock_guard lock(pending_mutex_);
-                pending_updates_.push_back(PendingUpdate{std::move(events), std::move(snapshot)});
+                if (pending_updates_.empty()) {
+                    PendingUpdate update;
+                    const auto count = std::min(events.size(), max_pending_events);
+                    update.events.insert(update.events.end(), events.begin(), events.begin() + count);
+                    update.snapshot = std::move(snapshot);
+                    pending_updates_.push_back(std::move(update));
+                } else {
+                    auto& update = pending_updates_.back();
+                    const auto available = max_pending_events - std::min(max_pending_events,
+                                                                          update.events.size());
+                    const auto count = std::min(events.size(), available);
+                    update.events.insert(update.events.end(), events.begin(), events.begin() + count);
+                    update.snapshot = std::move(snapshot);
+                }
+                post_message = !monitor_message_posted_.exchange(true, std::memory_order_acq_rel);
             }
-            if (message_window_) PostMessageW(message_window_, kMonitorMessage, 0, 0);
+            if (post_message && message_window_) PostMessageW(message_window_, kMonitorMessage, 0, 0);
         });
     monitor_worker_->start();
 }
@@ -471,14 +459,17 @@ void NativeApp::restore_saved_position() {
 }
 
 void NativeApp::update_window_position() {
-    const auto point = cursor_position();
-    auto screen = dock_edge_ == DockEdge::None
-        ? screen_from_point(point) : dock_screen();
-    const auto dpi = static_cast<double>(screen.dpi) / 96.0;
-    const auto width = static_cast<int>(std::lround(Renderer::LogicalWidth * dpi));
-    const auto height = static_cast<int>(std::lround(Renderer::LogicalHeight * dpi));
     if (dock_edge_ == DockEdge::None) return;
-    const auto visible_center = dock_visible_center_px(dpi);
+    const auto screen = dock_screen();
+    const auto scale = static_cast<double>(screen.dpi) / 96.0;
+    const auto width = static_cast<int>(std::lround(Renderer::LogicalWidth * scale));
+    const auto height = static_cast<int>(std::lround(Renderer::LogicalHeight * scale));
+    const bool bubble_below = dock_coordinate_ < screen.work.top + static_cast<int>(std::lround(
+        render_layout::dock_bubble_switch_margin * scale));
+    const render_layout::State layout{last_visual_state_, dock_edge_, true, bubble_below,
+                                      false, dock_visibility_, animation_tick_};
+    const auto visible_center = static_cast<int>(std::lround(
+        render_layout::dock_pet_center_y(layout) * scale));
     auto y = dock_coordinate_ - visible_center;
     const auto x = dock_edge_ == DockEdge::Left ? screen.work.left : screen.work.right - width;
     y = std::clamp(y, static_cast<int>(screen.work.top),
@@ -583,6 +574,7 @@ void NativeApp::process_monitor_updates() {
     {
         std::lock_guard lock(pending_mutex_);
         updates.swap(pending_updates_);
+        monitor_message_posted_.store(false, std::memory_order_release);
     }
     for (const auto& update : updates) handle_monitor_update(update);
 }
@@ -657,83 +649,24 @@ void NativeApp::refresh_visual(bool force_text) {
         last_visual_state_ = visual_state;
     }
 
-    std::string status;
-    if (visual_state == ReminderState::Error) {
-        status = "异常";
-    } else if (visual_state == ReminderState::Interrupted) {
-        status = "已中断";
-    } else if (visual_state == ReminderState::Completed) {
-        status = "已完成";
-    } else if (visual_state == ReminderState::Busy) {
-        std::string busy_progress;
-        std::optional<std::string_view> aggregate_progress;
-        if (snapshot_.total_plan_step_count > 0) {
-            busy_progress = std::to_string(snapshot_.completed_plan_step_count) + "/" +
-                            std::to_string(snapshot_.total_plan_step_count);
-            aggregate_progress = busy_progress;
-        }
-        status = app_logic::format_busy_header(aggregate_progress,
-            snapshot_.latest_event_active_title_index, snapshot_.active_count);
-    } else {
-        status = "空闲";
-    }
-    std::vector<std::string> titles;
-    std::vector<std::optional<std::string>> progress_labels;
-    if (visual_state == ReminderState::Error) {
-        titles.push_back(app_logic::format_abnormal_task_text(snapshot_.last_aborted_title));
-    } else if (visual_state == ReminderState::Interrupted) {
-        titles.push_back(app_logic::format_interrupted_task_text(snapshot_.last_interrupted_title));
-    } else if (visual_state == ReminderState::Completed && !snapshot_.last_completed_title.empty()) {
-        titles.push_back(snapshot_.last_completed_title);
-    } else {
-        titles = snapshot_.active_titles;
-        progress_labels = snapshot_.active_plan_progress_labels;
-    }
-    if (titles.empty() && visual_state == ReminderState::Busy) titles.push_back("正在处理任务…");
-
+    const auto content = make_visual_content(visual_state, snapshot_);
     const bool select_newest = visual_coordinator_.show_newest_task_on_next_refresh() &&
                                visual_state == ReminderState::Busy;
     const auto preferred = app_logic::select_preferred_task_index(
         select_newest, visual_coordinator_.preferred_task_index());
     selected_task_index_ = app_logic::reconcile_task_selection(
-        visual_state, titles, selected_task_index_, previously_selected_title, select_newest, preferred);
-    displayed_task_titles_ = titles;
+        visual_state, content.task_titles, selected_task_index_, previously_selected_title,
+        select_newest, preferred);
+    displayed_task_titles_ = content.task_titles;
+    displayed_progress_labels_ = content.progress_labels;
+    displayed_thought_text_ = content.thought_text;
     if (select_newest) visual_coordinator_.consume_newest_task_focus();
 
-    const std::string thought = visual_state == ReminderState::Error ? "任务出现异常了。" :
-                                visual_state == ReminderState::Interrupted ? "任务已中断了。" :
-                                visual_state == ReminderState::Completed ? "任务完成啦！" :
-                                visual_state == ReminderState::Busy ?
-                                    (snapshot_.active_titles.empty() ? "正在认真处理你的任务…" : snapshot_.active_titles.front()) :
-                                    "主人，现在没有在进行中的任务!别让我歇着!";
-    RenderState render_state;
-    render_state.state = visual_state;
-    render_state.docked = dock_edge_ != DockEdge::None;
-    render_state.bubble_visible = app_logic::should_show_thought_bubble(
-        render_state.docked, visual_state, now, dock_thought_until_);
-    render_state.dock_edge = dock_edge_;
-    render_state.bubble_below = render_state.docked &&
-        dock_coordinate_ < screen_from_point(cursor_position()).work.top + 150;
-    render_state.mirror = render_state.docked ? false : [&] {
-        RECT rect{}; GetWindowRect(pet_window_, &rect);
-        const auto screen = screen_from_point(POINT{rect.left + (rect.right - rect.left) / 2,
-                                                    rect.top + (rect.bottom - rect.top) / 2});
-        return (rect.left + rect.right) / 2 < (screen.work.left + screen.work.right) / 2;
-    }();
-    render_state.dock_visibility = dock_visibility_;
-    render_state.animation_tick = animation_tick_;
-    render_state.selected_task_index = selected_task_index_;
-    render_state.scroll_offset = scroll_offset_;
-    render_state.status_text = status;
-    render_state.thought_text = thought;
-    render_state.task_titles = std::move(titles);
-    render_state.progress_labels = std::move(progress_labels);
-
-    const auto new_signature = render_state.status_text + "\x1f" + render_state.thought_text +
-        std::to_string(static_cast<int>(render_state.state)) + std::to_string(selected_task_index_);
+    const auto new_signature = content.status_text + "\x1f" + content.thought_text +
+        std::to_string(static_cast<int>(visual_state)) + std::to_string(selected_task_index_);
     if (force_text || new_signature != last_status_signature_) {
         last_status_signature_ = new_signature;
-        last_status_text_ = render_state.status_text;
+        last_status_text_ = content.status_text;
         update_tray_icon();
     }
     render_and_present();
@@ -754,22 +687,19 @@ void NativeApp::render_and_present() {
     state.selected_task_index = selected_task_index_;
     state.scroll_offset = scroll_offset_;
     state.status_text = last_status_text_;
-    state.thought_text = last_visual_state_ == ReminderState::Error ? "任务出现异常了。" :
-                         last_visual_state_ == ReminderState::Interrupted ? "任务已中断了。" :
-                         last_visual_state_ == ReminderState::Completed ? "任务完成啦！" :
-                         last_visual_state_ == ReminderState::Busy ?
-                             (snapshot_.active_titles.empty() ? "正在认真处理你的任务…" : snapshot_.active_titles.front()) :
-                             "主人，现在没有在进行中的任务!别让我歇着!";
-    if (last_visual_state_ == ReminderState::Error) state.task_titles = {app_logic::format_abnormal_task_text(snapshot_.last_aborted_title)};
-    else if (last_visual_state_ == ReminderState::Interrupted) state.task_titles = {app_logic::format_interrupted_task_text(snapshot_.last_interrupted_title)};
-    else if (last_visual_state_ == ReminderState::Completed && !snapshot_.last_completed_title.empty()) state.task_titles = {snapshot_.last_completed_title};
-    else state.task_titles = snapshot_.active_titles;
-    state.progress_labels = snapshot_.active_plan_progress_labels;
-    RECT rect{}; GetWindowRect(pet_window_, &rect);
-    const auto screen = screen_from_point(POINT{rect.left + (rect.right - rect.left) / 2,
-                                                rect.top + (rect.bottom - rect.top) / 2});
-    state.bubble_below = state.docked && dock_coordinate_ < screen.work.top + 150;
-    state.mirror = !state.docked && ((rect.left + rect.right) / 2 < (screen.work.left + screen.work.right) / 2);
+    state.thought_text = displayed_thought_text_;
+    state.task_titles = displayed_task_titles_;
+    state.progress_labels = displayed_progress_labels_;
+    RECT rect{};
+    GetWindowRect(pet_window_, &rect);
+    const auto screen = state.docked
+        ? dock_screen()
+        : screen_from_point(POINT{rect.left + (rect.right - rect.left) / 2,
+                                  rect.top + (rect.bottom - rect.top) / 2});
+    state.bubble_below = state.docked && dock_coordinate_ < screen.work.top +
+        static_cast<int>(std::lround(render_layout::dock_bubble_switch_margin * scale));
+    state.mirror = !state.docked && ((rect.left + rect.right) / 2 <
+                                     (screen.work.left + screen.work.right) / 2);
     std::string error;
     if (!renderer_.render(state, scale, &error)) return;
     SIZE size{renderer_.pixel_width(), renderer_.pixel_height()};
@@ -843,12 +773,7 @@ void NativeApp::on_timer() {
                 changed = true;
             }
         } else session_rotation_seconds_ = 0;
-        const auto text = displayed_task_titles_.empty() ?
-            (last_visual_state_ == ReminderState::Busy ? std::string("正在认真处理你的任务…") :
-             last_visual_state_ == ReminderState::Error ? app_logic::format_abnormal_task_text(snapshot_.last_aborted_title) :
-             last_visual_state_ == ReminderState::Interrupted ? app_logic::format_interrupted_task_text(snapshot_.last_interrupted_title) :
-             last_visual_state_ == ReminderState::Completed ? snapshot_.last_completed_title :
-             std::string("主人，现在没有在进行中的任务!别让我歇着!")) :
+        const auto text = displayed_task_titles_.empty() ? displayed_thought_text_ :
             displayed_task_titles_[static_cast<std::size_t>(std::clamp(selected_task_index_, 0,
                                       static_cast<int>(displayed_task_titles_.size()) - 1))];
         const auto approximate_lines = std::max(1, static_cast<int>(text.size() / 24) +
@@ -931,7 +856,7 @@ bool NativeApp::dock_hover_path_crosses(POINT from, POINT to) const {
     if (bounds) {
         const PointD from_point{static_cast<double>(from.x), static_cast<double>(from.y)};
         const PointD to_point{static_cast<double>(to.x), static_cast<double>(to.y)};
-        if (segment_intersects_rect(from_point, to_point, *bounds)) return true;
+        if (app_logic::segment_intersects_rect(from_point, to_point, *bounds)) return true;
     }
     return dock_hovering(from) || dock_hovering(to);
 }
@@ -1023,14 +948,12 @@ void NativeApp::try_snap_or_clamp(POINT cursor) {
                static_cast<double>(screen.work.right - screen.work.left),
                static_cast<double>(screen.work.bottom - screen.work.top)}, distance);
     if (edge != DockEdge::None) {
-        RECT rect{};
-        GetWindowRect(pet_window_, &rect);
-        const auto visible_center = dock_visible_center_px(dpi);
         dock_edge_ = edge;
         dock_screen_identifier_ = screen.identifier;
-        dock_coordinate_ = rect.top + visible_center;
+        dock_coordinate_ = cursor.y;
         dock_visibility_ = 1.0;
         dock_last_content_change_ = Clock::now();
+        has_last_hover_cursor_ = false;
         update_window_position();
     } else {
         dock_edge_ = DockEdge::None;
@@ -1260,6 +1183,7 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                     {
                         std::lock_guard lock(pending_mutex_);
                         pending_updates_.clear();
+                        monitor_message_posted_.store(false, std::memory_order_release);
                     }
                     snapshot_ = MonitorSnapshot{};
                     has_snapshot_ = false;
@@ -1331,19 +1255,20 @@ LRESULT NativeApp::pet_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
             const auto dpi = GetDpiForWindow(hwnd);
             const auto scale = dpi == 0 ? 1.0 : static_cast<double>(dpi) / 96.0;
             const PointD logical{local.x / scale, local.y / scale};
-            float cloud_x = (Renderer::LogicalWidth - 270.0f) / 2.0f;
-            if (dock_edge_ != DockEdge::None) cloud_x += dock_edge_ == DockEdge::Left ? -48.0f : 48.0f;
-            RECT window_rect{}; GetWindowRect(hwnd, &window_rect);
-            const auto screen = screen_from_point(POINT{
-                window_rect.left + (window_rect.right - window_rect.left) / 2,
-                window_rect.top + (window_rect.bottom - window_rect.top) / 2});
-            const bool bubble_below = dock_edge_ != DockEdge::None &&
-                dock_coordinate_ < screen.work.top + 150;
-            const double cloud_y = bubble_below
-                ? Renderer::LogicalHeight - 110.0 - 45.0 - (dock_edge_ != DockEdge::None ? 2.0 : 0.0)
-                : 45.0 + (dock_edge_ != DockEdge::None ? 6.0 : 0.0);
-            const RectD bubble{cloud_x, cloud_y, 270, 110};
-            const RectD content{cloud_x + 81, cloud_y + 37.4, 156, 45};
+            RECT window_rect{};
+            GetWindowRect(hwnd, &window_rect);
+            const bool docked = dock_edge_ != DockEdge::None;
+            const auto screen = docked
+                ? dock_screen()
+                : screen_from_point(POINT{
+                    window_rect.left + (window_rect.right - window_rect.left) / 2,
+                    window_rect.top + (window_rect.bottom - window_rect.top) / 2});
+            const bool bubble_below = docked && dock_coordinate_ < screen.work.top +
+                static_cast<int>(std::lround(render_layout::dock_bubble_switch_margin * scale));
+            const render_layout::State layout{last_visual_state_, dock_edge_, docked, bubble_below,
+                                              false, dock_visibility_, animation_tick_};
+            const RectD bubble = render_layout::bubble_bounds(layout);
+            const RectD content = render_layout::body_bounds(layout);
             const bool bubble_visible = app_logic::should_show_thought_bubble(
                 dock_edge_ != DockEdge::None, last_visual_state_, Clock::now(), dock_thought_until_);
             if (app_logic::is_task_switch_point(dock_edge_ != DockEdge::None, bubble_visible,

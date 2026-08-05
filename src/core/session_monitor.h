@@ -2,6 +2,7 @@
 
 #include "types.h"
 
+#include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -10,6 +11,8 @@
 #include <vector>
 
 namespace codexpets {
+
+inline constexpr std::size_t monitor_pending_event_limit = 64;
 
 class CodexSessionMonitor {
 public:

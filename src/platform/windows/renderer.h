@@ -1,5 +1,6 @@
 #pragma once
 
+#include "render_layout.h"
 #include "types.h"
 
 #include <windows.h>
@@ -36,8 +37,8 @@ struct RenderState {
 
 class Renderer {
 public:
-    static constexpr int LogicalWidth = 420;
-    static constexpr int LogicalHeight = 260;
+    static constexpr int LogicalWidth = static_cast<int>(render_layout::logical_width);
+    static constexpr int LogicalHeight = static_cast<int>(render_layout::logical_height);
 
     Renderer() = default;
     ~Renderer();

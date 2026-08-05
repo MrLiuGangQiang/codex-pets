@@ -1,14 +1,14 @@
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ServiceManagement/ServiceManagement.h>
-#import <dispatch/dispatch.h>
-#import <mach/mach.h>
 
 #include <unistd.h>
 
 #include "app_logic.h"
 #include "paths.h"
 #include "platform_text.h"
+#include "presentation.h"
+#include "render_layout.h"
 #include "session_monitor.h"
 #include "settings.h"
 #include "visual_state.h"
@@ -51,11 +51,6 @@ NSString* ResourcePath(NSString* directory, NSString* name, NSString* extension)
     return [[NSBundle mainBundle] pathForResource:name ofType:extension inDirectory:directory];
 }
 
-CGFloat SmoothStep(double value) {
-    value = std::clamp(value, 0.0, 1.0);
-    return static_cast<CGFloat>(value * value * (3.0 - 2.0 * value));
-}
-
 std::string StateName(ReminderState state) {
     switch (state) {
         case ReminderState::Busy: return "busy";
@@ -78,6 +73,14 @@ std::string NormalizedText(std::string value) {
         result.push_back(ch);
     }
     return result;
+}
+
+void AppendPendingMonitorEvents(std::vector<MonitorEventKind>& target,
+                                const std::vector<MonitorEventKind>& source) {
+    const auto available = monitor_pending_event_limit -
+        std::min(monitor_pending_event_limit, target.size());
+    const auto count = std::min(source.size(), available);
+    target.insert(target.end(), source.begin(), source.begin() + count);
 }
 
 struct MacRenderState {
@@ -106,8 +109,34 @@ NSColor* HeaderColor(ReminderState state) {
     }
 }
 
-constexpr CGFloat kPetWindowWidth = 420;
-constexpr CGFloat kPetWindowHeight = 260;
+constexpr CGFloat kPetWindowWidth = static_cast<CGFloat>(render_layout::logical_width);
+constexpr CGFloat kPetWindowHeight = static_cast<CGFloat>(render_layout::logical_height);
+
+render_layout::State LayoutStateFor(const MacRenderState& state) noexcept {
+    return {state.state, state.dock_edge, state.docked, state.bubble_below,
+            state.mirror, state.dock_visibility, state.animation_tick};
+}
+
+NSRect NsRect(const RectD& value) {
+    return NSMakeRect(static_cast<CGFloat>(value.x), static_cast<CGFloat>(value.y),
+                      static_cast<CGFloat>(value.width), static_cast<CGFloat>(value.height));
+}
+
+NSRect BubbleBounds(const MacRenderState& state, NSRect) {
+    return NsRect(render_layout::bubble_bounds(LayoutStateFor(state)));
+}
+
+NSRect FloatingDestination(const MacRenderState& state, NSRect) {
+    return NsRect(render_layout::floating_pet_bounds(LayoutStateFor(state)));
+}
+
+NSRect DockPetBounds(const MacRenderState& state, NSRect) {
+    return NsRect(render_layout::dock_pet_bounds(LayoutStateFor(state)));
+}
+
+NSRect VisiblePetBounds(const MacRenderState& state, NSRect) {
+    return NsRect(render_layout::visible_pet_bounds(LayoutStateFor(state)));
+}
 
 NSScreen* PrimaryScreen() {
     if (NSScreen.mainScreen) return NSScreen.mainScreen;
@@ -222,10 +251,15 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 - (void)drawState:(const MacRenderState&)state inRect:(NSRect)rect;
 - (BOOL)savePreview:(const MacRenderState&)state toPath:(NSString*)path error:(NSString* __autoreleasing*)error;
 - (NSImage*)statusImageForState:(ReminderState)state frame:(int)frame;
+- (NSImage*)cloudImage;
 @end
 
 @implementation MacRenderer {
     NSMutableDictionary<NSString*, NSImage*>* _cache;
+    NSArray<NSDictionary*>* _headerAttributes;
+    NSDictionary* _bodyAttributes;
+    NSColor* _dotFillColor;
+    NSColor* _dotOutlineColor;
     int _floatingRow;
     int _dockSide;
 }
@@ -234,6 +268,32 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
     self = [super init];
     if (self) {
         _cache = [NSMutableDictionary dictionary];
+        NSMutableParagraphStyle* headerStyle = [[NSMutableParagraphStyle alloc] init];
+        headerStyle.alignment = NSTextAlignmentCenter;
+        NSFont* headerFont = [NSFont systemFontOfSize:12.5 weight:NSFontWeightBold];
+        _headerAttributes = @[
+            @{NSFontAttributeName: headerFont, NSForegroundColorAttributeName: HeaderColor(ReminderState::Idle),
+              NSParagraphStyleAttributeName: headerStyle},
+            @{NSFontAttributeName: headerFont, NSForegroundColorAttributeName: HeaderColor(ReminderState::Completed),
+              NSParagraphStyleAttributeName: headerStyle},
+            @{NSFontAttributeName: headerFont, NSForegroundColorAttributeName: HeaderColor(ReminderState::Busy),
+              NSParagraphStyleAttributeName: headerStyle},
+            @{NSFontAttributeName: headerFont, NSForegroundColorAttributeName: HeaderColor(ReminderState::Error),
+              NSParagraphStyleAttributeName: headerStyle},
+            @{NSFontAttributeName: headerFont, NSForegroundColorAttributeName: HeaderColor(ReminderState::Idle),
+              NSParagraphStyleAttributeName: headerStyle}
+        ];
+        NSMutableParagraphStyle* bodyStyle = [[NSMutableParagraphStyle alloc] init];
+        bodyStyle.lineBreakMode = NSLineBreakByWordWrapping;
+        bodyStyle.minimumLineHeight = 15;
+        bodyStyle.maximumLineHeight = 15;
+        _bodyAttributes = @{
+            NSFontAttributeName: [NSFont systemFontOfSize:11.5],
+            NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:45/255.0 green:60/255.0 blue:78/255.0 alpha:1],
+            NSParagraphStyleAttributeName: bodyStyle
+        };
+        _dotFillColor = [NSColor colorWithSRGBRed:241/255.0 green:248/255.0 blue:1 alpha:1];
+        _dotOutlineColor = [NSColor colorWithSRGBRed:42/255.0 green:50/255.0 blue:60/255.0 alpha:1];
         _floatingRow = -1;
         _dockSide = -1;
     }
@@ -249,6 +309,10 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
     image = [[NSImage alloc] initWithContentsOfFile:path];
     if (image) _cache[key] = image;
     return image;
+}
+
+- (NSImage*)cloudImage {
+    return [self imageInDirectory:@"cloud" name:@"cloud-bubble-540"];
 }
 
 - (NSImage*)floatingImageForState:(ReminderState)state frame:(int)frame {
@@ -303,6 +367,12 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
             return NO;
         }
     }
+    NSImage* cloud = [self cloudImage];
+    if (!cloud || std::lround(cloud.size.width) != render_layout::cloud_bitmap_width ||
+        std::lround(cloud.size.height) != render_layout::cloud_bitmap_height) {
+        if (error) *error = @"云朵资源缺失或无法缩放";
+        return NO;
+    }
     for (NSString* name in @[@"status-idle", @"status-completed", @"status-error",
                              @"status-busy-0", @"status-busy-1", @"status-busy-2", @"status-busy-3",
                              @"status-busy-4", @"status-busy-5", @"status-busy-6", @"status-busy-7"]) {
@@ -329,57 +399,77 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 }
 
 - (void)drawCloudForState:(const MacRenderState&)state inRect:(NSRect)rect {
-    const CGFloat bubbleWidth = 270;
-    const CGFloat bubbleHeight = 110;
-    CGFloat x = (rect.size.width - bubbleWidth) / 2;
-    if (state.docked) x += state.dock_edge == DockEdge::Left ? -48 : 48;
-    const CGFloat y = state.bubble_below ? rect.size.height - bubbleHeight - 45 : 45;
-    const NSRect cloud = NSMakeRect(x, y, bubbleWidth, bubbleHeight);
-    NSBezierPath* path = [NSBezierPath bezierPathWithRoundedRect:cloud xRadius:18 yRadius:18];
-    [[NSColor colorWithSRGBRed:1 green:1 blue:1 alpha:0.94] setFill];
-    [[NSColor colorWithSRGBRed:39/255.0 green:50/255.0 blue:60/255.0 alpha:0.88] setStroke];
-    path.lineWidth = 1.2;
-    [path fill]; [path stroke];
+    (void)rect;
+    const auto layout = LayoutStateFor(state);
+    const NSRect cloud = NsRect(render_layout::bubble_bounds(layout));
+    NSImage* image = [self cloudImage];
+    if (image) {
+        [NSGraphicsContext saveGraphicsState];
+        CGContextSetInterpolationQuality(NSGraphicsContext.currentContext.CGContext,
+                                         kCGInterpolationHigh);
+        [image drawInRect:cloud fromRect:NSZeroRect operation:NSCompositingOperationSourceOver
+                 fraction:1 respectFlipped:YES hints:nil];
+        [NSGraphicsContext restoreGraphicsState];
+    }
 
-    const CGFloat anchorX = state.docked
-        ? (state.dock_edge == DockEdge::Left ? NSMinX(cloud) + 18 : NSMaxX(cloud) - 18)
-        : NSMidX(cloud);
-    const CGFloat anchorY = state.bubble_below ? NSMinY(cloud) : NSMaxY(cloud);
-    const CGFloat petX = state.docked
-        ? (state.dock_edge == DockEdge::Left ? 18 : rect.size.width - 18)
-        : (state.mirror ? rect.size.width / 2 + 36 : rect.size.width / 2 - 36);
-    const CGFloat petY = state.docked ? (state.bubble_below ? 12 : rect.size.height - 12)
-                                      : rect.size.height - 32;
-    const CGFloat dx = petX - anchorX, dy = petY - anchorY;
-    const CGFloat distance = std::max<CGFloat>(1, std::sqrt(dx * dx + dy * dy));
-    auto drawDot = [&](CGFloat fraction, CGFloat size) {
-        const CGFloat cx = anchorX + dx / distance * std::min(distance * fraction, 46.0);
-        const CGFloat cy = anchorY + dy / distance * std::min(distance * fraction, 46.0);
-        NSBezierPath* dot = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(cx - size / 2, cy - size / 2, size, size)];
-        [[NSColor colorWithSRGBRed:241/255.0 green:248/255.0 blue:1 alpha:1] setFill];
-        [[NSColor colorWithSRGBRed:42/255.0 green:50/255.0 blue:60/255.0 alpha:1] setStroke];
-        [dot fill]; [dot stroke];
+    const auto dotBounds = render_layout::thought_dot_bounds(layout);
+    const NSRect largeDot = NsRect(dotBounds.large);
+    const NSRect smallDot = NsRect(dotBounds.small);
+    auto drawDot = [&](NSRect bounds, CGFloat outerNotch, CGFloat innerNotch) {
+        NSBezierPath* outer = [NSBezierPath bezierPath];
+        [outer moveToPoint:NSMakePoint(NSMinX(bounds) + outerNotch, NSMinY(bounds))];
+        [outer lineToPoint:NSMakePoint(NSMaxX(bounds) - outerNotch, NSMinY(bounds))];
+        [outer lineToPoint:NSMakePoint(NSMaxX(bounds), NSMinY(bounds) + outerNotch)];
+        [outer lineToPoint:NSMakePoint(NSMaxX(bounds), NSMaxY(bounds) - outerNotch)];
+        [outer lineToPoint:NSMakePoint(NSMaxX(bounds) - outerNotch, NSMaxY(bounds))];
+        [outer lineToPoint:NSMakePoint(NSMinX(bounds) + outerNotch, NSMaxY(bounds))];
+        [outer lineToPoint:NSMakePoint(NSMinX(bounds), NSMaxY(bounds) - outerNotch)];
+        [outer lineToPoint:NSMakePoint(NSMinX(bounds), NSMinY(bounds) + outerNotch)];
+        [outer closePath];
+        [_dotOutlineColor setFill];
+        [outer fill];
+        if (NSWidth(bounds) <= 6 || NSHeight(bounds) <= 6) return;
+        const NSRect innerBounds = NSInsetRect(bounds, 3, 3);
+        NSBezierPath* inner = [NSBezierPath bezierPath];
+        [inner moveToPoint:NSMakePoint(NSMinX(innerBounds) + innerNotch, NSMinY(innerBounds))];
+        [inner lineToPoint:NSMakePoint(NSMaxX(innerBounds) - innerNotch, NSMinY(innerBounds))];
+        [inner lineToPoint:NSMakePoint(NSMaxX(innerBounds), NSMinY(innerBounds) + innerNotch)];
+        [inner lineToPoint:NSMakePoint(NSMaxX(innerBounds), NSMaxY(innerBounds) - innerNotch)];
+        [inner lineToPoint:NSMakePoint(NSMaxX(innerBounds) - innerNotch, NSMaxY(innerBounds))];
+        [inner lineToPoint:NSMakePoint(NSMinX(innerBounds) + innerNotch, NSMaxY(innerBounds))];
+        [inner lineToPoint:NSMakePoint(NSMinX(innerBounds), NSMaxY(innerBounds) - innerNotch)];
+        [inner lineToPoint:NSMakePoint(NSMinX(innerBounds), NSMinY(innerBounds) + innerNotch)];
+        [inner closePath];
+        [_dotFillColor setFill];
+        [inner fill];
     };
-    drawDot(0.33, 17); drawDot(0.66, 10);
+    drawDot(largeDot, 3, 1);
+    drawDot(smallDot, 3, 1);
 
-    const CGFloat ox = NSMinX(cloud) + bubbleWidth * 0.10;
-    const CGFloat oy = NSMinY(cloud) + bubbleHeight * 0.32;
+    const auto bulbOrigin = render_layout::bulb_origin(layout);
+    const CGFloat ox = static_cast<CGFloat>(bulbOrigin.x);
+    const CGFloat oy = static_cast<CGFloat>(bulbOrigin.y);
     NSColor* glow = state.state == ReminderState::Error
         ? [NSColor colorWithSRGBRed:226/255.0 green:62/255.0 blue:55/255.0 alpha:1]
         : [NSColor colorWithSRGBRed:83/255.0 green:169/255.0 blue:236/255.0 alpha:1];
-    auto cell = [&](NSColor* color, int cx, int cy, int width, int height) {
-        [color setFill];
-        NSRectFill(NSMakeRect(ox + cx * 2.5, oy + cy * 2.5, width * 2.5, height * 2.5));
-    };
+    NSColor* highlight = state.state == ReminderState::Error
+        ? [NSColor colorWithSRGBRed:1 green:174/255.0 blue:154/255.0 alpha:1]
+        : [NSColor colorWithSRGBRed:202/255.0 green:232/255.0 blue:1 alpha:1];
     NSColor* outline = [NSColor colorWithSRGBRed:68/255.0 green:43/255.0 blue:25/255.0 alpha:1];
+    NSColor* base = [NSColor colorWithSRGBRed:91/255.0 green:78/255.0 blue:70/255.0 alpha:1];
+    auto cell = [&](NSColor* color, int x, int y, int width, int height) {
+        [color setFill];
+        NSRectFill(NSMakeRect(ox + x * 2.5, oy + y * 2.5, width * 2.5, height * 2.5));
+    };
     cell(outline, 6, 0, 1, 2); cell(outline, 2, 2, 1, 1); cell(outline, 10, 2, 1, 1);
     cell(outline, 0, 6, 2, 1); cell(outline, 11, 6, 2, 1);
     const int silhouette[][3] = {{3,4,5},{4,3,7},{5,2,9},{6,2,9},{7,2,9},{8,3,7},
                                   {9,4,5},{10,5,3},{11,4,5},{12,4,5},{13,5,3}};
     for (const auto& row : silhouette) cell(outline, row[1], row[0], row[2], 1);
     cell(glow, 4, 4, 5, 1); cell(glow, 3, 5, 7, 3); cell(glow, 4, 8, 5, 1);
-    cell(glow, 5, 9, 3, 1); cell(outline, 5, 7, 1, 2); cell(outline, 7, 7, 1, 2);
-    cell([NSColor colorWithSRGBRed:91/255.0 green:78/255.0 blue:70/255.0 alpha:1], 5, 11, 3, 2);
+    cell(glow, 5, 9, 3, 1); cell(highlight, 4, 4, 2, 1); cell(highlight, 3, 5, 2, 2);
+    cell(outline, 5, 7, 1, 2); cell(outline, 7, 7, 1, 2); cell(outline, 6, 9, 1, 1);
+    cell(base, 5, 11, 3, 2); cell(outline, 5, 13, 3, 1);
 
     std::optional<std::string_view> progress;
     const int progressIndex = std::clamp(state.selected_task_index, 0,
@@ -396,52 +486,43 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
         : state.status_text;
     const std::string body = NormalizedText(!state.task_titles.empty()
         ? state.task_titles[static_cast<std::size_t>(titleIndex)] : state.thought_text);
-    NSMutableParagraphStyle* centered = [[NSMutableParagraphStyle alloc] init];
-    centered.alignment = NSTextAlignmentCenter;
-    NSDictionary* headerAttributes = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:13 weight:NSFontWeightBold],
-        NSForegroundColorAttributeName: HeaderColor(state.state),
-        NSParagraphStyleAttributeName: centered
-    };
-    [Ns(header) drawInRect:NSMakeRect(NSMinX(cloud) + bubbleWidth * .26,
-                                      NSMinY(cloud) + bubbleHeight * .09,
-                                      bubbleWidth * .52, bubbleHeight * .22)
+    const int headerIndex = state.state == ReminderState::Completed ? 1
+        : state.state == ReminderState::Busy ? 2
+        : state.state == ReminderState::Error ? 3
+        : state.state == ReminderState::Interrupted ? 4 : 0;
+    const NSRect headerRect = NsRect(render_layout::header_bounds(layout));
+    const NSDictionary* headerAttributes = _headerAttributes[static_cast<std::size_t>(headerIndex)];
+    const NSSize headerSize = [Ns(header) sizeWithAttributes:headerAttributes];
+    const CGFloat headerY = NSMinY(headerRect) + std::max<CGFloat>(0, (NSHeight(headerRect) - headerSize.height) / 2);
+    [Ns(header) drawInRect:NSMakeRect(NSMinX(headerRect), headerY, NSWidth(headerRect), headerSize.height)
              withAttributes:headerAttributes];
-    NSMutableParagraphStyle* bodyStyle = [[NSMutableParagraphStyle alloc] init];
-    bodyStyle.lineBreakMode = NSLineBreakByWordWrapping;
-    bodyStyle.minimumLineHeight = 15; bodyStyle.maximumLineHeight = 15;
-    NSDictionary* bodyAttributes = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:11.5],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:45/255.0 green:60/255.0 blue:78/255.0 alpha:1],
-        NSParagraphStyleAttributeName: bodyStyle
-    };
-    const NSRect viewport = NSMakeRect(NSMinX(cloud) + bubbleWidth * .30,
-                                       NSMinY(cloud) + bubbleHeight * .34, 156, 45);
+    const NSRect viewport = NsRect(render_layout::body_bounds(layout));
     [NSGraphicsContext saveGraphicsState];
     [[NSBezierPath bezierPathWithRect:viewport] addClip];
     [Ns(body) drawInRect:NSMakeRect(NSMinX(viewport), NSMinY(viewport) - state.scroll_offset,
                                     NSWidth(viewport), 1000)
-             withAttributes:bodyAttributes];
+             withAttributes:_bodyAttributes];
     [NSGraphicsContext restoreGraphicsState];
 }
-
 - (void)drawPetForState:(const MacRenderState&)state inRect:(NSRect)rect {
     if (state.docked) {
         const int frame = app_logic::select_dock_sprite_index(state.dock_edge, state.state, state.animation_tick);
         NSImage* image = [self dockImage:frame];
         if (!image) return;
-        const CGFloat hidden = 104 * (1 - SmoothStep(state.dock_visibility));
-        const CGFloat x = state.dock_edge == DockEdge::Left ? -hidden : rect.size.width - 104 + hidden;
-        const CGFloat y = state.bubble_below ? 4 : rect.size.height - 104 - 7;
-        [image drawInRect:NSMakeRect(x, y, 104, 104)
-                 fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1
+        const NSRect destination = DockPetBounds(state, rect);
+        [NSGraphicsContext saveGraphicsState];
+        CGContextSetInterpolationQuality(NSGraphicsContext.currentContext.CGContext,
+                                         kCGInterpolationHigh);
+        [image drawInRect:destination fromRect:NSZeroRect
+                 operation:NSCompositingOperationSourceOver fraction:1
            respectFlipped:YES hints:nil];
+        [NSGraphicsContext restoreGraphicsState];
         return;
     }
     const int frame = app_logic::select_floating_frame(state.state, state.animation_tick);
     NSImage* image = [self floatingImageForState:state.state frame:frame];
     if (!image) return;
-    const NSRect destination = NSMakeRect((rect.size.width - 130) / 2, rect.size.height - 143, 130, 140);
+    const NSRect destination = FloatingDestination(state, rect);
     if (state.mirror) {
         [NSGraphicsContext saveGraphicsState];
         NSAffineTransform* transform = [NSAffineTransform transform];
@@ -463,8 +544,8 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 }
 
 - (BOOL)savePreview:(const MacRenderState&)state toPath:(NSString*)path error:(NSString* __autoreleasing*)error {
-    constexpr size_t width = 420;
-    constexpr size_t height = 260;
+    constexpr size_t width = static_cast<size_t>(render_layout::logical_width);
+    constexpr size_t height = static_cast<size_t>(render_layout::logical_height);
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
     if (!colorSpace) {
         if (error) *error = @"无法创建预览色彩空间";
@@ -505,6 +586,14 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 
 @end
 
+@interface PetPanel : NSPanel
+@end
+
+@implementation PetPanel
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
 @class AppDelegate;
 
 @interface PetView : NSView
@@ -520,7 +609,7 @@ struct PendingMacUpdate {
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate> {
 @private
     NSStatusItem* _statusItem;
-    NSPanel* _petWindow;
+    PetPanel* _petWindow;
     PetView* _petView;
     NSTimer* _timer;
     MacRenderer* _renderer;
@@ -559,9 +648,16 @@ struct PendingMacUpdate {
     NSPoint _dragStartCursor;
     NSPoint _dragStartOrigin;
     NSPoint _lastCursor;
+    NSPoint _lastHoverCursor;
+    bool _hasLastHoverCursor;
     NSInteger _lastMouseReception;
+    std::mutex _pendingMonitorMutex;
+    std::deque<PendingMacUpdate> _pendingMonitorUpdates;
     std::uint64_t _monitorGeneration;
     bool _hasSnapshot;
+    bool _expressionDemo;
+    int _expressionDemoIndex{-1};
+    Clock::time_point _expressionDemoNext{Clock::time_point::min()};
     bool _terminating;
 }
 - (void)loadOrMigrateSettings;
@@ -586,6 +682,7 @@ struct PendingMacUpdate {
 - (void)trySnapOrClamp:(NSPoint)cursor;
 - (void)updateMousePassThrough;
 - (BOOL)dockHovering:(NSPoint)cursor;
+- (BOOL)dockHoverPathCrossesFrom:(NSPoint)from to:(NSPoint)to;
 - (void)revealDock;
 - (void)drawPetView:(NSRect)rect;
 - (BOOL)isInteractivePoint:(NSPoint)point;
@@ -598,8 +695,12 @@ struct PendingMacUpdate {
 - (void)restoreSettingsDefaults:(id)sender;
 - (void)cancelSettings:(id)sender;
 - (void)applySettings:(id)sender;
+- (void)setExpressionDemoEnabled:(BOOL)enabled;
 - (void)startMonitor;
+- (void)enqueueMonitorUpdate:(PendingMacUpdate)update;
+- (void)processMonitorUpdates;
 - (void)applyMonitorUpdate:(const PendingMacUpdate&)update;
+- (void)showExpressionDemoState:(int)index now:(Clock::time_point)now;
 - (void)refreshVisual:(BOOL)force;
 - (void)updateRenderGeometry;
 - (void)onTimer:(NSTimer*)timer;
@@ -607,10 +708,13 @@ struct PendingMacUpdate {
 
 @implementation PetView
 - (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent*)event { (void)event; return YES; }
 - (void)drawRect:(NSRect)dirtyRect {
-    [super drawRect:dirtyRect];
-    [self.owner drawPetView:self.bounds];
+    @autoreleasepool {
+        [super drawRect:dirtyRect];
+        [self.owner drawPetView:self.bounds];
+    }
 }
 - (NSView*)hitTest:(NSPoint)point { return [self.owner isInteractivePoint:point] ? self : nil; }
 - (void)mouseDown:(NSEvent*)event { [self.owner petMouseDown:event]; }
@@ -657,16 +761,22 @@ struct PendingMacUpdate {
     [self createStatusItem];
     [self placeDefault];
     [self restorePosition];
-    [self startMonitor];
-    if (_settings.pet_visible) [_petWindow orderFrontRegardless];
+    if (!_expressionDemo) [self startMonitor];
+    if (_expressionDemo || _settings.pet_visible) [_petWindow orderFrontRegardless];
     _timer = [NSTimer scheduledTimerWithTimeInterval:0.05 target:self
                                             selector:@selector(onTimer:) userInfo:nil repeats:YES];
-    [self refreshVisual:YES];
+    if (_expressionDemo) [self showExpressionDemoState:0 now:Clock::now()];
+    else [self refreshVisual:YES];
+    [self updateMousePassThrough];
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender {
     (void)sender;
-    _terminating = true;
+    {
+        std::lock_guard lock(_pendingMonitorMutex);
+        _terminating = true;
+        _pendingMonitorUpdates.clear();
+    }
     [_timer invalidate];
     if (_monitorWorker) _monitorWorker->stop();
     [self savePosition];
@@ -703,7 +813,7 @@ struct PendingMacUpdate {
 }
 
 - (void)createPetWindow {
-    _petWindow = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 420, 260)
+    _petWindow = [[PetPanel alloc] initWithContentRect:NSMakeRect(0, 0, kPetWindowWidth, kPetWindowHeight)
                                             styleMask:NSWindowStyleMaskBorderless
                                               backing:NSBackingStoreBuffered defer:NO];
     _petWindow.opaque = NO;
@@ -715,8 +825,9 @@ struct PendingMacUpdate {
                                     NSWindowCollectionBehaviorFullScreenAuxiliary |
                                     NSWindowCollectionBehaviorStationary;
     _petWindow.releasedWhenClosed = NO;
+    _petWindow.acceptsMouseMovedEvents = YES;
     _petWindow.ignoresMouseEvents = YES;
-    _petView = [[PetView alloc] initWithFrame:NSMakeRect(0, 0, 420, 260)];
+    _petView = [[PetView alloc] initWithFrame:NSMakeRect(0, 0, kPetWindowWidth, kPetWindowHeight)];
     _petView.owner = self;
     _petWindow.contentView = _petView;
 }
@@ -822,19 +933,48 @@ struct PendingMacUpdate {
     [_currentSound play];
 }
 
+- (void)setExpressionDemoEnabled:(BOOL)enabled { _expressionDemo = enabled; }
+
 - (void)startMonitor {
     __weak AppDelegate* weakSelf = self;
     const auto generation = ++_monitorGeneration;
     _monitorWorker = std::make_unique<MonitorWorker>(_settings.sessions_root,
         [weakSelf, generation](std::vector<MonitorEventKind> events, MonitorSnapshot snapshot) {
-            auto update = std::make_shared<PendingMacUpdate>(
-                PendingMacUpdate{generation, std::move(events), std::move(snapshot)});
-            dispatch_async(dispatch_get_main_queue(), ^{
+            @autoreleasepool {
                 AppDelegate* strongSelf = weakSelf;
-                if (strongSelf) [strongSelf applyMonitorUpdate:*update];
-            });
+                if (!strongSelf) return;
+                [strongSelf enqueueMonitorUpdate:PendingMacUpdate{
+                    generation, std::move(events), std::move(snapshot)}];
+            }
         });
     _monitorWorker->start();
+}
+
+- (void)enqueueMonitorUpdate:(PendingMacUpdate)update {
+    std::lock_guard lock(_pendingMonitorMutex);
+    if (_terminating) return;
+    if (_pendingMonitorUpdates.empty() ||
+        update.generation > _pendingMonitorUpdates.back().generation) {
+        _pendingMonitorUpdates.clear();
+        if (update.events.size() > monitor_pending_event_limit) {
+            update.events.resize(monitor_pending_event_limit);
+        }
+        _pendingMonitorUpdates.push_back(std::move(update));
+        return;
+    }
+    if (update.generation < _pendingMonitorUpdates.back().generation) return;
+    auto& pending = _pendingMonitorUpdates.back();
+    AppendPendingMonitorEvents(pending.events, update.events);
+    pending.snapshot = std::move(update.snapshot);
+}
+
+- (void)processMonitorUpdates {
+    std::deque<PendingMacUpdate> updates;
+    {
+        std::lock_guard lock(_pendingMonitorMutex);
+        updates.swap(_pendingMonitorUpdates);
+    }
+    for (const auto& update : updates) [self applyMonitorUpdate:update];
 }
 
 - (void)applyMonitorUpdate:(const PendingMacUpdate&)update {
@@ -865,11 +1005,60 @@ struct PendingMacUpdate {
                                                        _settings.dock_notification_seconds)));
             if (_settings.pet_visible) [_petWindow orderFrontRegardless];
             [self playSoundNamed:@"voice-error"];
+        } else if (event == MonitorEventKind::TaskInterrupted) {
+            _visualCoordinator.record_interrupted(now, std::chrono::seconds(
+                app_logic::cloud_notification_seconds(ReminderState::Interrupted,
+                                                       _settings.dock_notification_seconds)));
+            if (_settings.pet_visible) [_petWindow orderFrontRegardless];
         } else if (event == MonitorEventKind::PlanUpdated) {
             _visualCoordinator.record_started(preferredTaskIndex);
         }
     }
     if (first || !update.events.empty()) [self refreshVisual:YES];
+}
+
+- (void)showExpressionDemoState:(int)index now:(Clock::time_point)now {
+    static constexpr std::array<ReminderState, 5> states{{
+        ReminderState::Idle, ReminderState::Busy, ReminderState::Completed,
+        ReminderState::Error, ReminderState::Interrupted
+    }};
+    _expressionDemoIndex = std::clamp(index, 0, static_cast<int>(states.size()) - 1);
+    _expressionDemoNext = now + std::chrono::seconds(4);
+    _visualCoordinator = VisualStateCoordinator{};
+    _snapshot = MonitorSnapshot{};
+    _snapshot.active_titles.clear();
+    _snapshot.active_plan_progress_labels.clear();
+    _snapshot.active_count = 0;
+    const auto state = states[static_cast<std::size_t>(_expressionDemoIndex)];
+    switch (state) {
+        case ReminderState::Busy:
+            _snapshot.active_count = 1;
+            _snapshot.active_titles = {"表情测试：正在认真工作"};
+            _snapshot.active_plan_progress_labels = {std::optional<std::string>("2/5")};
+            _snapshot.total_plan_step_count = 5;
+            _snapshot.completed_plan_step_count = 2;
+            _visualCoordinator.record_started();
+            break;
+        case ReminderState::Completed:
+            _snapshot.last_completed_title = "表情测试：任务顺利完成";
+            _visualCoordinator.record_completed(now, std::chrono::hours(1));
+            break;
+        case ReminderState::Error:
+            _snapshot.last_aborted_title = "表情测试：任务失败";
+            _visualCoordinator.record_aborted(now, std::chrono::hours(1));
+            break;
+        case ReminderState::Interrupted:
+            _snapshot.last_interrupted_title = "表情测试：任务被中断";
+            _visualCoordinator.record_interrupted(now, std::chrono::hours(1));
+            break;
+        case ReminderState::Idle:
+        default:
+            break;
+    }
+    _dockLastChange = now;
+    _dockRevealUntil = now + std::chrono::hours(1);
+    _dockVisibility = 1.0;
+    [self refreshVisual:YES];
 }
 
 - (void)refreshVisual:(BOOL)force {
@@ -887,55 +1076,29 @@ struct PendingMacUpdate {
         selectedTitle = _renderState.task_titles[static_cast<std::size_t>(_selectedTaskIndex)];
     }
     if (_renderState.state != state) {
-        _animationTick = 0; _animationAccumulator = 0;
-        _scrollOffset = 0; _scrollHold = 1.9; _scrollAtEnd = false; _rotationSeconds = 0;
+        _animationTick = 0;
+        _animationAccumulator = 0;
+        _scrollOffset = 0;
+        _scrollHold = 1.9;
+        _scrollAtEnd = false;
+        _rotationSeconds = 0;
     }
-    _renderState.state = state;
-    _renderState.docked = _dockEdge != DockEdge::None;
-    _renderState.dock_edge = _dockEdge;
-    _renderState.dock_visibility = _dockVisibility;
-    _renderState.animation_tick = _animationTick;
-    _renderState.selected_task_index = _selectedTaskIndex;
-    _renderState.scroll_offset = _scrollOffset;
-    if (state == ReminderState::Error) {
-        _renderState.status_text = "异常";
-    } else if (state == ReminderState::Completed) {
-        _renderState.status_text = "已完成";
-    } else if (state == ReminderState::Busy) {
-        std::string busyProgress;
-        std::optional<std::string_view> progress;
-        if (_snapshot.total_plan_step_count > 0) {
-            busyProgress = std::to_string(_snapshot.completed_plan_step_count) + "/" +
-                           std::to_string(_snapshot.total_plan_step_count);
-            progress = busyProgress;
-        }
-        _renderState.status_text = app_logic::format_busy_header(
-            progress, _snapshot.latest_event_active_title_index, _snapshot.active_count);
-    } else {
-        _renderState.status_text = "空闲";
-    }
-    _renderState.thought_text = state == ReminderState::Error ? "任务出现异常了。" :
-        state == ReminderState::Completed ? "任务完成啦！" :
-        state == ReminderState::Busy ? (_snapshot.active_titles.empty() ? "正在认真处理你的任务…"
-                                                                        : _snapshot.active_titles.front()) :
-        "主人，现在没有在进行中的任务!别让我歇着!";
-    if (state == ReminderState::Error) {
-        _renderState.task_titles = {app_logic::format_abnormal_task_text(_snapshot.last_aborted_title)};
-        _renderState.progress_labels.clear();
-    } else if (state == ReminderState::Completed && !_snapshot.last_completed_title.empty()) {
-        _renderState.task_titles = {_snapshot.last_completed_title};
-        _renderState.progress_labels.clear();
-    } else {
-        _renderState.task_titles = _snapshot.active_titles;
-        _renderState.progress_labels = _snapshot.active_plan_progress_labels;
-    }
-    const bool selectNewest = _visualCoordinator.show_newest_task_on_next_refresh() && state == ReminderState::Busy;
+
+    const auto content = make_visual_content(state, _snapshot);
+    const bool selectNewest = _visualCoordinator.show_newest_task_on_next_refresh() &&
+                              state == ReminderState::Busy;
     const int preferred = app_logic::select_preferred_task_index(
         selectNewest, _visualCoordinator.preferred_task_index());
     _selectedTaskIndex = app_logic::reconcile_task_selection(
-        state, _renderState.task_titles, _selectedTaskIndex, selectedTitle, selectNewest, preferred);
+        state, content.task_titles, _selectedTaskIndex, selectedTitle, selectNewest, preferred);
+    _renderState.state = state;
+    _renderState.status_text = content.status_text;
+    _renderState.thought_text = content.thought_text;
+    _renderState.task_titles = content.task_titles;
+    _renderState.progress_labels = content.progress_labels;
     _renderState.selected_task_index = _selectedTaskIndex;
     if (selectNewest) _visualCoordinator.consume_newest_task_focus();
+
     [self updateRenderGeometry];
     [_petView setNeedsDisplay:YES];
     _statusItem.button.image = [_renderer statusImageForState:state frame:_animationTick / 2];
@@ -944,8 +1107,11 @@ struct PendingMacUpdate {
 }
 
 - (void)updateRenderGeometry {
-    NSScreen* screen = _petWindow.screen ? _petWindow.screen : NSScreen.mainScreen;
-    NSRect work = screen.visibleFrame;
+    NSScreen* screen = _dockEdge != DockEdge::None
+        ? ScreenForIdentifier(_dockScreenIdentifier)
+        : (_petWindow.screen ? _petWindow.screen : PrimaryScreen());
+    if (!screen || !_petWindow) return;
+    const NSRect work = screen.visibleFrame;
     _renderState.docked = _dockEdge != DockEdge::None;
     _renderState.bubble_visible = app_logic::should_show_thought_bubble(
         _renderState.docked, _renderState.state, Clock::now(), _dockThoughtUntil);
@@ -954,7 +1120,8 @@ struct PendingMacUpdate {
     _renderState.animation_tick = _animationTick;
     _renderState.selected_task_index = _selectedTaskIndex;
     _renderState.scroll_offset = _scrollOffset;
-    _renderState.bubble_below = _renderState.docked && _dockCoordinate > NSMaxY(work) - 150;
+    _renderState.bubble_below = _renderState.docked && _dockCoordinate >
+        NSMaxY(work) - render_layout::dock_bubble_switch_margin;
     _renderState.mirror = !_renderState.docked && NSMidX(_petWindow.frame) < NSMidX(work);
 }
 
@@ -962,24 +1129,19 @@ struct PendingMacUpdate {
 
 - (BOOL)isInteractivePoint:(NSPoint)point {
     if (_dragPending || _dragging) return YES;
-    if (_renderState.docked) {
-        const CGFloat hidden = 104 * (1 - SmoothStep(_dockVisibility));
-        NSRect pet = _dockEdge == DockEdge::Left
-            ? NSMakeRect(-hidden, _renderState.bubble_below ? 4 : 149, 104, 104)
-            : NSMakeRect(420 - 104 + hidden, _renderState.bubble_below ? 4 : 149, 104, 104);
-        if (NSPointInRect(point, pet)) return YES;
-    } else if (NSPointInRect(point, NSMakeRect(145, 117, 130, 140))) return YES;
-    if (_renderState.bubble_visible) {
-        CGFloat x = 75 + (_renderState.docked ? (_dockEdge == DockEdge::Left ? -48 : 48) : 0);
-        const CGFloat y = _renderState.bubble_below ? 105 : 45;
-        if (NSPointInRect(point, NSMakeRect(x, y, 270, 110))) return YES;
-    }
-    return NO;
+    const NSRect rect = _petView ? _petView.bounds : NSMakeRect(0, 0, kPetWindowWidth, kPetWindowHeight);
+    if (NSPointInRect(point, VisiblePetBounds(_renderState, rect))) return YES;
+    return _renderState.bubble_visible && NSPointInRect(point, BubbleBounds(_renderState, rect));
 }
 
 - (void)onTimer:(NSTimer*)timer {
+    @autoreleasepool {
     (void)timer;
+    if (!_expressionDemo) [self processMonitorUpdates];
     const auto now = Clock::now();
+    if (_expressionDemo && now >= _expressionDemoNext) {
+        [self showExpressionDemoState:(_expressionDemoIndex + 1) % 5 now:now];
+    }
     double elapsed = std::chrono::duration<double>(now - _lastTick).count();
     _lastTick = now;
     elapsed = std::clamp(elapsed, 0.001, 0.25);
@@ -990,36 +1152,59 @@ struct PendingMacUpdate {
         _animationTick = (_animationTick + 1) % 6400;
         changed = true;
     }
+
+    bool dockChanged = false;
     if (_dockEdge != DockEdge::None) {
-        const BOOL hovering = [self dockHovering:NSEvent.mouseLocation];
-        if (hovering) {
+        const NSPoint cursor = NSEvent.mouseLocation;
+        const BOOL hoveringNow = [self dockHovering:cursor];
+        const BOOL hoveringPath = !hoveringNow && _hasLastHoverCursor &&
+            [self dockHoverPathCrossesFrom:_lastHoverCursor to:cursor];
+        if (hoveringNow || hoveringPath) {
             _dockRevealUntil = now + std::chrono::seconds(_settings.dock_reveal_seconds);
         }
+        _hasLastHoverCursor = true;
+        _lastHoverCursor = cursor;
         const BOOL show = app_logic::should_show_dock(_dockLastChange, now,
-            _dragPending || _dragging, hovering, _dockRevealUntil, _settings.dock_idle_hide_seconds);
-        const double target = show ? 1 : 0;
-        if (std::abs(target - _dockVisibility) > .001) {
-            _dockVisibility += (target > _dockVisibility ? 1 : -1) * elapsed / (target > _dockVisibility ? .30 : .55);
+            _dragPending || _dragging, hoveringNow || hoveringPath,
+            _dockRevealUntil, _settings.dock_idle_hide_seconds);
+        const double target = show ? 1.0 : 0.0;
+        if (std::abs(target - _dockVisibility) < .001) {
+            dockChanged = _dockVisibility != target;
+            _dockVisibility = target;
+        } else {
+            _dockVisibility += (target > _dockVisibility ? 1 : -1) * elapsed /
+                (target > _dockVisibility ? .30 : .55);
             _dockVisibility = std::clamp(_dockVisibility, 0.0, 1.0);
-            changed = true;
+            dockChanged = true;
         }
+    } else {
+        _hasLastHoverCursor = false;
     }
+
     _renderState.bubble_visible = app_logic::should_show_thought_bubble(
         _dockEdge != DockEdge::None, _renderState.state, now, _dockThoughtUntil);
     const BOOL bubble = _renderState.bubble_visible;
-    if (bubble && _renderState.task_titles.size() > 1) {
-        _rotationSeconds += elapsed;
-        if (_rotationSeconds >= 6) {
-            _rotationSeconds -= 6;
-            _selectedTaskIndex = (_selectedTaskIndex + 1) % static_cast<int>(_renderState.task_titles.size());
-            _scrollOffset = 0; _scrollHold = 1.9; _scrollAtEnd = false; changed = true;
-        }
-    }
     if (bubble) {
+        if (_renderState.task_titles.size() > 1) {
+            _rotationSeconds += elapsed;
+            if (_rotationSeconds >= 6.0) {
+                const auto steps = std::max(1, static_cast<int>(_rotationSeconds / 6.0));
+                _rotationSeconds -= steps * 6.0;
+                _selectedTaskIndex = (_selectedTaskIndex + steps) %
+                    static_cast<int>(_renderState.task_titles.size());
+                _scrollOffset = 0;
+                _scrollHold = 1.9;
+                _scrollAtEnd = false;
+                changed = true;
+            }
+        } else {
+            _rotationSeconds = 0;
+        }
         const std::string text = _renderState.task_titles.empty() ? _renderState.thought_text
             : _renderState.task_titles[std::clamp(_selectedTaskIndex, 0,
                                                    static_cast<int>(_renderState.task_titles.size()) - 1)];
-        const int lines = std::max(1, static_cast<int>(text.size() / 24));
+        const int lines = std::max(1, static_cast<int>(text.size() / 24) +
+            static_cast<int>(std::count(text.begin(), text.end(), '\n')));
         const double maxScroll = std::max(0.0, (lines - 3) * 15.0);
         if (maxScroll > 0) {
             if (_scrollHold > 0) _scrollHold = std::max(0.0, _scrollHold - elapsed);
@@ -1027,7 +1212,15 @@ struct PendingMacUpdate {
                 _scrollOffset = std::min(maxScroll, _scrollOffset + 15 * elapsed);
                 if (_scrollOffset >= maxScroll) { _scrollAtEnd = true; _scrollHold = 1.7; }
                 changed = true;
-            } else { _scrollOffset = 0; _scrollHold = 1.9; _scrollAtEnd = false; changed = true; }
+            } else {
+                _scrollOffset = 0;
+                _scrollHold = 1.9;
+                _scrollAtEnd = false;
+                changed = true;
+            }
+        } else if (_scrollOffset != 0) {
+            _scrollOffset = 0;
+            changed = true;
         }
     } else {
         _rotationSeconds = 0;
@@ -1037,10 +1230,11 @@ struct PendingMacUpdate {
     if (nextState != _renderState.state) { [self refreshVisual:YES]; return; }
     [self updateRenderGeometry];
     [self updateMousePassThrough];
-    if (changed) {
+    if (changed || dockChanged) {
         [_petView setNeedsDisplay:YES];
         _statusItem.button.image = [_renderer statusImageForState:_renderState.state frame:_animationTick / 2];
         _statusItem.button.image.size = NSMakeSize(18, 18);
+    }
     }
 }
 
@@ -1137,8 +1331,12 @@ struct PendingMacUpdate {
     _dockScreenIdentifier = ScreenIdentifier(screen);
     const NSRect work = screen.visibleFrame;
     _dockCoordinate = std::clamp(_dockCoordinate, NSMinY(work), NSMaxY(work));
-    const BOOL bubbleBelow = _dockCoordinate > NSMaxY(work) - 150;
-    const CGFloat visibleCenterOffset = bubbleBelow ? 204.0 : 59.0;
+    const BOOL bubbleBelow = _dockCoordinate >
+        NSMaxY(work) - render_layout::dock_bubble_switch_margin;
+    const render_layout::State layout{_renderState.state, _dockEdge, true, bubbleBelow,
+                                      false, _dockVisibility, _animationTick};
+    const CGFloat visibleCenterOffset = static_cast<CGFloat>(render_layout::logical_height -
+        render_layout::dock_pet_center_y(layout));
     const CGFloat x = _dockEdge == DockEdge::Left
         ? NSMinX(work) : NSMaxX(work) - kPetWindowWidth;
     const CGFloat y = ClampOrigin(_dockCoordinate - visibleCenterOffset,
@@ -1159,6 +1357,7 @@ struct PendingMacUpdate {
         _dockVisibility = 1.0;
         _dockThoughtUntil = Clock::time_point::min();
         _dockRevealUntil = Clock::time_point::min();
+        _hasLastHoverCursor = false;
         [self clampToWorkArea];
     } else {
         _dockEdge = edge;
@@ -1167,6 +1366,7 @@ struct PendingMacUpdate {
         _dockVisibility = 1.0;
         _dockLastChange = Clock::now();
         _dockRevealUntil = Clock::time_point::min();
+        _hasLastHoverCursor = false;
         [self updateDockWindowPosition];
     }
     [self refreshVisual:YES];
@@ -1175,27 +1375,37 @@ struct PendingMacUpdate {
 - (BOOL)dockHovering:(NSPoint)cursor {
     if (_dockEdge == DockEdge::None) return NO;
     NSScreen* screen = ScreenForIdentifier(_dockScreenIdentifier);
+    if (!screen || !_petWindow) return NO;
+    const NSRect work = screen.visibleFrame;
+    const RectD trigger = app_logic::dock_hover_bounds(
+        _dockEdge, RectD{NSMinX(work), NSMinY(work), NSWidth(work), NSHeight(work)},
+        _dockCoordinate, 1.0, _dockVisibility <= 0.01, _settings.dock_hover_height);
+    if (trigger.contains(PointD{cursor.x, cursor.y})) return YES;
+
+    const BOOL bubbleBelow = _dockCoordinate >
+        NSMaxY(work) - render_layout::dock_bubble_switch_margin;
+    const render_layout::State layout{_renderState.state, _dockEdge, true, bubbleBelow,
+                                      false, _dockVisibility, _animationTick};
+    const auto pet = render_layout::visible_pet_bounds(layout);
+    const NSRect frame = _petWindow.frame;
+    const NSRect petGlobal = NSMakeRect(NSMinX(frame) + pet.x,
+        NSMinY(frame) + render_layout::logical_height - pet.y - pet.height,
+        pet.width, pet.height);
+    return NSPointInRect(cursor, petGlobal);
+}
+
+- (BOOL)dockHoverPathCrossesFrom:(NSPoint)from to:(NSPoint)to {
+    if (_dockEdge == DockEdge::None) return NO;
+    NSScreen* screen = ScreenForIdentifier(_dockScreenIdentifier);
     if (!screen) return NO;
     const NSRect work = screen.visibleFrame;
-    const CGFloat width = _dockVisibility <= 0.01 ? 28.0 : 56.0;
-    const CGFloat halfHeight = std::max<CGFloat>(20.0, _settings.dock_hover_height / 2.0);
-    const CGFloat x = _dockEdge == DockEdge::Left ? NSMinX(work) : NSMaxX(work) - width;
-    const NSRect edgeTrigger = NSMakeRect(x,
-        std::max(NSMinY(work), _dockCoordinate - halfHeight), width,
-        std::max<CGFloat>(1.0,
-            std::min(NSMaxY(work), _dockCoordinate + halfHeight) -
-            std::max(NSMinY(work), _dockCoordinate - halfHeight)));
-    if (NSPointInRect(cursor, edgeTrigger)) return YES;
-
-    const BOOL bubbleBelow = _dockCoordinate > NSMaxY(work) - 150;
-    const CGFloat hidden = 104 * (1 - SmoothStep(_dockVisibility));
-    const CGFloat localX = _dockEdge == DockEdge::Left
-        ? -hidden : kPetWindowWidth - 104 + hidden;
-    const CGFloat localY = bubbleBelow ? 4 : 149;
-    const NSRect frame = _petWindow.frame;
-    const NSRect petGlobal = NSMakeRect(NSMinX(frame) + localX,
-        NSMinY(frame) + kPetWindowHeight - localY - 104, 104, 104);
-    return NSPointInRect(cursor, petGlobal);
+    const RectD trigger = app_logic::dock_hover_bounds(
+        _dockEdge, RectD{NSMinX(work), NSMinY(work), NSWidth(work), NSHeight(work)},
+        _dockCoordinate, 1.0, _dockVisibility <= 0.01, _settings.dock_hover_height);
+    if (app_logic::segment_intersects_rect(PointD{from.x, from.y}, PointD{to.x, to.y}, trigger)) {
+        return YES;
+    }
+    return [self dockHovering:from] || [self dockHovering:to];
 }
 
 - (void)revealDock {
@@ -1229,11 +1439,9 @@ struct PendingMacUpdate {
     const NSPoint local = [_petView convertPoint:event.locationInWindow fromView:nil];
     if (![self isInteractivePoint:local]) return;
     const BOOL bubbleVisible = _renderState.bubble_visible;
-    CGFloat cloudX = (kPetWindowWidth - 270) / 2;
-    if (_dockEdge != DockEdge::None) cloudX += _dockEdge == DockEdge::Left ? -48 : 48;
-    const CGFloat cloudY = _renderState.bubble_below ? 105 : 45;
-    const RectD bubble{cloudX, cloudY, 270, 110};
-    const RectD content{cloudX + 81, cloudY + 37.4, 156, 45};
+    const auto layout = LayoutStateFor(_renderState);
+    const RectD bubble = render_layout::bubble_bounds(layout);
+    const RectD content = render_layout::body_bounds(layout);
     if (app_logic::is_task_switch_point(_dockEdge != DockEdge::None, bubbleVisible,
             _renderState.state, static_cast<int>(_renderState.task_titles.size()),
             bubble, content, PointD{local.x, local.y})) {
@@ -1248,6 +1456,9 @@ struct PendingMacUpdate {
         return;
     }
 
+    _petWindow.ignoresMouseEvents = NO;
+    _lastMouseReception = 1;
+    [_petWindow makeFirstResponder:_petView];
     _dragPending = true;
     _dragging = false;
     _dragStartedDocked = _dockEdge != DockEdge::None;
@@ -1271,6 +1482,7 @@ struct PendingMacUpdate {
         _dockVisibility = 1.0;
         _dockThoughtUntil = Clock::time_point::min();
         _dockRevealUntil = Clock::time_point::min();
+        _hasLastHoverCursor = false;
         _dragStartCursor = cursor;
         _dragStartOrigin = NSMakePoint(cursor.x - kPetWindowWidth / 2, cursor.y - 70);
         [_petWindow setFrameOrigin:_dragStartOrigin];
@@ -1297,6 +1509,7 @@ struct PendingMacUpdate {
     }
     [self trySnapOrClamp:cursor];
     [self savePosition];
+    [self updateMousePassThrough];
 }
 
 - (void)showSettings:(id)sender {
@@ -1414,6 +1627,10 @@ struct PendingMacUpdate {
         _snapshot = MonitorSnapshot{};
         _hasSnapshot = false;
         _visualCoordinator = VisualStateCoordinator{};
+        {
+            std::lock_guard lock(_pendingMonitorMutex);
+            _pendingMonitorUpdates.clear();
+        }
         [self startMonitor];
     }
     [_settingsWindow orderOut:nil];
@@ -1478,7 +1695,8 @@ int RunMacUtility(int argc, const char* const* argv) {
         for (const auto& [visual, name] : states) {
             state.state = visual;
             state.status_text = name;
-            state.animation_tick = visual == ReminderState::Busy ? 18 : 0;
+            state.animation_tick = (visual == ReminderState::Busy ||
+                                    visual == ReminderState::Completed) ? 18 : 0;
             const auto path = outputDirectory / (std::string(name) + ".png");
             if (![renderer savePreview:state toPath:Ns(path_to_utf8(path)) error:&renderError]) {
                 std::cerr << Utf8(renderError ? renderError : @"render failed") << '\n';
@@ -1542,6 +1760,7 @@ bool AnotherInstanceIsRunning() {
 int main(int argc, const char* argv[]) {
     @autoreleasepool {
         bool utility = false;
+        bool expressionDemo = false;
         for (int index = 1; index < argc; ++index) {
             const std::string argument = ArgumentAt(argc, argv, index);
             if (argument == "--version" || argument == "--preview" ||
@@ -1550,6 +1769,7 @@ int main(int argc, const char* argv[]) {
                 utility = true;
                 break;
             }
+            if (argument == "--expression-demo") expressionDemo = true;
         }
         if (utility) return RunMacUtility(argc, argv);
         [NSApplication sharedApplication];
@@ -1559,6 +1779,7 @@ int main(int argc, const char* argv[]) {
         }
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
         AppDelegate* delegate = [[AppDelegate alloc] init];
+        [delegate setExpressionDemoEnabled:expressionDemo];
         NSApp.delegate = delegate;
         [NSApp run];
         (void)delegate;

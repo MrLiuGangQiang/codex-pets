@@ -2,6 +2,8 @@
 #include "json.h"
 #include "paths.h"
 #include "platform_text.h"
+#include "presentation.h"
+#include "render_layout.h"
 #include "session_monitor.h"
 #include "settings.h"
 
@@ -32,6 +34,7 @@ struct TestFailure : std::runtime_error { using std::runtime_error::runtime_erro
 
 #define CHECK(value) do { if (!(value)) throw TestFailure(std::string("CHECK failed: ") + #value + " at line " + std::to_string(__LINE__)); } while (false)
 #define CHECK_EQ(expected, actual) do { const auto _e = (expected); const auto _a = (actual); if (!(_e == _a)) throw TestFailure(std::string("CHECK_EQ failed at line ") + std::to_string(__LINE__)); } while (false)
+#define CHECK_NEAR(expected, actual) do { const double _e = static_cast<double>(expected); const double _a = static_cast<double>(actual); if (std::abs(_e - _a) > 1e-6) throw TestFailure(std::string("CHECK_NEAR failed at line ") + std::to_string(__LINE__)); } while (false)
 
 std::filesystem::path unique_temp(std::string_view prefix) {
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -98,6 +101,7 @@ void set_environment(std::string_view name, const std::optional<std::string>& va
 }
 
 void test_app_logic() {
+    CHECK_EQ(std::size_t(64), monitor_pending_event_limit);
     CHECK_EQ(ReminderState::Error,
              app_logic::select_visual_state(1, true, false, ReminderState::Error));
     CHECK_EQ(ReminderState::Completed,
@@ -152,6 +156,8 @@ void test_app_logic() {
     CHECK_EQ(18, app_logic::select_dock_sprite_index(DockEdge::Right, ReminderState::Interrupted, 0));
     CHECK_EQ(std::string("任务失败：构建安装包"), app_logic::format_abnormal_task_text("构建安装包"));
     CHECK_EQ(std::string("任务失败：未知任务"), app_logic::format_abnormal_task_text(""));
+    CHECK_EQ(std::string("任务已中断：构建安装包"), app_logic::format_interrupted_task_text("构建安装包"));
+    CHECK_EQ(std::string("任务已中断：未知任务"), app_logic::format_interrupted_task_text(""));
 
     const auto start = Clock::now();
     CHECK(app_logic::should_show_dock(start, start + std::chrono::milliseconds(9900), false, false,
@@ -173,10 +179,152 @@ void test_app_logic() {
     CHECK(!left.contains({101, 530}));
     CHECK(right.contains({1299, 400}));
     CHECK(!right.contains({1200, 400}));
+    CHECK(app_logic::segment_intersects_rect({-10, 5}, {20, 5}, {0, 0, 10, 10}));
+    CHECK(!app_logic::segment_intersects_rect({-10, -1}, {20, -1}, {0, 0, 10, 10}));
+    CHECK(app_logic::segment_intersects_rect({5, 5}, {20, 20}, {0, 0, 10, 10}));
     const RectD bubble{10, 20, 300, 150};
     const RectD content{100, 70, 150, 60};
     CHECK(app_logic::is_task_switch_point(true, true, ReminderState::Busy, 2, bubble, content, {15, 25}));
     CHECK(!app_logic::is_task_switch_point(false, true, ReminderState::Busy, 2, bubble, content, {15, 25}));
+}
+
+
+void test_render_layout_contract() {
+    using namespace render_layout;
+
+    const State floating{ReminderState::Idle, DockEdge::None, false, false, false, 1.0, 0};
+    const auto floating_bubble = bubble_bounds(floating);
+    CHECK_NEAR(75.0, floating_bubble.x);
+    CHECK_NEAR(45.0, floating_bubble.y);
+    CHECK_NEAR(270.0, floating_bubble.width);
+    CHECK_NEAR(110.0, floating_bubble.height);
+
+    const auto visible_cloud = visible_cloud_bounds(floating);
+    CHECK_NEAR(96.9375, visible_cloud.x);
+    CHECK_NEAR(46.990950226244344, visible_cloud.y);
+    CHECK_NEAR(226.125, visible_cloud.width);
+    CHECK_NEAR(96.0633484162896, visible_cloud.height);
+
+    const auto floating_pet = floating_pet_bounds(floating);
+    CHECK_NEAR(150.23464838541668, floating_pet.x);
+    CHECK_NEAR(151.3269230769231, floating_pet.y);
+    CHECK_NEAR(floating_pet_width, floating_pet.width);
+    CHECK_NEAR(floating_pet_height, floating_pet.height);
+
+    const auto header = header_bounds(floating);
+    const auto body = body_bounds(floating);
+    CHECK_NEAR(145.2, header.x);
+    CHECK_NEAR(56.0, header.y);
+    CHECK_NEAR(140.4, header.width);
+    CHECK_NEAR(22.0, header.height);
+    CHECK_NEAR(156.0, body.x);
+    CHECK_NEAR(82.4, body.y);
+    CHECK_NEAR(156.0, body.width);
+    CHECK_NEAR(45.0, body.height);
+    const auto bulb = bulb_origin(floating);
+    CHECK_NEAR(120.0, bulb.x);
+    CHECK_NEAR(78.0, bulb.y);
+
+    const State left_above{ReminderState::Busy, DockEdge::Left, true, false, false, 1.0, 18};
+    const State right_above{ReminderState::Busy, DockEdge::Right, true, false, false, 1.0, 18};
+    const State left_below{ReminderState::Busy, DockEdge::Left, true, true, false, 1.0, 18};
+    const State right_below{ReminderState::Busy, DockEdge::Right, true, true, false, 1.0, 18};
+    const State mirrored{ReminderState::Idle, DockEdge::None, false, false, true, 1.0, 0};
+    const auto left_bubble = bubble_bounds(left_above);
+    const auto right_bubble = bubble_bounds(right_above);
+    CHECK_NEAR(27.0, left_bubble.x);
+    CHECK_NEAR(123.0, right_bubble.x);
+    CHECK_NEAR(51.0, left_bubble.y);
+    CHECK_NEAR(103.0, bubble_bounds(left_below).y);
+    CHECK_NEAR(103.0, bubble_bounds(right_below).y);
+    CHECK_NEAR(123.0, bubble_bounds(right_below).x);
+    CHECK(floating_pet_bounds(mirrored).x < floating_pet.x);
+
+    const auto left_pet = dock_pet_bounds(left_above);
+    const auto right_pet = dock_pet_bounds(right_above);
+    const auto below_pet = dock_pet_bounds(left_below);
+    CHECK_NEAR(0.0, left_pet.x);
+    CHECK_NEAR(316.0, right_pet.x);
+    CHECK_NEAR(149.0, left_pet.y);
+    CHECK_NEAR(4.0, below_pet.y);
+    CHECK_NEAR(dock_pet_size, left_pet.width);
+    CHECK_NEAR(dock_pet_size, left_pet.height);
+    CHECK_NEAR(201.0, dock_pet_center_y(left_above));
+    CHECK_NEAR(56.0, dock_pet_center_y(left_below));
+
+    const auto left_visible_pet = visible_pet_bounds(left_above);
+    const auto right_visible_pet = visible_pet_bounds(right_above);
+    const auto right_below_visible_pet = visible_pet_bounds(right_below);
+    CHECK_NEAR(0.0, left_visible_pet.x);
+    CHECK_NEAR(153.875, left_visible_pet.y);
+    CHECK_NEAR(67.84375, left_visible_pet.width);
+    CHECK_NEAR(352.15625, right_visible_pet.x);
+    CHECK_NEAR(8.875, right_below_visible_pet.y);
+    CHECK_NEAR(150.0, dock_bubble_switch_margin);
+
+    const auto floating_dots = thought_dot_bounds(floating);
+    const auto dock_dots = thought_dot_bounds(left_above);
+    CHECK_NEAR(17.0, floating_dots.large.width);
+    CHECK_NEAR(15.0, floating_dots.large.height);
+    CHECK_NEAR(11.0, floating_dots.small.width);
+    CHECK_NEAR(10.0, floating_dots.small.height);
+    CHECK(dock_dots.large.width > dock_dots.small.width);
+    CHECK(dock_dots.large.y > left_bubble.y);
+}
+
+void test_visual_content_contract() {
+    MonitorSnapshot snapshot;
+    const auto idle = make_visual_content(ReminderState::Idle, snapshot);
+    CHECK_EQ(std::string("空闲"), idle.status_text);
+    CHECK_EQ(std::string("主人，现在没有在进行中的任务!别让我歇着!"), idle.thought_text);
+    CHECK(idle.task_titles.empty());
+    CHECK(idle.progress_labels.empty());
+
+    snapshot.active_count = 2;
+    snapshot.latest_event_active_title_index = 1;
+    snapshot.total_plan_step_count = 5;
+    snapshot.completed_plan_step_count = 2;
+    snapshot.active_titles = {"编译 Windows", "校验 macOS"};
+    snapshot.active_plan_progress_labels = {std::optional<std::string>("1/3"), std::nullopt};
+    const auto busy = make_visual_content(ReminderState::Busy, snapshot);
+    CHECK_EQ(std::string("进行中(2/5) • 2/2"), busy.status_text);
+    CHECK_EQ(std::string("编译 Windows"), busy.thought_text);
+    CHECK_EQ(std::size_t(2), busy.task_titles.size());
+    CHECK_EQ(std::string("校验 macOS"), busy.task_titles[1]);
+    CHECK_EQ(std::size_t(2), busy.progress_labels.size());
+    CHECK_EQ(std::string("1/3"), *busy.progress_labels[0]);
+    CHECK(!busy.progress_labels[1].has_value());
+
+    MonitorSnapshot busy_fallback;
+    busy_fallback.active_count = 1;
+    const auto fallback = make_visual_content(ReminderState::Busy, busy_fallback);
+    CHECK_EQ(std::string("正在认真处理你的任务…"), fallback.thought_text);
+    CHECK_EQ(std::size_t(1), fallback.task_titles.size());
+    CHECK_EQ(std::string("正在处理任务…"), fallback.task_titles[0]);
+
+    snapshot.last_completed_title = "打包完成";
+    const auto completed = make_visual_content(ReminderState::Completed, snapshot);
+    CHECK_EQ(std::string("已完成"), completed.status_text);
+    CHECK_EQ(std::string("任务完成啦！"), completed.thought_text);
+    CHECK_EQ(std::size_t(1), completed.task_titles.size());
+    CHECK_EQ(std::string("打包完成"), completed.task_titles[0]);
+    CHECK(completed.progress_labels.empty());
+
+    snapshot.last_aborted_title = "签名失败";
+    const auto error = make_visual_content(ReminderState::Error, snapshot);
+    CHECK_EQ(std::string("异常"), error.status_text);
+    CHECK_EQ(std::string("任务出现异常了。"), error.thought_text);
+    CHECK_EQ(std::size_t(1), error.task_titles.size());
+    CHECK_EQ(std::string("任务失败：签名失败"), error.task_titles[0]);
+    CHECK(error.progress_labels.empty());
+
+    snapshot.last_interrupted_title = "用户取消";
+    const auto interrupted = make_visual_content(ReminderState::Interrupted, snapshot);
+    CHECK_EQ(std::string("已中断"), interrupted.status_text);
+    CHECK_EQ(std::string("任务已中断了。"), interrupted.thought_text);
+    CHECK_EQ(std::size_t(1), interrupted.task_titles.size());
+    CHECK_EQ(std::string("任务已中断：用户取消"), interrupted.task_titles[0]);
+    CHECK(interrupted.progress_labels.empty());
 }
 
 void test_paths_and_settings() {
@@ -477,6 +625,8 @@ void test_json_parser() {
 int main() {
     const std::vector<std::pair<const char*, std::function<void()>>> tests{
         {"app_logic", test_app_logic},
+        {"render_layout_contract", test_render_layout_contract},
+        {"visual_content_contract", test_visual_content_contract},
         {"paths_and_settings", test_paths_and_settings},
         {"session_monitor_lifecycle", test_session_monitor_lifecycle},
         {"session_monitor_success_and_order", test_session_monitor_success_and_order},

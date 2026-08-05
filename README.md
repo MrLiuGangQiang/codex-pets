@@ -1,6 +1,6 @@
 # CodeXPets
 
-CodeXPets 4.0.0 是一个面向 Codex 的**原生桌面宠物**。本版本将原来的 .NET/Avalonia/SkiaSharp 架构完全替换为轻量 C++20 核心和系统原生 UI：
+CodeXPets 4.0.1 是一个面向 Codex 的**原生桌面宠物**。本版本将原来的 .NET/Avalonia/SkiaSharp 架构完全替换为轻量 C++20 核心和系统原生 UI：
 
 - Windows：Win32 + GDI+
 - macOS：AppKit + Core Graphics
@@ -12,10 +12,10 @@ CodeXPets 4.0.0 是一个面向 Codex 的**原生桌面宠物**。本版本将�
 
 | 系统 | 架构 | 构建/发布目标 | 文件 |
 |---|---:|---|---|
-| Windows | x64 | `win-x64` | `CodeXPets-v4.0.0-win-x64.exe` / `.zip` |
-| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.0.0-win-arm64.exe` / `.zip` |
-| macOS | Intel | `osx-x64` | `CodeXPets-v4.0.0-macos-x64.zip` / `.dmg` |
-| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.0.0-macos-arm64.zip` / `.dmg` |
+| Windows | x64 | `win-x64` | `CodeXPets-v4.0.1-win-x64.exe` / `.zip` |
+| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.0.1-win-arm64.exe` / `.zip` |
+| macOS | Intel | `osx-x64` | `CodeXPets-v4.0.1-macos-x64.zip` / `.dmg` |
+| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.0.1-macos-arm64.zip` / `.dmg` |
 
 macOS 最低支持 macOS 13。Windows 版本是一个自包含原生 EXE；macOS 版本是标准 `CodeXPets.app`。两者都不要求用户安装 .NET、Electron、Qt 或其他附加运行时。
 
@@ -28,7 +28,7 @@ macOS 最低支持 macOS 13。Windows 版本是一个自包含原生 EXE；macOS
 - 云朵文本、自动换行、长文本滚动、多任务自动轮换和点击切换。
 - 左右边缘吸附、局部边缘唤出、自动隐藏、拖动解除吸附。
 - 多显示器位置保存/恢复，支持显示器变化后的降级匹配。
-- 设置窗口、诊断窗口、语音提醒、登录启动、打开会话目录和更新入口。
+- 设置窗口、语音提醒、登录启动、打开会话目录和更新入口。
 - Windows 旧注册表设置、macOS 旧 `NSUserDefaults` 设置以及旧位置格式迁移。
 - 单实例、资源完整性校验、离屏冒烟渲染、真实窗口启动冒烟和 SHA-256 校验。
 
@@ -66,7 +66,7 @@ CodeXPets 只读取 Codex 会话文件，不会修改、移动或删除这些文
 ### Windows
 
 1. 下载与 CPU 架构匹配的 EXE，直接运行。
-2. 右键通知区域图标可以显示/隐藏桌宠、切换语音、设置登录启动、打开设置和诊断。
+2. 右键通知区域图标可以显示/隐藏桌宠、切换语音、设置登录启动和打开设置。
 3. 拖动猫或云朵可以移动桌宠；靠近屏幕左/右边缘释放即可吸附。
 
 ### macOS
@@ -127,17 +127,17 @@ bash scripts/build-macos.sh osx-x64     # Intel
 --test-sound
 ```
 
-这些命令用于 CI 和发布前诊断，不会启动常驻桌宠。
+这些命令用于 CI 和发布前校验，不会启动常驻桌宠。Windows 另支持 `--startup-smoke-test`；两端都支持 `--expression-demo` 轮换预览五种桌宠状态。
 
 ## 体积和内存优化
 
 - 不携带 .NET、JIT、Electron、Qt、SkiaSharp 或大型跨平台 UI 库。
-- Windows 恢复旧版像素云朵外观，构建资源使用与旧版相同的 Skia 降采样结果（640×221），避免携带 2122×734 原图。
+- Windows 与 macOS 都使用同一份像素云朵资源；发布包只携带 540×220 的运行时云朵图，不会让 2122×734 原图进入发布包或以解码位图形式驻留内存。
 - 浮动精灵只缓存当前状态的 8 帧；扒边帧按需读取。
 - Windows 链接器使用 dead-strip/折叠等尺寸优化；macOS 使用 `-dead_strip`。
 - 发布脚本对 EXE、APP、ZIP、DMG 统一执行 10 MiB 硬限制。
 
-Windows x64 原生构建的实测结果（同一台开发机、Release 构建，确认真实桌宠窗口和后台消息窗口均已创建，桌宠可见，空闲/忙碌/完成状态各连续采样）约为：EXE 1.27 MiB，私有内存 4.36–4.60 MiB，工作集 20.26–21.10 MiB，6 个线程。工作集包含系统共享的 GDI+/窗口代码页；不建议为了显示一个更小的数字强行清空工作集而造成页面抖动。macOS 的内存应在目标系统上通过“诊断信息”查看。
+Windows x64 原生构建的实测结果（同一台开发机、Release 构建，确认真实桌宠窗口和后台消息窗口均已创建，桌宠可见，空闲/忙碌/完成状态各连续采样）约为：EXE 1.27 MiB，私有内存 4.36–4.60 MiB，工作集 20.26–21.10 MiB，6 个线程。工作集包含系统共享的 GDI+/窗口代码页；不建议为了显示一个更小的数字强行清空工作集而造成页面抖动。macOS 的实际内存应在目标系统的活动监视器中复核。
 
 ## 架构文档
 

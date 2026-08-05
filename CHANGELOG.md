@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.0.1] - 2026-08-05
+
+### Fixed
+- macOS 改用与 Windows 同一份 540×220 像素云朵资源，并共用气泡位置、连接点、精灵落点、可见区域和文本布局合同；不再显示成圆角矢量框。
+- macOS 透明桌宠窗口现在可成为键盘焦点并主动保持拖拽交互；吸附状态补齐路径相交唤出，修复点击到猫或云朵后无法拖动的问题。
+- macOS 和 Windows 都将监听器快照合并为有界待处理队列；macOS 不再为每次监听更新排入主线程 block，Windows 也只保留一条待处理的 UI 唤醒消息，降低长期运行时的主线程/消息队列积压、图形内存和分配压力。
+- 统一 Busy、Completed、Error、Interrupted 和 Idle 的展示文案及中断状态处理；macOS 现已支持 Windows 同样的 `--expression-demo` 五状态轮换。
+- 为共享展示与布局合同新增原生核心测试，防止后续 Windows/macOS 样式和交互再漂移。
+
 ## [4.0.0] - 2026-08-04
 
 ### 完全原生重构
@@ -11,7 +20,7 @@
 
 ### 体积与资源
 
-- 精灵资源拆分为单帧 PNG；Windows 云朵恢复旧版像素样式，并只携带旧版运行时实际使用的 640×221 降采样资源。
+- 精灵资源拆分为单帧 PNG；Windows 和 macOS 统一携带同一份 540×220 像素云朵运行时资源。
 - Windows Release 原生 EXE 约 1.3 MiB；发布脚本对 EXE、APP、ZIP、DMG 强制执行 10 MiB 上限。
 - 去除 macOS JIT entitlement，使用 Core Graphics bitmap context 生成预览。
 

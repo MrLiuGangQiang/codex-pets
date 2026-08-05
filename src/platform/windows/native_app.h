@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <atomic>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -144,6 +145,8 @@ private:
     double session_rotation_seconds_{};
     int selected_task_index_{};
     std::vector<std::string> displayed_task_titles_;
+    std::vector<std::optional<std::string>> displayed_progress_labels_;
+    std::string displayed_thought_text_;
     std::string last_status_signature_;
     std::string last_status_text_;
     ReminderState last_visual_state_{ReminderState::Idle};
@@ -156,6 +159,7 @@ private:
     std::unique_ptr<MonitorWorker> monitor_worker_;
     mutable std::mutex pending_mutex_;
     std::deque<PendingUpdate> pending_updates_;
+    std::atomic_bool monitor_message_posted_{};
 };
 
 } // namespace codexpets::windows

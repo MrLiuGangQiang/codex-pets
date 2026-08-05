@@ -12,7 +12,6 @@ namespace codexpets::app_logic {
 
 std::string format_abnormal_task_text(std::string_view title);
 std::string format_interrupted_task_text(std::string_view title);
-std::string format_interrupted_task_text(std::string_view title);
 int select_preferred_task_index(bool focus_latest_task, int latest_task_index) noexcept;
 int reconcile_task_selection(ReminderState state, const std::vector<std::string>& titles,
                              int previous_index, std::string_view previously_selected_title,
@@ -32,6 +31,7 @@ DockEdge select_snap_edge(PointD cursor, RectD work_area, double snap_distance) 
 bool should_mirror_floating_sprite(PointD anchor, RectD work_area) noexcept;
 RectD dock_hover_bounds(DockEdge edge, RectD work_area, double dock_y, double scale,
                         bool fully_hidden, int hover_height) noexcept;
+bool segment_intersects_rect(PointD from, PointD to, const RectD& rect) noexcept;
 bool is_task_switch_point(bool is_docked, bool bubble_visible, ReminderState state,
                           int task_count, RectD bubble_bounds, RectD content_bounds,
                           PointD point) noexcept;

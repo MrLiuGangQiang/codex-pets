@@ -1,6 +1,7 @@
 #include "app_logic.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace codexpets::app_logic {
@@ -108,6 +109,31 @@ RectD dock_hover_bounds(DockEdge edge, RectD work_area, double dock_y, double sc
     const auto top = std::max(work_area.top(), dock_y - half_height);
     const auto bottom = std::min(work_area.bottom(), dock_y + half_height);
     return {x, top, width, std::max(1.0, bottom - top)};
+}
+
+bool segment_intersects_rect(PointD from, PointD to, const RectD& rect) noexcept {
+    double enter = 0.0;
+    double exit = 1.0;
+    const double dx = to.x - from.x;
+    const double dy = to.y - from.y;
+    const std::array<double, 4> p{-dx, dx, -dy, dy};
+    const std::array<double, 4> q{from.x - rect.left(), rect.right() - from.x,
+                                  from.y - rect.top(), rect.bottom() - from.y};
+    for (std::size_t index = 0; index < p.size(); ++index) {
+        if (std::abs(p[index]) < 1e-12) {
+            if (q[index] < 0.0) return false;
+            continue;
+        }
+        const double ratio = q[index] / p[index];
+        if (p[index] < 0.0) {
+            if (ratio > exit) return false;
+            enter = std::max(enter, ratio);
+        } else {
+            if (ratio < enter) return false;
+            exit = std::min(exit, ratio);
+        }
+    }
+    return true;
 }
 
 bool is_task_switch_point(bool is_docked, bool bubble_visible, ReminderState state,

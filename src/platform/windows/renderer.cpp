@@ -1,6 +1,7 @@
 #include "renderer.h"
 
 #include "../../../src/core/app_logic.h"
+#include "../../../src/core/render_layout.h"
 #include "resource_ids.h"
 
 #include <windows.h>
@@ -19,92 +20,14 @@ namespace {
 
 using namespace Gdiplus;
 
-constexpr float kBubbleWidth = 270.0f;
-constexpr float kBubbleHeight = 110.0f;
-constexpr float kBubbleInset = 45.0f;
-constexpr float kDockBubbleOffset = 48.0f;
-constexpr float kDockSize = 104.0f;
-constexpr float kPetWidth = 130.0f;
-constexpr float kPetHeight = 140.0f;
-
-struct SpriteMetric {
-    float anchor_x;
-    float bottom;
-    float x;
-    float y;
-    float width;
-    float height;
-};
-
-constexpr std::array<std::array<SpriteMetric, 8>, 5> kFloatingMetrics{{
-    {{{88.268827f,157,43,30,113,127},{88.268827f,157,43,30,113,127},{88.479689f,157,43,30,115,127},{88.335350f,153,42,30,113,123},{87.956078f,158,42,30,114,128},{88.335350f,153,42,30,113,123},{88.479689f,157,43,30,115,127},{88.268827f,157,43,30,113,127}}},
-    {{{87.675970f,158,42,30,114,128},{88.439236f,158,43,30,115,128},{88.264264f,156,42,30,113,126},{87.714413f,159,43,30,114,129},{96,208,0,0,192,208},{96,208,0,0,192,208},{96,208,0,0,192,208},{96,208,0,0,192,208}}},
-    {{{87.853720f,130,41,35,128,95},{87.853720f,130,41,35,128,95},{87.853720f,130,41,35,128,95},{87.853720f,130,41,35,128,95},{87.564935f,127,39,28,134,99},{87.748331f,160,44,28,113,132},{87.691131f,160,44,28,113,132},{88.078308f,129,35,28,128,101}}},
-    {{{87.944566f,145,39,31,120,114},{87.944566f,145,39,31,120,114},{87.923949f,144,39,31,118,113},{87.540754f,143,39,30,116,113},{88.265314f,145,40,31,117,114},{87.540754f,143,39,30,116,113},{87.923949f,144,39,31,118,113},{87.944566f,145,39,31,120,114}}},
-    {{{88.268827f,157,43,30,113,127},{88.268827f,157,43,30,113,127},{88.479689f,157,43,30,115,127},{88.335350f,153,42,30,113,123},{87.956078f,158,42,30,114,128},{88.335350f,153,42,30,113,123},{88.479689f,157,43,30,115,127},{88.268827f,157,43,30,113,127}}},
-}};
-
-struct SimpleRect { float x; float y; float width; float height; };
-constexpr std::array<SimpleRect, 20> kDockOpaque{{
-    {0,12,167,232},{0,12,167,232},{0,12,167,232},{0,12,167,232},{0,12,167,232},{0,12,167,232},
-    {0,12,167,232},{0,12,167,232},{0,12,167,232},{0,12,167,232},
-    {89,12,167,232},{89,12,167,232},{89,12,167,232},{89,12,167,232},{89,12,167,232},{89,12,167,232},
-    {89,12,167,232},{89,12,167,232},{89,12,167,232},{89,12,167,232}
-}};
-
-RectF bubble_bounds(const RenderState& state) {
-    float x = (Renderer::LogicalWidth - kBubbleWidth) / 2.0f;
-    if (state.docked) x += state.dock_edge == DockEdge::Left ? -kDockBubbleOffset : kDockBubbleOffset;
-    const float y = state.bubble_below
-        ? Renderer::LogicalHeight - kBubbleHeight - kBubbleInset - (state.docked ? 2.0f : 0.0f)
-        : kBubbleInset + (state.docked ? 6.0f : 0.0f);
-    return RectF(x, y, kBubbleWidth, kBubbleHeight);
+RectF as_rect(const RectD& value) {
+    return RectF(static_cast<REAL>(value.x), static_cast<REAL>(value.y),
+                 static_cast<REAL>(value.width), static_cast<REAL>(value.height));
 }
 
-RectF visible_cloud_bounds(const RenderState& state) {
-    const auto cloud = bubble_bounds(state);
-    return RectF(cloud.X + 52.0f / 640.0f * cloud.Width,
-                 cloud.Y + 4.0f / 221.0f * cloud.Height,
-                 536.0f / 640.0f * cloud.Width,
-                 193.0f / 221.0f * cloud.Height);
-}
-
-RectF floating_destination(const RenderState& state, int row, int frame) {
-    const auto& metric = kFloatingMetrics[static_cast<std::size_t>(std::clamp(row, 0, 4))]
-                                          [static_cast<std::size_t>(std::clamp(frame, 0, 7))];
-    constexpr float scale_x = kPetWidth / 192.0f;
-    constexpr float scale_y = kPetHeight / 208.0f;
-    const float anchor = state.mirror ? 192.0f - metric.anchor_x : metric.anchor_x;
-    return RectF(Renderer::LogicalWidth / 2.0f - anchor * scale_x,
-                 Renderer::LogicalHeight - 3.0f - metric.bottom * scale_y,
-                 kPetWidth, kPetHeight);
-}
-
-RectF visible_pet_bounds(const RenderState& state) {
-    if (state.docked) {
-        const int frame = app_logic::select_dock_sprite_index(state.dock_edge, state.state,
-                                                               state.animation_tick);
-        const auto& opaque = kDockOpaque[static_cast<std::size_t>(std::clamp(frame, 0, 19))];
-        const float visibility = std::clamp(static_cast<float>(state.dock_visibility), 0.0f, 1.0f);
-        const float shown = visibility * visibility * (3.0f - 2.0f * visibility);
-        const float hidden = kDockSize * (1.0f - shown);
-        const float x = state.dock_edge == DockEdge::Left ? -hidden
-                                                          : Renderer::LogicalWidth - kDockSize + hidden;
-        const float y = state.bubble_below ? 4.0f : Renderer::LogicalHeight - kDockSize - 7.0f;
-        constexpr float scale = kDockSize / 256.0f;
-        return RectF(x + opaque.x * scale, y + opaque.y * scale,
-                     opaque.width * scale, opaque.height * scale);
-    }
-    const int row = app_logic::select_floating_sprite_row(state.state);
-    const int frame = app_logic::select_floating_frame(state.state, state.animation_tick);
-    const auto& metric = kFloatingMetrics[static_cast<std::size_t>(std::clamp(row, 0, 4))]
-                                          [static_cast<std::size_t>(std::clamp(frame, 0, 7))];
-    const auto destination = floating_destination(state, row, frame);
-    constexpr float scale_x = kPetWidth / 192.0f;
-    constexpr float scale_y = kPetHeight / 208.0f;
-    const float opaque_x = state.mirror ? 192.0f - (metric.x + metric.width) : metric.x;
-    return RectF(destination.X + opaque_x * scale_x, destination.Y + metric.y * scale_y,
-                 metric.width * scale_x, metric.height * scale_y);
+render_layout::State layout_state(const RenderState& state) noexcept {
+    return {state.state, state.dock_edge, state.docked, state.bubble_below,
+            state.mirror, state.dock_visibility, state.animation_tick};
 }
 
 Color header_color(ReminderState state) {
@@ -125,11 +48,6 @@ std::wstring wide(std::string_view value) {
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
                         static_cast<int>(value.size()), result.data(), count);
     return result;
-}
-
-float smooth_step(double value) {
-    value = std::clamp(value, 0.0, 1.0);
-    return static_cast<float>(value * value * (3.0 - 2.0 * value));
 }
 
 std::string normalized_text(std::string value) {
@@ -203,21 +121,10 @@ bool Renderer::initialize(HINSTANCE instance, std::string* error) {
         return false;
     }
     cloud_bitmap_ = load_bitmap(IDR_CLOUD_BUBBLE);
-    if (!cloud_bitmap_) {
+    if (!cloud_bitmap_ || cloud_bitmap_->GetWidth() != render_layout::cloud_bitmap_width ||
+        cloud_bitmap_->GetHeight() != render_layout::cloud_bitmap_height) {
         if (error) *error = "云朵资源加载失败";
         return false;
-    }
-    {
-        // Keep a compact 2x working copy resident instead of the full 2122x734
-        // source bitmap (~6 MB decoded) to minimize memory without losing detail.
-        BitmapPtr scaled(new Bitmap(540, 220, PixelFormat32bppPARGB));
-        if (scaled && scaled->GetLastStatus() == Ok) {
-            Graphics graphics(scaled.get());
-            graphics.SetCompositingMode(CompositingModeSourceCopy);
-            graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-            graphics.DrawImage(cloud_bitmap_.get(), RectF(0, 0, 540.0f, 220.0f));
-            cloud_bitmap_ = std::move(scaled);
-        }
     }
     return true;
 }
@@ -368,8 +275,8 @@ void Renderer::draw_scene(Graphics& graphics, const RenderState& state, double s
 }
 
 void Renderer::draw_cloud(Graphics& graphics, const RenderState& state, double /*scale*/) {
-    const auto cloud = bubble_bounds(state);
-    const auto visible_cloud = visible_cloud_bounds(state);
+    const auto layout = layout_state(state);
+    const auto cloud = as_rect(render_layout::bubble_bounds(layout));
     if (cloud_bitmap_) {
         const auto previous_interpolation = graphics.GetInterpolationMode();
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
@@ -377,69 +284,26 @@ void Renderer::draw_cloud(Graphics& graphics, const RenderState& state, double /
         graphics.SetInterpolationMode(previous_interpolation);
     }
 
-    constexpr float large_w = 17.0f, large_h = 15.0f, small_w = 11.0f, small_h = 10.0f;
-    RectF large_dot, small_dot;
-    const auto pet = visible_pet_bounds(state);
-    if (state.docked) {
-        const float inset = std::min(38.0f, visible_cloud.Width * 0.18f);
-        const float cloud_x = state.dock_edge == DockEdge::Left
-            ? visible_cloud.X + inset : visible_cloud.GetRight() - inset;
-        const float inward = state.dock_edge == DockEdge::Left ? 1.0f : -1.0f;
-        const PointF cloud_anchor(cloud_x, state.bubble_below ? visible_cloud.Y - 1.0f
-                                                              : visible_cloud.GetBottom() + 1.0f);
-        const PointF pet_anchor(pet.X + pet.Width / 2.0f + inward * 2.0f,
-                                state.bubble_below ? pet.GetBottom() + 1.0f : pet.Y - 1.0f);
-        const float dx = pet_anchor.X - cloud_anchor.X, dy = pet_anchor.Y - cloud_anchor.Y;
-        const float distance = std::max(0.001f, std::sqrt(dx * dx + dy * dy));
-        const float ux = dx / distance, uy = dy / distance;
-        const float large_radius = (std::abs(ux) * large_w + std::abs(uy) * large_h) / 2.0f;
-        const float small_radius = (std::abs(ux) * small_w + std::abs(uy) * small_h) / 2.0f;
-        const float gap = std::max(1.0f, (distance - 2 * large_radius - 2 * small_radius) / 3.0f);
-        float large_d = gap + large_radius;
-        float small_d = large_d + large_radius + gap + small_radius;
-        if (small_d + small_radius > distance) { large_d = distance / 3.0f; small_d = distance * 2.0f / 3.0f; }
-        const float perpendicular = state.dock_edge == DockEdge::Left
-            ? (state.bubble_below ? 8.0f : -8.0f) : (state.bubble_below ? -8.0f : 8.0f);
-        const PointF lc(cloud_anchor.X + ux * large_d, cloud_anchor.Y + uy * large_d);
-        const PointF sc(cloud_anchor.X + ux * small_d - uy * perpendicular,
-                        cloud_anchor.Y + uy * small_d + ux * perpendicular);
-        large_dot = RectF(lc.X-large_w/2,lc.Y-large_h/2,large_w,large_h);
-        small_dot = RectF(sc.X-small_w/2,sc.Y-small_h/2,small_w,small_h);
-    } else {
-        const float direction = state.mirror ? 1.0f : -1.0f;
-        const float small_x = cloud.X + cloud.Width / 2.0f + direction * 11.0f;
-        const float large_x = cloud.X + cloud.Width / 2.0f + direction * 7.0f;
-        float small_y{}, large_y{};
-        if (state.bubble_below) {
-            small_y = pet.GetBottom() + 2.0f;
-            large_y = std::min(visible_cloud.Y - large_h - 3.0f, small_y + small_h + 3.0f);
-        } else {
-            const float desired = pet.Y - small_h - 0.5f;
-            large_y = std::clamp(desired - large_h - 3.0f,
-                                 visible_cloud.GetBottom() + 3.0f,
-                                 visible_cloud.GetBottom() + 12.0f);
-            small_y = std::max(desired, large_y + large_h + 1.0f);
-        }
-        large_dot = RectF(large_x-large_w/2,large_y,large_w,large_h);
-        small_dot = RectF(small_x-small_w/2,small_y,small_w,small_h);
-    }
-    draw_thought_dot(graphics, large_dot);
-    draw_thought_dot(graphics, small_dot);
+    const auto dots = render_layout::thought_dot_bounds(layout);
+    draw_thought_dot(graphics, as_rect(dots.large));
+    draw_thought_dot(graphics, as_rect(dots.small));
 
-    const float origin_x = std::round(visible_cloud.X + visible_cloud.Width * 0.10f);
-    const float origin_y = std::round(visible_cloud.Y + visible_cloud.Height * 0.32f);
+    const auto origin = render_layout::bulb_origin(layout);
     const Color glow = state.state == ReminderState::Error ? Color(255,226,62,55) : Color(255,83,169,236);
     const Color highlight = state.state == ReminderState::Error ? Color(255,255,174,154) : Color(255,202,232,255);
     SolidBrush outline(Color(255,68,43,25)), glow_brush(glow), highlight_brush(highlight), base(Color(255,91,78,70));
-    auto cell=[&](SolidBrush& b,int x,int y,int w,int h){graphics.FillRectangle(&b,origin_x+x*2.5f,origin_y+y*2.5f,w*2.5f,h*2.5f);};
+    auto cell=[&](SolidBrush& b,int x,int y,int w,int h){
+        graphics.FillRectangle(&b, static_cast<REAL>(origin.x + x * 2.5),
+                               static_cast<REAL>(origin.y + y * 2.5),
+                               static_cast<REAL>(w * 2.5), static_cast<REAL>(h * 2.5));
+    };
     cell(outline,6,0,1,2);cell(outline,2,2,1,1);cell(outline,10,2,1,1);cell(outline,0,6,2,1);cell(outline,11,6,2,1);
     for(const auto& row:std::array<std::array<int,3>,11>{{{3,4,5},{4,3,7},{5,2,9},{6,2,9},{7,2,9},{8,3,7},{9,4,5},{10,5,3},{11,4,5},{12,4,5},{13,5,3}}})cell(outline,row[1],row[0],row[2],1);
     cell(glow_brush,4,4,5,1);cell(glow_brush,3,5,7,3);cell(glow_brush,4,8,5,1);cell(glow_brush,5,9,3,1);cell(highlight_brush,4,4,2,1);cell(highlight_brush,3,5,2,2);cell(outline,5,7,1,2);cell(outline,7,7,1,2);cell(outline,6,9,1,1);cell(base,5,11,3,2);cell(outline,5,13,3,1);
     draw_text(graphics, state, 1.0);
 }
-
 void Renderer::draw_text(Graphics& graphics, const RenderState& state, double /*scale*/) {
-    const auto cloud = bubble_bounds(state);
+    const auto layout = layout_state(state);
     const auto selected_index = std::clamp(state.selected_task_index, 0, std::max(0, static_cast<int>(state.progress_labels.size()) - 1));
     std::optional<std::string_view> progress;
     if (state.state == ReminderState::Busy && selected_index < static_cast<int>(state.progress_labels.size()) && state.progress_labels[static_cast<std::size_t>(selected_index)]) progress = *state.progress_labels[static_cast<std::size_t>(selected_index)];
@@ -448,27 +312,29 @@ void Renderer::draw_text(Graphics& graphics, const RenderState& state, double /*
     FontFamily family(L"Segoe UI"); Font header_font(&family,12.5f,FontStyleBold,UnitPixel); Font body_font(&family,11.5f,FontStyleRegular,UnitPixel);
     SolidBrush header_brush(header_color(state.state)), body_brush(Color(255,45,60,78));
     StringFormat hf;hf.SetAlignment(StringAlignmentCenter);hf.SetLineAlignment(StringAlignmentCenter);
-    const RectF hr(cloud.X+cloud.Width*.26f,cloud.Y+cloud.Height*.10f,cloud.Width*.52f,cloud.Height*.20f);
-    const auto hw=wide(header);graphics.DrawString(hw.c_str(),-1,&header_font,hr,&hf,&header_brush);
+    const auto header_rect = as_rect(render_layout::header_bounds(layout));
+    const auto hw=wide(header);graphics.DrawString(hw.c_str(),-1,&header_font,header_rect,&hf,&header_brush);
     StringFormat bf;bf.SetAlignment(StringAlignmentNear);bf.SetLineAlignment(StringAlignmentNear);bf.SetTrimming(StringTrimmingNone);bf.SetFormatFlags(StringFormatFlagsLineLimit);
-    const RectF br(cloud.X+cloud.Width*.30f,cloud.Y+cloud.Height*.34f,156,45);Region old;graphics.GetClip(&old);graphics.SetClip(br,CombineModeIntersect);
-    const auto bw=wide(body);graphics.DrawString(bw.c_str(),-1,&body_font,RectF(br.X,br.Y-static_cast<REAL>(state.scroll_offset),br.Width,1000),&bf,&body_brush);graphics.SetClip(&old);
+    const auto body_rect = as_rect(render_layout::body_bounds(layout));
+    Region old;graphics.GetClip(&old);graphics.SetClip(body_rect,CombineModeIntersect);
+    const auto bw=wide(body);graphics.DrawString(bw.c_str(),-1,&body_font,
+        RectF(body_rect.X,body_rect.Y-static_cast<REAL>(state.scroll_offset),body_rect.Width,1000),&bf,&body_brush);
+    graphics.SetClip(&old);
 }
-
 void Renderer::draw_pet(Graphics& graphics, const RenderState& state, double /*scale*/) {
     const auto previous_interpolation = graphics.GetInterpolationMode();
     graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
     if (state.docked) {
         const auto index=app_logic::select_dock_sprite_index(state.dock_edge,state.state,state.animation_tick);auto& bitmap=dock_bitmap(index);
         if(!bitmap){graphics.SetInterpolationMode(previous_interpolation);return;}
-        const float shown=smooth_step(state.dock_visibility),hidden=kDockSize*(1-shown);const float x=state.dock_edge==DockEdge::Left?-hidden:LogicalWidth-kDockSize+hidden;const float y=state.bubble_below?4.0f:LogicalHeight-kDockSize-7.0f;
-        graphics.DrawImage(bitmap.get(),RectF(x,y,kDockSize,kDockSize));
+        const auto destination = as_rect(render_layout::dock_pet_bounds(layout_state(state)));
+        graphics.DrawImage(bitmap.get(), destination);
         graphics.SetInterpolationMode(previous_interpolation);
         return;
     }
     const auto row=app_logic::select_floating_sprite_row(state.state);const auto frame=app_logic::select_floating_frame(state.state,state.animation_tick);auto& bitmap=floating_bitmap(row,frame);
     if(!bitmap){graphics.SetInterpolationMode(previous_interpolation);return;}
-    const auto dest=floating_destination(state,row,frame);
+    const auto dest=as_rect(render_layout::floating_pet_bounds(layout_state(state)));
     if(state.mirror){graphics.TranslateTransform(dest.X+dest.Width/2,0);graphics.ScaleTransform(-1,1);graphics.TranslateTransform(-(dest.X+dest.Width/2),0);}
     graphics.DrawImage(bitmap.get(),dest);
     if(state.mirror){graphics.TranslateTransform(dest.X+dest.Width/2,0);graphics.ScaleTransform(-1,1);graphics.TranslateTransform(-(dest.X+dest.Width/2),0);}
@@ -495,16 +361,21 @@ bool Renderer::save_png(const std::filesystem::path& path, std::string* error) {
         if (error) *error = "找不到 PNG 编码器";
         return false;
     }
-    auto* bitmap = Bitmap::FromHBITMAP(memory_bitmap_, nullptr);
-    if (!bitmap || bitmap->GetLastStatus() != Ok) {
-        delete bitmap;
+    if (!dib_bits_ || pixel_width_ <= 0 || pixel_height_ <= 0) {
+        if (error) *error = "无法创建预览位图";
+        return false;
+    }
+    // FromHBITMAP drops the alpha channel of a DIB section. Wrap the existing
+    // premultiplied BGRA pixels directly so Windows preview artifacts retain
+    // the same transparent canvas as the AppKit renderer.
+    Bitmap bitmap(pixel_width_, pixel_height_, pixel_width_ * 4, PixelFormat32bppPARGB,
+                  static_cast<BYTE*>(dib_bits_));
+    if (bitmap.GetLastStatus() != Ok) {
         if (error) *error = "无法创建预览位图";
         return false;
     }
     std::filesystem::create_directories(path.parent_path());
-    const auto status = bitmap->Save(path.c_str(), &clsid, nullptr);
-    delete bitmap;
-    if (status != Ok) {
+    if (bitmap.Save(path.c_str(), &clsid, nullptr) != Ok) {
         if (error) *error = "保存 PNG 预览失败";
         return false;
     }
@@ -530,7 +401,8 @@ bool Renderer::validate(std::string* error) {
         }
     }
     auto cloud = load_bitmap(IDR_CLOUD_BUBBLE);
-    if (!cloud || cloud->GetWidth() != 2122 || cloud->GetHeight() != 734) {
+    if (!cloud || cloud->GetWidth() != render_layout::cloud_bitmap_width ||
+        cloud->GetHeight() != render_layout::cloud_bitmap_height) {
         if (error) *error = "云朵资源缺失或尺寸错误";
         return false;
     }

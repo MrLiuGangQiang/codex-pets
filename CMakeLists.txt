@@ -27,6 +27,8 @@ add_library(codexpets_core STATIC
     src/core/json.cpp
     src/core/paths.cpp
     src/core/platform_text.cpp
+    src/core/presentation.cpp
+    src/core/render_layout.cpp
     src/core/session_monitor.cpp
     src/core/settings.cpp
     src/core/visual_state.cpp

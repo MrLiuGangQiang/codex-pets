@@ -37,6 +37,25 @@ jobs:
       - name: Build, test, validate, and package
         shell: pwsh
         run: ./package.ps1 -RuntimeIdentifier ${{ matrix.rid }} -Toolchain msvc
+      - name: Render Windows preview images
+        shell: pwsh
+        run: |
+          $previewDir = "artifacts/windows-preview-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path $previewDir | Out-Null
+          $buildDir = "build/native-windows-${{ matrix.arch }}-msvc"
+          $exe = Get-ChildItem -LiteralPath $buildDir -Recurse -File -Filter 'CodeXPets.exe' |
+            Where-Object { $_.FullName -notmatch '[\\/]CMakeFiles[\\/]' } |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          if (-not $exe) { throw "Missing CodeXPets executable in $buildDir" }
+          $process = Start-Process -FilePath $exe.FullName -ArgumentList @('--preview', $previewDir) `
+            -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodeXPets-windows-preview-${{ matrix.arch }}
+          path: artifacts/windows-preview-${{ matrix.arch }}/*.png
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
           name: CodeXPets-${{ matrix.rid }}
@@ -69,6 +88,17 @@ jobs:
           uname -a
       - name: Build, test, sign, and package
         run: bash scripts/build-macos.sh "${{ matrix.rid }}"
+      - name: Render macOS preview images
+        run: |
+          preview_dir="artifacts/macos-preview-${{ matrix.arch }}"
+          mkdir -p "$preview_dir"
+          "build/macos-${{ matrix.arch }}/CodeXPets.app/Contents/MacOS/CodeXPets" --preview "$preview_dir"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodeXPets-macos-preview-${{ matrix.arch }}
+          path: artifacts/macos-preview-${{ matrix.arch }}/*.png
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
           name: CodeXPets-macos-${{ matrix.arch }}

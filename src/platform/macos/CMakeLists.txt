@@ -32,9 +32,13 @@ add_custom_command(TARGET CodeXPets POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_SOURCE_DIR}/assets/audio"
             "$<TARGET_BUNDLE_DIR:CodeXPets>/Contents/Resources/audio"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/assets/cloud"
+    COMMAND ${CMAKE_COMMAND} -E rm -rf
             "$<TARGET_BUNDLE_DIR:CodeXPets>/Contents/Resources/cloud"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_BUNDLE_DIR:CodeXPets>/Contents/Resources/cloud"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/assets/cloud/cloud-bubble-540.png"
+            "$<TARGET_BUNDLE_DIR:CodeXPets>/Contents/Resources/cloud/cloud-bubble-540.png"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_SOURCE_DIR}/assets/dock"
             "$<TARGET_BUNDLE_DIR:CodeXPets>/Contents/Resources/dock"
