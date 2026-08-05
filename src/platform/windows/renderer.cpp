@@ -286,7 +286,7 @@ void Renderer::draw_cloud(Graphics& graphics, const RenderState& state, double /
 
     const auto dots = render_layout::thought_dot_bounds(layout);
     draw_thought_dot(graphics, as_rect(dots.large));
-    draw_thought_dot(graphics, as_rect(dots.small));
+    draw_thought_dot(graphics, as_rect(dots.secondary));
 
     const auto origin = render_layout::bulb_origin(layout);
     const Color glow = state.state == ReminderState::Error ? Color(255,226,62,55) : Color(255,83,169,236);

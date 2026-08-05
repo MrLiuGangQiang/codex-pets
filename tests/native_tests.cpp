@@ -36,6 +36,8 @@ struct TestFailure : std::runtime_error { using std::runtime_error::runtime_erro
 #define CHECK_EQ(expected, actual) do { const auto _e = (expected); const auto _a = (actual); if (!(_e == _a)) throw TestFailure(std::string("CHECK_EQ failed at line ") + std::to_string(__LINE__)); } while (false)
 #define CHECK_NEAR(expected, actual) do { const double _e = static_cast<double>(expected); const double _a = static_cast<double>(actual); if (std::abs(_e - _a) > 1e-6) throw TestFailure(std::string("CHECK_NEAR failed at line ") + std::to_string(__LINE__)); } while (false)
 
+static_assert(monitor_pending_event_limit == std::size_t{64});
+
 std::filesystem::path unique_temp(std::string_view prefix) {
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
 #ifdef _WIN32
@@ -101,7 +103,6 @@ void set_environment(std::string_view name, const std::optional<std::string>& va
 }
 
 void test_app_logic() {
-    CHECK_EQ(std::size_t(64), monitor_pending_event_limit);
     CHECK_EQ(ReminderState::Error,
              app_logic::select_visual_state(1, true, false, ReminderState::Error));
     CHECK_EQ(ReminderState::Completed,
@@ -266,9 +267,9 @@ void test_render_layout_contract() {
     const auto dock_dots = thought_dot_bounds(left_above);
     CHECK_NEAR(17.0, floating_dots.large.width);
     CHECK_NEAR(15.0, floating_dots.large.height);
-    CHECK_NEAR(11.0, floating_dots.small.width);
-    CHECK_NEAR(10.0, floating_dots.small.height);
-    CHECK(dock_dots.large.width > dock_dots.small.width);
+    CHECK_NEAR(11.0, floating_dots.secondary.width);
+    CHECK_NEAR(10.0, floating_dots.secondary.height);
+    CHECK(dock_dots.large.width > dock_dots.secondary.width);
     CHECK(dock_dots.large.y > left_bubble.y);
 }
 

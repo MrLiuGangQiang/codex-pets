@@ -414,7 +414,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 
     const auto dotBounds = render_layout::thought_dot_bounds(layout);
     const NSRect largeDot = NsRect(dotBounds.large);
-    const NSRect smallDot = NsRect(dotBounds.small);
+    const NSRect smallDot = NsRect(dotBounds.secondary);
     auto drawDot = [&](NSRect bounds, CGFloat outerNotch, CGFloat innerNotch) {
         NSBezierPath* outer = [NSBezierPath bezierPath];
         [outer moveToPoint:NSMakePoint(NSMinX(bounds) + outerNotch, NSMinY(bounds))];
@@ -491,7 +491,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
         : state.state == ReminderState::Error ? 3
         : state.state == ReminderState::Interrupted ? 4 : 0;
     const NSRect headerRect = NsRect(render_layout::header_bounds(layout));
-    const NSDictionary* headerAttributes = _headerAttributes[static_cast<std::size_t>(headerIndex)];
+    NSDictionary* headerAttributes = _headerAttributes[static_cast<std::size_t>(headerIndex)];
     const NSSize headerSize = [Ns(header) sizeWithAttributes:headerAttributes];
     const CGFloat headerY = NSMinY(headerRect) + std::max<CGFloat>(0, (NSHeight(headerRect) - headerSize.height) / 2);
     [Ns(header) drawInRect:NSMakeRect(NSMinX(headerRect), headerY, NSWidth(headerRect), headerSize.height)
@@ -656,8 +656,8 @@ struct PendingMacUpdate {
     std::uint64_t _monitorGeneration;
     bool _hasSnapshot;
     bool _expressionDemo;
-    int _expressionDemoIndex{-1};
-    Clock::time_point _expressionDemoNext{Clock::time_point::min()};
+    int _expressionDemoIndex;
+    Clock::time_point _expressionDemoNext;
     bool _terminating;
 }
 - (void)loadOrMigrateSettings;
@@ -741,6 +741,8 @@ struct PendingMacUpdate {
         _lastTick = Clock::now();
         _scrollHold = 1.9;
         _lastMouseReception = -1;
+        _expressionDemoIndex = -1;
+        _expressionDemoNext = Clock::time_point::min();
     }
     return self;
 }
@@ -1331,7 +1333,7 @@ struct PendingMacUpdate {
     _dockScreenIdentifier = ScreenIdentifier(screen);
     const NSRect work = screen.visibleFrame;
     _dockCoordinate = std::clamp(_dockCoordinate, NSMinY(work), NSMaxY(work));
-    const BOOL bubbleBelow = _dockCoordinate >
+    const bool bubbleBelow = _dockCoordinate >
         NSMaxY(work) - render_layout::dock_bubble_switch_margin;
     const render_layout::State layout{_renderState.state, _dockEdge, true, bubbleBelow,
                                       false, _dockVisibility, _animationTick};
@@ -1382,7 +1384,7 @@ struct PendingMacUpdate {
         _dockCoordinate, 1.0, _dockVisibility <= 0.01, _settings.dock_hover_height);
     if (trigger.contains(PointD{cursor.x, cursor.y})) return YES;
 
-    const BOOL bubbleBelow = _dockCoordinate >
+    const bool bubbleBelow = _dockCoordinate >
         NSMaxY(work) - render_layout::dock_bubble_switch_margin;
     const render_layout::State layout{_renderState.state, _dockEdge, true, bubbleBelow,
                                       false, _dockVisibility, _animationTick};

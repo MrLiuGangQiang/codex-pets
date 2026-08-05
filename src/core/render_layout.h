@@ -29,7 +29,7 @@ struct State {
 
 struct ThoughtDots {
     RectD large;
-    RectD small;
+    RectD secondary;
 };
 
 [[nodiscard]] RectD bubble_bounds(const State& state) noexcept;
