@@ -88,6 +88,19 @@ void append(const std::filesystem::path& path, std::string_view content) {
     stream.flush();
 }
 
+std::string utc_timestamp(SystemClock::time_point value) {
+    const auto raw = SystemClock::to_time_t(value);
+    std::tm utc{};
+#ifdef _WIN32
+    gmtime_s(&utc, &raw);
+#else
+    gmtime_r(&raw, &utc);
+#endif
+    char timestamp[40]{};
+    std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    return timestamp;
+}
+
 void set_environment(std::string_view name, const std::optional<std::string>& value) {
 #ifdef _WIN32
     const auto key = utf8_to_wide(name);
@@ -211,6 +224,11 @@ void test_render_layout_contract() {
     CHECK_NEAR(151.3269230769231, floating_pet.y);
     CHECK_NEAR(floating_pet_width, floating_pet.width);
     CHECK_NEAR(floating_pet_height, floating_pet.height);
+    const auto floating_interaction = pet_interaction_bounds(floating);
+    CHECK_NEAR(floating_pet.x, floating_interaction.x);
+    CHECK_NEAR(floating_pet.y, floating_interaction.y);
+    CHECK_NEAR(floating_pet.width, floating_interaction.width);
+    CHECK_NEAR(floating_pet.height, floating_interaction.height);
 
     const auto header = header_bounds(floating);
     const auto body = body_bounds(floating);
@@ -250,6 +268,11 @@ void test_render_layout_contract() {
     CHECK_NEAR(4.0, below_pet.y);
     CHECK_NEAR(dock_pet_size, left_pet.width);
     CHECK_NEAR(dock_pet_size, left_pet.height);
+    const auto dock_interaction = pet_interaction_bounds(left_above);
+    CHECK_NEAR(left_pet.x, dock_interaction.x);
+    CHECK_NEAR(left_pet.y, dock_interaction.y);
+    CHECK_NEAR(left_pet.width, dock_interaction.width);
+    CHECK_NEAR(left_pet.height, dock_interaction.height);
     CHECK_NEAR(201.0, dock_pet_center_y(left_above));
     CHECK_NEAR(56.0, dock_pet_center_y(left_below));
 
@@ -578,6 +601,103 @@ void test_session_monitor_v2_aliases_and_non_fatal_error() {
     CHECK(std::find(nonfatal_events.begin(), nonfatal_events.end(), MonitorEventKind::TaskCompleted) != nonfatal_events.end());
 }
 
+void test_pending_tool_call_prevents_false_stale_and_new_turn_supersedes_old() {
+    TempDirectory root("CodeXPetsPendingTool_");
+    const auto pending_timestamp = utc_timestamp(SystemClock::now() - std::chrono::minutes(20));
+    const auto file = create_session(root.path, "rollout-pending-tool.jsonl",
+        std::string("{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"OLD\"}}\n") +
+        "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Long running task\"}}\n" +
+        "{\"timestamp\":\"" + pending_timestamp +
+        "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"wait_agent\",\"arguments\":\"{}\",\"call_id\":\"call-wait\"}}\n");
+    std::filesystem::last_write_time(file,
+        std::filesystem::file_time_type::clock::now() - std::chrono::minutes(30));
+
+    CodexSessionMonitor monitor(root.path);
+    CHECK_EQ(1, monitor.active_count());
+    monitor.poll();
+    CHECK_EQ(1, monitor.active_count());
+    CHECK_EQ(std::string("Long running task"), monitor.primary_active_title());
+
+    append(file,
+        "{\"timestamp\":\"2026-08-01T00:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call-wait\",\"output\":\"done\"}}\n"
+        "{\"timestamp\":\"2026-08-01T00:00:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"NEW\"}}\n"
+        "{\"timestamp\":\"2026-08-01T00:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Replacement task\"}}\n");
+    monitor.poll();
+    CHECK_EQ(1, monitor.active_count());
+    CHECK_EQ(std::string("Replacement task"), monitor.primary_active_title());
+
+    TempDirectory stale_root("CodeXPetsActuallyStale_");
+    const auto stale_file = create_session(stale_root.path, "rollout-stale.jsonl",
+        "{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"STALE\"}}\n");
+    std::filesystem::last_write_time(stale_file,
+        std::filesystem::file_time_type::clock::now() - std::chrono::minutes(30));
+    CodexSessionMonitor stale_monitor(stale_root.path);
+    CHECK_EQ(1, stale_monitor.active_count());
+    stale_monitor.poll();
+    CHECK_EQ(0, stale_monitor.active_count());
+
+    TempDirectory expired_pending_root("CodeXPetsExpiredPending_");
+    const auto expired_timestamp = utc_timestamp(SystemClock::now() - std::chrono::hours(7));
+    const auto expired_file = create_session(expired_pending_root.path, "rollout-expired-pending.jsonl",
+        std::string("{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"EXPIRED\"}}\n") +
+        "{\"timestamp\":\"" + expired_timestamp +
+        "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"shell_command\",\"arguments\":\"{}\",\"call_id\":\"call-expired\"}}\n");
+    std::filesystem::last_write_time(expired_file,
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(8));
+    CodexSessionMonitor expired_pending_monitor(expired_pending_root.path);
+    CHECK_EQ(1, expired_pending_monitor.active_count());
+    expired_pending_monitor.poll();
+    CHECK_EQ(0, expired_pending_monitor.active_count());
+}
+
+void test_long_silent_reasoning_kept_while_session_writer_is_alive() {
+    TempDirectory root("CodeXPetsLongReasoning_");
+    const auto silent_timestamp = utc_timestamp(SystemClock::now() - std::chrono::minutes(27));
+    const auto file = create_session(root.path, "rollout-long-reasoning.jsonl",
+        std::string("{\"timestamp\":\"") + silent_timestamp +
+        "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"LONG\"}}\n" +
+        "{\"timestamp\":\"" + silent_timestamp +
+        "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Long silent reasoning\"}}\n" +
+        "{\"timestamp\":\"" + silent_timestamp +
+        "\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"summary\":[]}}\n");
+    const auto old_write = std::filesystem::file_time_type::clock::now() - std::chrono::minutes(30);
+    std::filesystem::last_write_time(file, old_write);
+
+    CodexSessionMonitor monitor(root.path);
+    CHECK_EQ(1, monitor.active_count());
+    std::ofstream writer(file, std::ios::binary | std::ios::app);
+    CHECK(writer.good());
+    std::filesystem::last_write_time(file, old_write);
+    monitor.poll();
+    CHECK_EQ(1, monitor.active_count());
+    CHECK_EQ(std::string("Long silent reasoning"), monitor.primary_active_title());
+
+    writer.close();
+    std::filesystem::last_write_time(file, old_write);
+    CodexSessionMonitor ended_monitor(root.path);
+    CHECK_EQ(1, ended_monitor.active_count());
+    ended_monitor.poll();
+    CHECK_EQ(0, ended_monitor.active_count());
+}
+
+void test_oversized_json_line_does_not_poison_tail() {
+    TempDirectory root("CodeXPetsOversizedLine_");
+    const auto file = create_session(root.path, "rollout-oversized-line.jsonl",
+        "{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"BIG\"}}\n"
+        "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Large output\"}}\n");
+    CodexSessionMonitor monitor(root.path);
+    (void)monitor.take_events();
+
+    std::string oversized = "{\"timestamp\":\"2026-08-01T00:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"summary\":\"";
+    oversized.append(300 * 1024, 'x');
+    oversized += "\"}}\n";
+    oversized += "{\"timestamp\":\"2026-08-01T00:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"BIG\"}}\n";
+    append(file, oversized);
+    monitor.poll();
+    CHECK_EQ(0, monitor.active_count());
+    CHECK_EQ(std::string("Large output"), monitor.last_completed_title());
+}
+
 void test_open_file_activity_and_stale_rule() {
     TempDirectory root("CodeXPetsOpen_");
     const auto recent = std::chrono::system_clock::now() - std::chrono::minutes(1);
@@ -609,6 +729,8 @@ void test_open_file_activity_and_stale_rule() {
                                               now - std::chrono::minutes(20), now, 600));
     CHECK(!CodexSessionMonitor::is_turn_stale(now - std::chrono::minutes(20),
                                               now - std::chrono::minutes(1), now, 600));
+    CHECK(!CodexSessionMonitor::is_turn_stale(now - std::chrono::minutes(20),
+                                              now - std::chrono::minutes(20), now, 600, true));
 }
 
 void test_json_parser() {
@@ -634,6 +756,9 @@ int main() {
         {"plan_update_focus_survives_later_event", test_plan_update_focus_survives_later_event},
         {"session_monitor_error_object", test_session_monitor_error_object},
         {"session_monitor_v2_aliases_and_non_fatal_error", test_session_monitor_v2_aliases_and_non_fatal_error},
+        {"pending_tool_call_and_superseded_turn", test_pending_tool_call_prevents_false_stale_and_new_turn_supersedes_old},
+        {"long_silent_reasoning_writer_liveness", test_long_silent_reasoning_kept_while_session_writer_is_alive},
+        {"oversized_json_line_tail_recovery", test_oversized_json_line_does_not_poison_tail},
         {"open_file_activity_and_stale_rule", test_open_file_activity_and_stale_rule},
         {"json_parser", test_json_parser},
     };

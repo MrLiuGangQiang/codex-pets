@@ -21,12 +21,28 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <libproc.h>
+#endif
+
 namespace codexpets {
 namespace {
 
 constexpr std::size_t kReadBufferSize = 64 * 1024;
 constexpr std::size_t kMaximumBufferedLineBytes = 256 * 1024;
+constexpr std::size_t kRetainedLineBufferBytes = 16 * 1024;
+constexpr std::size_t kInitialLineBufferBytes = 512;
 constexpr std::size_t kMaximumTrackedFiles = 40;
+constexpr std::size_t kMaximumPendingToolCalls = 64;
+constexpr auto kMaximumPendingToolCallAge = std::chrono::hours(6);
 constexpr auto kFullDiscoveryInterval = std::chrono::seconds(600);
 constexpr auto kFastDiscoveryInterval = std::chrono::milliseconds(1200);
 constexpr auto kStaleTurnCheckInterval = std::chrono::seconds(30);
@@ -63,6 +79,43 @@ struct PathEqual {
 #endif
     }
 };
+
+bool session_file_may_have_live_writer(const std::filesystem::path& path) noexcept {
+#ifdef _WIN32
+    const auto handle = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(handle);
+        return false;
+    }
+    const auto error = GetLastError();
+    return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;
+#elif defined(__APPLE__)
+    try {
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(path, error) || error) return false;
+        auto target = std::filesystem::weakly_canonical(path, error);
+        if (error) target = path.lexically_normal();
+        const auto target_text = target.string();
+        const int required_bytes = proc_listpidspath(
+            PROC_ALL_PIDS, 0, target_text.c_str(), PROC_LISTPIDSPATH_EXCLUDE_EVTONLY,
+            nullptr, 0);
+        if (required_bytes < 0) return true;
+        if (required_bytes == 0) return false;
+        std::vector<pid_t> pids(static_cast<std::size_t>(required_bytes) / sizeof(pid_t) + 8);
+        const int listed_bytes = proc_listpidspath(
+            PROC_ALL_PIDS, 0, target_text.c_str(), PROC_LISTPIDSPATH_EXCLUDE_EVTONLY,
+            pids.data(), static_cast<int>(pids.size() * sizeof(pid_t)));
+        return listed_bytes != 0;
+    } catch (...) {
+        // Failure to inspect process handles must not make a real long turn look idle.
+        return true;
+    }
+#else
+    (void)path;
+    return false;
+#endif
+}
 
 SystemClock::time_point file_time_to_system(std::filesystem::file_time_type value) noexcept {
     return SystemClock::now() + std::chrono::duration_cast<SystemClock::duration>(
@@ -212,12 +265,22 @@ struct CodexSessionMonitor::Impl {
             last_write = safe_last_write(path);
             last_activity = last_write == SystemClock::time_point::min()
                 ? SystemClock::now() : last_write;
-            line_buffer.reserve(512);
+            line_buffer.reserve(kInitialLineBufferBytes);
+        }
+
+        void clear_line_buffer() {
+            if (line_buffer.capacity() <= kRetainedLineBufferBytes) {
+                line_buffer.clear();
+                return;
+            }
+            std::string replacement;
+            replacement.reserve(kInitialLineBufferBytes);
+            line_buffer.swap(replacement);
         }
 
         void reset() {
             position = 0;
-            line_buffer.clear();
+            clear_line_buffer();
             last_write = SystemClock::time_point::min();
             last_activity = SystemClock::now();
             skip_current_line = false;
@@ -232,6 +295,7 @@ struct CodexSessionMonitor::Impl {
         SystemClock::time_point started{};
         std::string title;
         std::optional<Plan> plan;
+        std::unordered_map<std::string, SystemClock::time_point> pending_tool_calls;
         SystemClock::time_point last_activity{SystemClock::time_point::min()};
     };
 
@@ -243,6 +307,8 @@ struct CodexSessionMonitor::Impl {
 
     std::filesystem::path sessions_root;
     std::unordered_map<std::filesystem::path, TailState, PathHash, PathEqual> files;
+    std::unordered_map<std::filesystem::path, std::filesystem::file_time_type, PathHash, PathEqual>
+        discovery_directory_writes;
     std::unordered_map<std::string, ActiveTurn> active_turns;
     std::unordered_map<std::filesystem::path, Plan, PathHash, PathEqual> plans_by_file;
     std::vector<MonitorEventKind> events;
@@ -277,6 +343,60 @@ struct CodexSessionMonitor::Impl {
     }
 
     void emit(MonitorEventKind event) { events.push_back(event); }
+
+    ActiveTurn* latest_turn_for_file(const std::filesystem::path& path) noexcept {
+        ActiveTurn* result = nullptr;
+        for (auto& [_, turn] : active_turns) {
+            if (PathEqual{}(turn.source_path, path) &&
+                (!result || turn.start_sequence > result->start_sequence)) result = &turn;
+        }
+        return result;
+    }
+
+    static std::string compact_json_string(std::string_view line, std::string_view marker) {
+        const auto start = line.find(marker);
+        if (start == std::string_view::npos) return {};
+        const auto value_start = start + marker.size();
+        const auto value_end = line.find('"', value_start);
+        if (value_end == std::string_view::npos) return {};
+        return std::string(line.substr(value_start, value_end - value_start));
+    }
+
+    void track_tool_call_lifecycle(std::string_view line,
+                                   const std::filesystem::path& source_path) {
+        if (line.find("\"type\":\"response_item\"") == std::string_view::npos) return;
+        const auto payload_start = line.find("\"payload\":{");
+        if (payload_start == std::string_view::npos) return;
+        const auto payload = line.substr(payload_start);
+        const auto payload_type = compact_json_string(payload, "\"type\":\"");
+        const bool started = payload_type == "function_call";
+        const bool finished = payload_type == "function_call_output";
+        if (!started && !finished) return;
+        const auto call_id = compact_json_string(payload, "\"call_id\":\"");
+        if (call_id.empty()) return;
+        if (finished) {
+            for (auto& [_, turn] : active_turns) turn.pending_tool_calls.erase(call_id);
+            return;
+        }
+        if (auto* turn = latest_turn_for_file(source_path);
+            turn && (turn->pending_tool_calls.contains(call_id) ||
+                     turn->pending_tool_calls.size() < kMaximumPendingToolCalls)) {
+            const auto timestamp = compact_json_string(line, "\"timestamp\":\"");
+            turn->pending_tool_calls.insert_or_assign(
+                call_id, parse_timestamp(timestamp).value_or(SystemClock::now()));
+        }
+    }
+
+    void remove_superseded_turns(const std::filesystem::path& source_path,
+                                 std::string_view current_turn_id) {
+        for (auto it = active_turns.begin(); it != active_turns.end();) {
+            if (it->first != current_turn_id && PathEqual{}(it->second.source_path, source_path)) {
+                it = active_turns.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 
     void record_event(std::string event_type, const std::filesystem::path& source_path) {
         last_event_type = std::move(event_type);
@@ -350,10 +470,24 @@ struct CodexSessionMonitor::Impl {
         } else {
             for (int days_ago = 0; days_ago <= 2; ++days_ago) {
                 const auto folder = day_directory(sessions_root, days_ago);
+                std::error_code write_error;
+                const auto directory_write = std::filesystem::last_write_time(folder, write_error);
+                const auto cached = discovery_directory_writes.find(folder);
+                if (!write_error && cached != discovery_directory_writes.end() &&
+                    cached->second == directory_write) {
+                    continue;
+                }
+                if (write_error) discovery_directory_writes.erase(folder);
+
                 std::error_code error;
                 std::filesystem::directory_iterator begin(
                     folder, std::filesystem::directory_options::skip_permission_denied, error), end;
-                if (!error) enumerate_candidates(begin, end, candidates);
+                if (!error) {
+                    enumerate_candidates(begin, end, candidates);
+                    if (!write_error) {
+                        discovery_directory_writes.insert_or_assign(folder, directory_write);
+                    }
+                }
             }
         }
 
@@ -395,7 +529,8 @@ struct CodexSessionMonitor::Impl {
     void read_new_bytes(TailState& state, bool suppress_notifications) {
         try {
             std::error_code error;
-            if (!std::filesystem::is_regular_file(state.path, error) || error) return;
+            // Tracked entries were already validated during discovery. file_size() also
+            // reports deletion/type errors, avoiding an extra stat call on every poll.
             const auto length = std::filesystem::file_size(state.path, error);
             if (error) return;
             const auto write = safe_last_write(state.path);
@@ -450,11 +585,11 @@ struct CodexSessionMonitor::Impl {
                 if (!state.event_handled) {
                     if (try_process_event(state.line_buffer, state.path, suppress_notifications)) {
                         state.event_handled = true;
-                        state.line_buffer.clear();
+                        state.clear_line_buffer();
                         if (!has_newline) state.skip_current_line = true;
                     } else if (state.line_buffer.size() >= kMaximumBufferedLineBytes) {
                         state.skip_current_line = true;
-                        state.line_buffer.clear();
+                        state.clear_line_buffer();
                     }
                 }
             }
@@ -462,7 +597,7 @@ struct CodexSessionMonitor::Impl {
                 if (!state.event_handled && !state.skip_current_line && !state.line_buffer.empty()) {
                     try_process_event(state.line_buffer, state.path, suppress_notifications);
                 }
-                state.line_buffer.clear();
+                state.clear_line_buffer();
                 state.skip_current_line = false;
                 state.event_handled = false;
                 offset = newline + 1;
@@ -474,6 +609,7 @@ struct CodexSessionMonitor::Impl {
                            bool suppress_notifications) {
         const auto line = normalize_json_line(raw);
         if (line.empty()) return false;
+        track_tool_call_lifecycle(line, source_path);
         if (try_process_plan_update(line, source_path, suppress_notifications)) return true;
         if (line.find("event_msg") == std::string_view::npos) {
             if (!complete_json(line)) return false;
@@ -517,6 +653,7 @@ struct CodexSessionMonitor::Impl {
 
         const auto before = active_turns.size();
         if (event_type == "task_started") {
+            remove_superseded_turns(source_path, turn_id);
             auto it = active_turns.find(turn_id);
             bool added = false;
             if (it == active_turns.end()) {
@@ -701,9 +838,16 @@ struct CodexSessionMonitor::Impl {
 
     void clear_stale_turns(SystemClock::time_point now) {
         std::vector<std::string> stale;
-        for (const auto& [id, turn] : active_turns) {
-            if (CodexSessionMonitor::is_turn_stale(turn.last_activity, safe_last_write(turn.source_path),
-                                                   now, kStaleTurnGraceSeconds)) stale.push_back(id);
+        const auto pending_cutoff = now - kMaximumPendingToolCallAge;
+        for (auto& [id, turn] : active_turns) {
+            for (auto it = turn.pending_tool_calls.begin(); it != turn.pending_tool_calls.end();) {
+                if (it->second < pending_cutoff) it = turn.pending_tool_calls.erase(it);
+                else ++it;
+            }
+            if (!CodexSessionMonitor::is_turn_stale(
+                    turn.last_activity, safe_last_write(turn.source_path), now,
+                    kStaleTurnGraceSeconds, !turn.pending_tool_calls.empty())) continue;
+            if (!session_file_may_have_live_writer(turn.source_path)) stale.push_back(id);
         }
         if (stale.empty()) return;
         for (const auto& id : stale) active_turns.erase(id);
@@ -826,8 +970,9 @@ void CodexSessionMonitor::report_unexpected_error(std::string_view operation, st
 bool CodexSessionMonitor::is_turn_stale(SystemClock::time_point last_activity,
                                         SystemClock::time_point file_write,
                                         SystemClock::time_point now,
-                                        int grace_seconds) noexcept {
-    if (grace_seconds <= 0) return false;
+                                        int grace_seconds,
+                                        bool has_pending_tool_call) noexcept {
+    if (grace_seconds <= 0 || has_pending_tool_call) return false;
     const auto cutoff = now - std::chrono::seconds(grace_seconds);
     return last_activity < cutoff && file_write < cutoff;
 }

@@ -95,6 +95,10 @@ RectD dock_pet_bounds(const State& state) noexcept {
     return {x, y, dock_pet_size, dock_pet_size};
 }
 
+RectD pet_interaction_bounds(const State& state) noexcept {
+    return state.docked ? dock_pet_bounds(state) : floating_pet_bounds(state);
+}
+
 RectD visible_pet_bounds(const State& state) noexcept {
     if (state.docked) {
         const int frame = app_logic::select_dock_sprite_index(state.dock_edge, state.reminder_state,

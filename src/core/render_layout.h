@@ -36,6 +36,7 @@ struct ThoughtDots {
 [[nodiscard]] RectD visible_cloud_bounds(const State& state) noexcept;
 [[nodiscard]] RectD floating_pet_bounds(const State& state) noexcept;
 [[nodiscard]] RectD dock_pet_bounds(const State& state) noexcept;
+[[nodiscard]] RectD pet_interaction_bounds(const State& state) noexcept;
 [[nodiscard]] RectD visible_pet_bounds(const State& state) noexcept;
 [[nodiscard]] ThoughtDots thought_dot_bounds(const State& state) noexcept;
 [[nodiscard]] PointD bulb_origin(const State& state) noexcept;

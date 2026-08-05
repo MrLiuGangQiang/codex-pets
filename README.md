@@ -1,6 +1,6 @@
 # CodeXPets
 
-CodeXPets 4.0.1 是一个面向 Codex 的**原生桌面宠物**。本版本将原来的 .NET/Avalonia/SkiaSharp 架构完全替换为轻量 C++20 核心和系统原生 UI：
+CodeXPets 4.0.2 是一个面向 Codex 的**原生桌面宠物**。本版本将原来的 .NET/Avalonia/SkiaSharp 架构完全替换为轻量 C++20 核心和系统原生 UI：
 
 - Windows：Win32 + GDI+
 - macOS：AppKit + Core Graphics
@@ -12,10 +12,10 @@ CodeXPets 4.0.1 是一个面向 Codex 的**原生桌面宠物**。本版本将�
 
 | 系统 | 架构 | 构建/发布目标 | 文件 |
 |---|---:|---|---|
-| Windows | x64 | `win-x64` | `CodeXPets-v4.0.1-win-x64.exe` / `.zip` |
-| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.0.1-win-arm64.exe` / `.zip` |
-| macOS | Intel | `osx-x64` | `CodeXPets-v4.0.1-macos-x64.zip` / `.dmg` |
-| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.0.1-macos-arm64.zip` / `.dmg` |
+| Windows | x64 | `win-x64` | `CodeXPets-v4.0.2-win-x64.exe` / `.zip` |
+| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.0.2-win-arm64.exe` / `.zip` |
+| macOS | Intel | `osx-x64` | `CodeXPets-v4.0.2-macos-x64.zip` / `.dmg` |
+| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.0.2-macos-arm64.zip` / `.dmg` |
 
 macOS 最低支持 macOS 13。Windows 版本是一个自包含原生 EXE；macOS 版本是标准 `CodeXPets.app`。两者都不要求用户安装 .NET、Electron、Qt 或其他附加运行时。
 

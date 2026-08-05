@@ -43,7 +43,8 @@ public:
     static bool is_turn_stale(SystemClock::time_point last_activity,
                               SystemClock::time_point file_write,
                               SystemClock::time_point now,
-                              int grace_seconds) noexcept;
+                              int grace_seconds,
+                              bool has_pending_tool_call = false) noexcept;
 
 private:
     struct Impl;

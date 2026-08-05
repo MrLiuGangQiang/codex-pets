@@ -3,6 +3,7 @@ target_link_libraries(CodeXPets PRIVATE
     codexpets_core
     "-framework AppKit"
     "-framework CoreGraphics"
+    "-framework ImageIO"
     "-framework ServiceManagement"
 )
 target_compile_options(CodeXPets PRIVATE

@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <ImageIO/ImageIO.h>
 #import <ServiceManagement/ServiceManagement.h>
 
 #include <unistd.h>
@@ -49,6 +50,40 @@ std::string Utf8(NSString* value) {
 
 NSString* ResourcePath(NSString* directory, NSString* name, NSString* extension) {
     return [[NSBundle mainBundle] pathForResource:name ofType:extension inDirectory:directory];
+}
+
+BOOL PngResourceHasPixelSize(NSString* directory, NSString* name, NSInteger expectedWidth,
+                             NSInteger expectedHeight) {
+    @autoreleasepool {
+        NSString* path = ResourcePath(directory, name, @"png");
+        if (!path) return NO;
+        NSURL* url = [NSURL fileURLWithPath:path isDirectory:NO];
+        CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, nullptr);
+        if (!source) return NO;
+        CFDictionaryRef rawProperties = CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr);
+        CFRelease(source);
+        if (!rawProperties) return NO;
+        NSNumber* width = (__bridge NSNumber*)CFDictionaryGetValue(
+            rawProperties, kCGImagePropertyPixelWidth);
+        NSNumber* height = (__bridge NSNumber*)CFDictionaryGetValue(
+            rawProperties, kCGImagePropertyPixelHeight);
+        const BOOL matches = width && height && width.integerValue == expectedWidth &&
+                             height.integerValue == expectedHeight;
+        CFRelease(rawProperties);
+        return matches;
+    }
+}
+
+void RemoveCachedImagesWithPrefix(NSMutableDictionary<NSString*, NSImage*>* cache,
+                                  NSString* prefix) {
+    NSArray<NSString*>* keys = [cache.allKeys copy];
+    for (NSString* key in keys) {
+        if ([key hasPrefix:prefix]) [cache removeObjectForKey:key];
+    }
+}
+
+void RemoveCachedImage(NSMutableDictionary<NSString*, NSImage*>* cache, NSString* key) {
+    [cache removeObjectForKey:key];
 }
 
 std::string StateName(ReminderState state) {
@@ -111,6 +146,18 @@ NSColor* HeaderColor(ReminderState state) {
 
 constexpr CGFloat kPetWindowWidth = static_cast<CGFloat>(render_layout::logical_width);
 constexpr CGFloat kPetWindowHeight = static_cast<CGFloat>(render_layout::logical_height);
+constexpr NSTimeInterval kUiTimerInterval = 0.10;
+constexpr NSTimeInterval kUiTimerTolerance = 0.025;
+
+int PetAnimationFrame(ReminderState state, DockEdge edge, int animation_tick) noexcept {
+    return edge == DockEdge::None
+        ? app_logic::select_floating_frame(state, animation_tick)
+        : app_logic::select_dock_sprite_index(edge, state, animation_tick);
+}
+
+int StatusAnimationFrame(ReminderState state, int animation_tick) noexcept {
+    return state == ReminderState::Busy ? std::abs(animation_tick / 2) % 8 : 0;
+}
 
 render_layout::State LayoutStateFor(const MacRenderState& state) noexcept {
     return {state.state, state.dock_edge, state.docked, state.bubble_below,
@@ -134,8 +181,8 @@ NSRect DockPetBounds(const MacRenderState& state, NSRect) {
     return NsRect(render_layout::dock_pet_bounds(LayoutStateFor(state)));
 }
 
-NSRect VisiblePetBounds(const MacRenderState& state, NSRect) {
-    return NsRect(render_layout::visible_pet_bounds(LayoutStateFor(state)));
+NSRect PetInteractionBounds(const MacRenderState& state, NSRect) {
+    return NsRect(render_layout::pet_interaction_bounds(LayoutStateFor(state)));
 }
 
 NSScreen* PrimaryScreen() {
@@ -258,6 +305,8 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 - (BOOL)savePreview:(const MacRenderState&)state toPath:(NSString*)path error:(NSString* __autoreleasing*)error;
 - (NSImage*)statusImageForState:(ReminderState)state frame:(int)frame;
 - (NSImage*)cloudImage;
+- (void)discardCloudImage;
+- (void)trimTransientImages;
 @end
 
 @implementation MacRenderer {
@@ -268,6 +317,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
     NSColor* _dotOutlineColor;
     int _floatingRow;
     int _dockSide;
+    int _dockPair;
 }
 
 - (instancetype)init {
@@ -302,6 +352,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
         _dotOutlineColor = [NSColor colorWithSRGBRed:42/255.0 green:50/255.0 blue:60/255.0 alpha:1];
         _floatingRow = -1;
         _dockSide = -1;
+        _dockPair = -1;
     }
     return self;
 }
@@ -312,8 +363,11 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
     if (image) return image;
     NSString* path = ResourcePath(directory, name, @"png");
     if (!path) return nil;
-    image = [[NSImage alloc] initWithContentsOfFile:path];
-    if (image) _cache[key] = image;
+    image = [[NSImage alloc] initByReferencingFile:path];
+    if (image) {
+        image.cacheMode = NSImageCacheNever;
+        _cache[key] = image;
+    }
     return image;
 }
 
@@ -322,10 +376,14 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 }
 
 - (NSImage*)floatingImageForState:(ReminderState)state frame:(int)frame {
+    if (_dockSide != -1) {
+        RemoveCachedImagesWithPrefix(_cache, @"dock/");
+        _dockSide = -1;
+        _dockPair = -1;
+    }
     const int row = app_logic::select_floating_sprite_row(state);
     if (_floatingRow != row) {
-        NSArray* keys = [_cache.allKeys copy];
-        for (NSString* key in keys) if ([key hasPrefix:@"floating/"]) [_cache removeObjectForKey:key];
+        RemoveCachedImagesWithPrefix(_cache, @"floating/");
         _floatingRow = row;
     }
     NSString* name = [NSString stringWithFormat:@"%s-%d", StateName(state).c_str(), std::clamp(frame, 0, 7)];
@@ -333,14 +391,17 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 }
 
 - (NSImage*)dockImage:(int)frame {
-    // app_logic::select_dock_sprite_index returns 0..9 for the left edge and
-    // 10..19 for the right edge. Keep all 20 shared dock frames available.
     frame = std::clamp(frame, 0, 19);
+    if (_floatingRow != -1) {
+        RemoveCachedImagesWithPrefix(_cache, @"floating/");
+        _floatingRow = -1;
+    }
     const int side = frame >= 10 ? 1 : 0;
-    if (_dockSide != side) {
-        NSArray* keys = [_cache.allKeys copy];
-        for (NSString* key in keys) if ([key hasPrefix:@"dock/"]) [_cache removeObjectForKey:key];
+    const int pair = (frame % 10) / 2;
+    if (_dockSide != side || _dockPair != pair) {
+        RemoveCachedImagesWithPrefix(_cache, @"dock/");
         _dockSide = side;
+        _dockPair = pair;
     }
     return [self imageInDirectory:@"dock" name:[NSString stringWithFormat:@"dock-%d", frame]];
 }
@@ -358,32 +419,31 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
         const char* state = row == 0 ? "idle" : row == 1 ? "completed" : row == 2 ? "busy" :
                             row == 3 ? "error" : "interrupted";
         for (int frame = 0; frame < 8; ++frame) {
-            NSImage* image = [self imageInDirectory:@"floating"
-                                               name:[NSString stringWithFormat:@"%s-%d", state, frame]];
-            if (!image || std::lround(image.size.width) != 192 || std::lround(image.size.height) != 208) {
+            NSString* name = [NSString stringWithFormat:@"%s-%d", state, frame];
+            if (!PngResourceHasPixelSize(@"floating", name, 192, 208)) {
                 if (error) *error = @"浮动精灵资源缺失或尺寸错误";
                 return NO;
             }
         }
     }
     for (int frame = 0; frame < 20; ++frame) {
-        NSImage* image = [self dockImage:frame];
-        if (!image || std::lround(image.size.width) != 256 || std::lround(image.size.height) != 256) {
+        NSString* name = [NSString stringWithFormat:@"dock-%d", frame];
+        if (!PngResourceHasPixelSize(@"dock", name, 256, 256)) {
             if (error) *error = @"扒边精灵资源缺失或尺寸错误";
             return NO;
         }
     }
-    NSImage* cloud = [self cloudImage];
-    if (!cloud || std::lround(cloud.size.width) != render_layout::cloud_bitmap_width ||
-        std::lround(cloud.size.height) != render_layout::cloud_bitmap_height) {
-        if (error) *error = @"云朵资源缺失或无法缩放";
+    if (!PngResourceHasPixelSize(@"cloud", @"cloud-bubble-540",
+                                 render_layout::cloud_bitmap_width,
+                                 render_layout::cloud_bitmap_height)) {
+        if (error) *error = @"云朵资源缺失或尺寸错误";
         return NO;
     }
     for (NSString* name in @[@"status-idle", @"status-completed", @"status-error",
-                             @"status-busy-0", @"status-busy-1", @"status-busy-2", @"status-busy-3",
-                             @"status-busy-4", @"status-busy-5", @"status-busy-6", @"status-busy-7"]) {
-        if (![self imageInDirectory:@"icons" name:name]) {
-            if (error) *error = @"状态图标资源缺失";
+                              @"status-busy-0", @"status-busy-1", @"status-busy-2", @"status-busy-3",
+                              @"status-busy-4", @"status-busy-5", @"status-busy-6", @"status-busy-7"]) {
+        if (!PngResourceHasPixelSize(@"icons", name, 64, 64)) {
+            if (error) *error = @"状态图标资源缺失或尺寸错误";
             return NO;
         }
     }
@@ -393,15 +453,20 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
             return NO;
         }
     }
-    NSArray* keys = [_cache.allKeys copy];
-    for (NSString* key in keys) {
-        if ([key hasPrefix:@"floating/"] || [key hasPrefix:@"dock/"]) {
-            [_cache removeObjectForKey:key];
-        }
-    }
+    return YES;
+}
+
+- (void)discardCloudImage {
+    RemoveCachedImage(_cache, @"cloud/cloud-bubble-540");
+}
+
+- (void)trimTransientImages {
+    RemoveCachedImagesWithPrefix(_cache, @"floating/");
+    RemoveCachedImagesWithPrefix(_cache, @"dock/");
+    [self discardCloudImage];
     _floatingRow = -1;
     _dockSide = -1;
-    return YES;
+    _dockPair = -1;
 }
 
 - (void)drawCloudForState:(const MacRenderState&)state inRect:(NSRect)rect {
@@ -612,7 +677,7 @@ struct PendingMacUpdate {
     MonitorSnapshot snapshot;
 };
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate> {
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate, NSSoundDelegate> {
 @private
     NSStatusItem* _statusItem;
     PetPanel* _petWindow;
@@ -669,6 +734,7 @@ struct PendingMacUpdate {
 - (void)loadOrMigrateSettings;
 - (void)saveSettings;
 - (void)playSoundNamed:(NSString*)name;
+- (void)releaseCurrentSound;
 - (NSMenuItem*)menuItem:(NSString*)title action:(SEL)action;
 - (void)updateMenu:(NSMenu*)menu;
 - (void)togglePet:(id)sender;
@@ -771,8 +837,9 @@ struct PendingMacUpdate {
     [self restorePosition];
     if (!_expressionDemo) [self startMonitor];
     if (_expressionDemo || _settings.pet_visible) [_petWindow orderFrontRegardless];
-    _timer = [NSTimer scheduledTimerWithTimeInterval:0.05 target:self
+    _timer = [NSTimer scheduledTimerWithTimeInterval:kUiTimerInterval target:self
                                             selector:@selector(onTimer:) userInfo:nil repeats:YES];
+    _timer.tolerance = kUiTimerTolerance;
     if (_expressionDemo) [self showExpressionDemoState:0 now:Clock::now()];
     else [self refreshVisual:YES];
     [self updateMousePassThrough];
@@ -787,6 +854,8 @@ struct PendingMacUpdate {
     }
     [_timer invalidate];
     if (_monitorWorker) _monitorWorker->stop();
+    [self releaseCurrentSound];
+    [_renderer trimTransientImages];
     [self savePosition];
     return NSTerminateNow;
 }
@@ -888,11 +957,22 @@ struct PendingMacUpdate {
 - (void)togglePet:(id)sender {
     (void)sender;
     _settings.pet_visible = !_settings.pet_visible;
-    if (_settings.pet_visible) [_petWindow orderFrontRegardless]; else [_petWindow orderOut:nil];
+    if (_settings.pet_visible) {
+        [_petWindow orderFrontRegardless];
+        [_petView setNeedsDisplay:YES];
+    } else {
+        [_petWindow orderOut:nil];
+        [_renderer trimTransientImages];
+    }
     [self saveSettings];
 }
 
-- (void)toggleSound:(id)sender { (void)sender; _settings.sound_enabled = !_settings.sound_enabled; [self saveSettings]; }
+- (void)toggleSound:(id)sender {
+    (void)sender;
+    _settings.sound_enabled = !_settings.sound_enabled;
+    if (!_settings.sound_enabled) [self releaseCurrentSound];
+    [self saveSettings];
+}
 
 - (BOOL)autoStartEnabled {
     if (@available(macOS 13.0, *)) return SMAppService.mainAppService.status == SMAppServiceStatusEnabled;
@@ -933,12 +1013,28 @@ struct PendingMacUpdate {
     _settingsStore->save(_settings, &ignored);
 }
 
+- (void)releaseCurrentSound {
+    if (!_currentSound) return;
+    _currentSound.delegate = nil;
+    [_currentSound stop];
+    _currentSound = nil;
+}
+
 - (void)playSoundNamed:(NSString*)name {
     if (!_settings.sound_enabled) return;
     NSString* path = ResourcePath(@"audio", name, @"mp3");
     if (!path) return;
+    [self releaseCurrentSound];
     _currentSound = [[NSSound alloc] initWithContentsOfFile:path byReference:YES];
-    [_currentSound play];
+    _currentSound.delegate = self;
+    if (![_currentSound play]) [self releaseCurrentSound];
+}
+
+- (void)sound:(NSSound*)sound didFinishPlaying:(BOOL)finishedPlaying {
+    (void)finishedPlaying;
+    if (sound != _currentSound) return;
+    _currentSound.delegate = nil;
+    _currentSound = nil;
 }
 
 - (void)setExpressionDemoEnabled:(BOOL)enabled { _expressionDemo = enabled; }
@@ -1138,7 +1234,7 @@ struct PendingMacUpdate {
 - (BOOL)isInteractivePoint:(NSPoint)point {
     if (_dragPending || _dragging) return YES;
     const NSRect rect = _petView ? _petView.bounds : NSMakeRect(0, 0, kPetWindowWidth, kPetWindowHeight);
-    if (NSPointInRect(point, VisiblePetBounds(_renderState, rect))) return YES;
+    if (NSPointInRect(point, PetInteractionBounds(_renderState, rect))) return YES;
     return _renderState.bubble_visible && NSPointInRect(point, BubbleBounds(_renderState, rect));
 }
 
@@ -1154,12 +1250,16 @@ struct PendingMacUpdate {
     _lastTick = now;
     elapsed = std::clamp(elapsed, 0.001, 0.25);
     _animationAccumulator += elapsed;
-    bool changed = false;
+    const int previousAnimationTick = _animationTick;
     while (_animationAccumulator >= 0.12) {
         _animationAccumulator -= 0.12;
         _animationTick = (_animationTick + 1) % 6400;
-        changed = true;
     }
+    bool changed = PetAnimationFrame(_renderState.state, _dockEdge, previousAnimationTick) !=
+                   PetAnimationFrame(_renderState.state, _dockEdge, _animationTick);
+    const bool statusFrameChanged =
+        StatusAnimationFrame(_renderState.state, previousAnimationTick) !=
+        StatusAnimationFrame(_renderState.state, _animationTick);
 
     bool dockChanged = false;
     if (_dockEdge != DockEdge::None) {
@@ -1189,9 +1289,12 @@ struct PendingMacUpdate {
         _hasLastHoverCursor = false;
     }
 
+    const BOOL previousBubble = _renderState.bubble_visible;
     _renderState.bubble_visible = app_logic::should_show_thought_bubble(
         _dockEdge != DockEdge::None, _renderState.state, now, _dockThoughtUntil);
     const BOOL bubble = _renderState.bubble_visible;
+    const BOOL bubbleChanged = bubble != previousBubble;
+    if (!bubble) [_renderer discardCloudImage];
     if (bubble) {
         if (_renderState.task_titles.size() > 1) {
             _rotationSeconds += elapsed;
@@ -1236,10 +1339,11 @@ struct PendingMacUpdate {
     }
     const auto nextState = _visualCoordinator.select(_snapshot.active_count, now);
     if (nextState != _renderState.state) { [self refreshVisual:YES]; return; }
-    [self updateRenderGeometry];
+    _renderState.animation_tick = _animationTick;
+    if (changed || dockChanged || bubbleChanged) [self updateRenderGeometry];
     [self updateMousePassThrough];
-    if (changed || dockChanged) {
-        [_petView setNeedsDisplay:YES];
+    if (changed || dockChanged || bubbleChanged) [_petView setNeedsDisplay:YES];
+    if (statusFrameChanged) {
         _statusItem.button.image = [_renderer statusImageForState:_renderState.state frame:_animationTick / 2];
         _statusItem.button.image.size = NSMakeSize(18, 18);
     }

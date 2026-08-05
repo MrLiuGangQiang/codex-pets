@@ -36,6 +36,11 @@ add_library(codexpets_core STATIC
 target_include_directories(codexpets_core PUBLIC src/core)
 target_compile_definitions(codexpets_core PUBLIC CODEXPETS_VERSION="${PROJECT_VERSION}")
 
+if(APPLE)
+    find_library(PROC_LIBRARY proc REQUIRED)
+    target_link_libraries(codexpets_core PUBLIC "${PROC_LIBRARY}")
+endif()
+
 if(MSVC)
     target_compile_options(codexpets_core PRIVATE /W4 /WX /utf-8 /EHsc /GR- /O1 /Gy /Gw)
 else()
