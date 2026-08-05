@@ -24,7 +24,7 @@ public:
     CodexSessionMonitor& operator=(const CodexSessionMonitor&) = delete;
 
     void poll();
-    [[nodiscard]] MonitorSnapshot snapshot() const;
+    [[nodiscard]] MonitorSnapshot snapshot(bool include_diagnostics = true) const;
     [[nodiscard]] std::vector<MonitorEventKind> take_events();
     [[nodiscard]] int active_count() const;
     [[nodiscard]] std::string primary_active_title() const;
@@ -51,11 +51,17 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+struct MonitorWorkerOptions {
+    bool emit_periodic_snapshots{true};
+    bool include_diagnostics{true};
+};
+
 class MonitorWorker {
 public:
     using Callback = std::function<void(std::vector<MonitorEventKind>, MonitorSnapshot)>;
 
-    MonitorWorker(std::filesystem::path sessions_root, Callback callback);
+    MonitorWorker(std::filesystem::path sessions_root, Callback callback,
+                  MonitorWorkerOptions options = {});
     ~MonitorWorker();
     MonitorWorker(const MonitorWorker&) = delete;
     MonitorWorker& operator=(const MonitorWorker&) = delete;

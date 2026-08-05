@@ -61,7 +61,7 @@ struct MonitorSnapshot {
     std::string last_interrupted_title;
     std::string last_event_type;
     int latest_event_active_title_index{-1};
-    std::string diagnostics_text{"JSONL 监控尚未启动。"};
+    std::string diagnostics_text;
     int latest_plan_update_active_title_index{-1};
 };
 

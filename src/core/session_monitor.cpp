@@ -31,6 +31,7 @@
 #include <windows.h>
 #elif defined(__APPLE__)
 #include <libproc.h>
+#include <malloc/malloc.h>
 #endif
 
 namespace codexpets {
@@ -353,13 +354,18 @@ struct CodexSessionMonitor::Impl {
         return result;
     }
 
-    static std::string compact_json_string(std::string_view line, std::string_view marker) {
+    static std::string_view compact_json_string_view(std::string_view line,
+                                                     std::string_view marker) noexcept {
         const auto start = line.find(marker);
         if (start == std::string_view::npos) return {};
         const auto value_start = start + marker.size();
         const auto value_end = line.find('"', value_start);
         if (value_end == std::string_view::npos) return {};
-        return std::string(line.substr(value_start, value_end - value_start));
+        return line.substr(value_start, value_end - value_start);
+    }
+
+    static std::string compact_json_string(std::string_view line, std::string_view marker) {
+        return std::string(compact_json_string_view(line, marker));
     }
 
     void track_tool_call_lifecycle(std::string_view line,
@@ -381,7 +387,7 @@ struct CodexSessionMonitor::Impl {
         if (auto* turn = latest_turn_for_file(source_path);
             turn && (turn->pending_tool_calls.contains(call_id) ||
                      turn->pending_tool_calls.size() < kMaximumPendingToolCalls)) {
-            const auto timestamp = compact_json_string(line, "\"timestamp\":\"");
+            const auto timestamp = compact_json_string_view(line, "\"timestamp\":\"");
             turn->pending_tool_calls.insert_or_assign(
                 call_id, parse_timestamp(timestamp).value_or(SystemClock::now()));
         }
@@ -611,15 +617,16 @@ struct CodexSessionMonitor::Impl {
         if (line.empty()) return false;
         track_tool_call_lifecycle(line, source_path);
         if (try_process_plan_update(line, source_path, suppress_notifications)) return true;
-        if (line.find("event_msg") == std::string_view::npos) {
+        if (line.find("\"type\":\"event_msg\"") == std::string_view::npos) {
             if (!complete_json(line)) return false;
-            try {
-                const auto root = parse_json(line);
-                if (const auto timestamp = parse_timestamp(json_string(root.get("timestamp")))) {
-                    touch_turns_for_file(source_path, *timestamp);
-                }
-                return true;
-            } catch (...) { return false; }
+            // Most JSONL records are response items, and tool outputs can be very large.
+            // Only their timestamp is needed here; building a full JSON DOM for every
+            // historical output caused large temporary allocations during startup scans.
+            if (const auto timestamp = parse_timestamp(
+                    compact_json_string_view(line, "\"timestamp\":\""))) {
+                touch_turns_for_file(source_path, *timestamp);
+            }
+            return true;
         }
 
         JsonValue root;
@@ -855,7 +862,7 @@ struct CodexSessionMonitor::Impl {
         emit(MonitorEventKind::StateChanged);
     }
 
-    MonitorSnapshot make_snapshot() const {
+    MonitorSnapshot make_snapshot(bool include_diagnostics = true) const {
         MonitorSnapshot result;
         const auto turns = ordered_turns();
         result.active_count = static_cast<int>(turns.size());
@@ -877,7 +884,7 @@ struct CodexSessionMonitor::Impl {
         result.last_event_type = last_event_type;
         result.latest_event_active_title_index = active_title_index(last_event_file);
         result.latest_plan_update_active_title_index = active_turn_index(last_plan_update_turn_id, turns);
-        result.diagnostics_text = make_diagnostics();
+        if (include_diagnostics) result.diagnostics_text = make_diagnostics();
         return result;
     }
 
@@ -935,7 +942,9 @@ CodexSessionMonitor::~CodexSessionMonitor() = default;
 CodexSessionMonitor::CodexSessionMonitor(CodexSessionMonitor&&) noexcept = default;
 CodexSessionMonitor& CodexSessionMonitor::operator=(CodexSessionMonitor&&) noexcept = default;
 void CodexSessionMonitor::poll() { impl_->poll(); }
-MonitorSnapshot CodexSessionMonitor::snapshot() const { return impl_->make_snapshot(); }
+MonitorSnapshot CodexSessionMonitor::snapshot(bool include_diagnostics) const {
+    return impl_->make_snapshot(include_diagnostics);
+}
 std::vector<MonitorEventKind> CodexSessionMonitor::take_events() {
     auto result = std::move(impl_->events);
     impl_->events.clear();
@@ -953,12 +962,18 @@ std::string CodexSessionMonitor::primary_current_plan_step() const {
 std::string CodexSessionMonitor::last_completed_title() const { return impl_->last_completed_title; }
 std::string CodexSessionMonitor::last_aborted_title() const { return impl_->last_aborted_title; }
 std::string CodexSessionMonitor::last_interrupted_title() const { return impl_->last_interrupted_title; }
-int CodexSessionMonitor::total_plan_step_count() const { return impl_->make_snapshot().total_plan_step_count; }
-int CodexSessionMonitor::completed_plan_step_count() const { return impl_->make_snapshot().completed_plan_step_count; }
-std::vector<std::optional<std::string>> CodexSessionMonitor::active_plan_progress_labels() const {
-    return impl_->make_snapshot().active_plan_progress_labels;
+int CodexSessionMonitor::total_plan_step_count() const {
+    return impl_->make_snapshot(false).total_plan_step_count;
 }
-std::vector<std::string> CodexSessionMonitor::active_titles() const { return impl_->make_snapshot().active_titles; }
+int CodexSessionMonitor::completed_plan_step_count() const {
+    return impl_->make_snapshot(false).completed_plan_step_count;
+}
+std::vector<std::optional<std::string>> CodexSessionMonitor::active_plan_progress_labels() const {
+    return impl_->make_snapshot(false).active_plan_progress_labels;
+}
+std::vector<std::string> CodexSessionMonitor::active_titles() const {
+    return impl_->make_snapshot(false).active_titles;
+}
 int CodexSessionMonitor::get_active_title_index(const std::filesystem::path& source_path) const {
     return impl_->active_title_index(source_path);
 }
@@ -983,15 +998,26 @@ struct MonitorWorker::Impl {
     std::thread thread;
     std::mutex mutex;
     std::condition_variable condition;
+    MonitorWorkerOptions options;
     bool running{};
     bool stopping{};
 
-    Impl(std::filesystem::path value, Callback fn) : root(std::move(value)), callback(std::move(fn)) {}
+    Impl(std::filesystem::path value, Callback fn, MonitorWorkerOptions worker_options)
+        : root(std::move(value)), callback(std::move(fn)), options(worker_options) {}
 
     void run() {
         CodexSessionMonitor monitor(root);
         (void)monitor.take_events();
-        if (callback) callback({MonitorEventKind::StateChanged}, monitor.snapshot());
+        if (callback) {
+            callback({MonitorEventKind::StateChanged}, monitor.snapshot(options.include_diagnostics));
+        }
+#ifdef __APPLE__
+        // Initial recovery scans can temporarily parse large historical JSON records.
+        // Return freed C++ allocator pages instead of keeping the startup high-water mark.
+        if (auto* zone = malloc_default_zone()) {
+            (void)malloc_zone_pressure_relief(zone, 0);
+        }
+#endif
         auto next_snapshot = Clock::now() + kDiagnosticsSnapshotInterval;
         std::unique_lock lock(mutex);
         while (!stopping) {
@@ -1004,18 +1030,21 @@ struct MonitorWorker::Impl {
             }
             auto events = monitor.take_events();
             const auto now = Clock::now();
-            const bool diagnostics_due = now >= next_snapshot;
-            if ((!events.empty() || diagnostics_due) && callback) {
-                callback(std::move(events), monitor.snapshot());
-                next_snapshot = now + kDiagnosticsSnapshotInterval;
+            const bool periodic_due = options.emit_periodic_snapshots && now >= next_snapshot;
+            if ((!events.empty() || periodic_due) && callback) {
+                callback(std::move(events), monitor.snapshot(options.include_diagnostics));
+                if (options.emit_periodic_snapshots) {
+                    next_snapshot = now + kDiagnosticsSnapshotInterval;
+                }
             }
             lock.lock();
         }
     }
 };
 
-MonitorWorker::MonitorWorker(std::filesystem::path sessions_root, Callback callback)
-    : impl_(std::make_unique<Impl>(std::move(sessions_root), std::move(callback))) {}
+MonitorWorker::MonitorWorker(std::filesystem::path sessions_root, Callback callback,
+                             MonitorWorkerOptions options)
+    : impl_(std::make_unique<Impl>(std::move(sessions_root), std::move(callback), options)) {}
 MonitorWorker::~MonitorWorker() { stop(); }
 void MonitorWorker::start() {
     std::lock_guard lock(impl_->mutex);

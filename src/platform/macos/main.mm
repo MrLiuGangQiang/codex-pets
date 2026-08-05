@@ -316,6 +316,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
     NSColor* _dotFillColor;
     NSColor* _dotOutlineColor;
     int _floatingRow;
+    int _floatingPair;
     int _dockSide;
     int _dockPair;
 }
@@ -351,6 +352,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
         _dotFillColor = [NSColor colorWithSRGBRed:241/255.0 green:248/255.0 blue:1 alpha:1];
         _dotOutlineColor = [NSColor colorWithSRGBRed:42/255.0 green:50/255.0 blue:60/255.0 alpha:1];
         _floatingRow = -1;
+        _floatingPair = -1;
         _dockSide = -1;
         _dockPair = -1;
     }
@@ -365,7 +367,9 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
     if (!path) return nil;
     image = [[NSImage alloc] initByReferencingFile:path];
     if (image) {
-        image.cacheMode = NSImageCacheNever;
+        // Keep only the explicitly bounded images below, while allowing AppKit to
+        // reuse one decoded bitmap instead of allocating a temporary one per draw.
+        image.cacheMode = NSImageCacheBySize;
         _cache[key] = image;
     }
     return image;
@@ -382,11 +386,14 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
         _dockPair = -1;
     }
     const int row = app_logic::select_floating_sprite_row(state);
-    if (_floatingRow != row) {
+    const int safeFrame = std::clamp(frame, 0, 7);
+    const int pair = safeFrame / 2;
+    if (_floatingRow != row || _floatingPair != pair) {
         RemoveCachedImagesWithPrefix(_cache, @"floating/");
         _floatingRow = row;
+        _floatingPair = pair;
     }
-    NSString* name = [NSString stringWithFormat:@"%s-%d", StateName(state).c_str(), std::clamp(frame, 0, 7)];
+    NSString* name = [NSString stringWithFormat:@"%s-%d", StateName(state).c_str(), safeFrame];
     return [self imageInDirectory:@"floating" name:name];
 }
 
@@ -395,6 +402,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
     if (_floatingRow != -1) {
         RemoveCachedImagesWithPrefix(_cache, @"floating/");
         _floatingRow = -1;
+        _floatingPair = -1;
     }
     const int side = frame >= 10 ? 1 : 0;
     const int pair = (frame % 10) / 2;
@@ -465,6 +473,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
     RemoveCachedImagesWithPrefix(_cache, @"dock/");
     [self discardCloudImage];
     _floatingRow = -1;
+    _floatingPair = -1;
     _dockSide = -1;
     _dockPair = -1;
 }
@@ -722,6 +731,7 @@ struct PendingMacUpdate {
     NSPoint _lastHoverCursor;
     bool _hasLastHoverCursor;
     NSInteger _lastMouseReception;
+    id _globalMouseMonitor;
     std::mutex _pendingMonitorMutex;
     std::deque<PendingMacUpdate> _pendingMonitorUpdates;
     std::uint64_t _monitorGeneration;
@@ -745,6 +755,8 @@ struct PendingMacUpdate {
 - (void)openUpdate:(id)sender;
 - (void)quit:(id)sender;
 - (void)createPetWindow;
+- (void)installMouseMonitor;
+- (void)removeMouseMonitor;
 - (void)createStatusItem;
 - (void)placeDefault;
 - (void)restorePosition;
@@ -771,7 +783,7 @@ struct PendingMacUpdate {
 - (void)startMonitor;
 - (void)enqueueMonitorUpdate:(PendingMacUpdate)update;
 - (void)processMonitorUpdates;
-- (void)applyMonitorUpdate:(const PendingMacUpdate&)update;
+- (void)applyMonitorUpdate:(PendingMacUpdate&)update;
 - (void)showExpressionDemoState:(int)index now:(Clock::time_point)now;
 - (void)refreshVisual:(BOOL)force;
 - (void)updateRenderGeometry;
@@ -788,7 +800,14 @@ struct PendingMacUpdate {
         [self.owner drawPetView:self.bounds];
     }
 }
-- (NSView*)hitTest:(NSPoint)point { return [self.owner isInteractivePoint:point] ? self : nil; }
+- (NSView*)hitTest:(NSPoint)point {
+    // NSView hitTest: receives a point in the superview's coordinate system.
+    // The content view is unflipped while PetView is flipped, so passing the
+    // point directly made the lower body/legs miss and left the window
+    // click-through until a later click happened to activate it.
+    const NSPoint local = [self convertPoint:point fromView:self.superview];
+    return [self.owner isInteractivePoint:local] ? self : nil;
+}
 - (void)mouseDown:(NSEvent*)event { [self.owner petMouseDown:event]; }
 - (void)mouseDragged:(NSEvent*)event { [self.owner petMouseDragged:event]; }
 - (void)mouseUp:(NSEvent*)event { [self.owner petMouseUp:event]; }
@@ -832,6 +851,7 @@ struct PendingMacUpdate {
     }
     [self loadOrMigrateSettings];
     [self createPetWindow];
+    [self installMouseMonitor];
     [self createStatusItem];
     [self placeDefault];
     [self restorePosition];
@@ -853,6 +873,7 @@ struct PendingMacUpdate {
         _pendingMonitorUpdates.clear();
     }
     [_timer invalidate];
+    [self removeMouseMonitor];
     if (_monitorWorker) _monitorWorker->stop();
     [self releaseCurrentSound];
     [_renderer trimTransientImages];
@@ -891,7 +912,8 @@ struct PendingMacUpdate {
 
 - (void)createPetWindow {
     _petWindow = [[PetPanel alloc] initWithContentRect:NSMakeRect(0, 0, kPetWindowWidth, kPetWindowHeight)
-                                            styleMask:NSWindowStyleMaskBorderless
+                                            styleMask:NSWindowStyleMaskBorderless |
+                                                      NSWindowStyleMaskNonactivatingPanel
                                               backing:NSBackingStoreBuffered defer:NO];
     _petWindow.opaque = NO;
     _petWindow.backgroundColor = NSColor.clearColor;
@@ -902,11 +924,31 @@ struct PendingMacUpdate {
                                     NSWindowCollectionBehaviorFullScreenAuxiliary |
                                     NSWindowCollectionBehaviorStationary;
     _petWindow.releasedWhenClosed = NO;
+    _petWindow.becomesKeyOnlyIfNeeded = YES;
     _petWindow.acceptsMouseMovedEvents = YES;
     _petWindow.ignoresMouseEvents = YES;
     _petView = [[PetView alloc] initWithFrame:NSMakeRect(0, 0, kPetWindowWidth, kPetWindowHeight)];
     _petView.owner = self;
     _petWindow.contentView = _petView;
+}
+
+- (void)installMouseMonitor {
+    if (_globalMouseMonitor) return;
+    __weak AppDelegate* weakSelf = self;
+    _globalMouseMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskMouseMoved
+        handler:^(NSEvent* event) {
+            @autoreleasepool {
+                (void)event;
+                AppDelegate* strongSelf = weakSelf;
+                if (strongSelf) [strongSelf updateMousePassThrough];
+            }
+        }];
+}
+
+- (void)removeMouseMonitor {
+    if (!_globalMouseMonitor) return;
+    [NSEvent removeMonitor:_globalMouseMonitor];
+    _globalMouseMonitor = nil;
 }
 
 - (void)createStatusItem {
@@ -1050,7 +1092,7 @@ struct PendingMacUpdate {
                 [strongSelf enqueueMonitorUpdate:PendingMacUpdate{
                     generation, std::move(events), std::move(snapshot)}];
             }
-        });
+        }, MonitorWorkerOptions{false, false});
     _monitorWorker->start();
 }
 
@@ -1078,13 +1120,13 @@ struct PendingMacUpdate {
         std::lock_guard lock(_pendingMonitorMutex);
         updates.swap(_pendingMonitorUpdates);
     }
-    for (const auto& update : updates) [self applyMonitorUpdate:update];
+    for (auto& update : updates) [self applyMonitorUpdate:update];
 }
 
-- (void)applyMonitorUpdate:(const PendingMacUpdate&)update {
+- (void)applyMonitorUpdate:(PendingMacUpdate&)update {
     if (update.generation != _monitorGeneration) return;
     const BOOL first = !_hasSnapshot;
-    _snapshot = update.snapshot;
+    _snapshot = std::move(update.snapshot);
     _hasSnapshot = true;
     const auto now = Clock::now();
     for (const auto event : update.events) {
@@ -1188,7 +1230,7 @@ struct PendingMacUpdate {
         _rotationSeconds = 0;
     }
 
-    const auto content = make_visual_content(state, _snapshot);
+    auto content = make_visual_content(state, _snapshot);
     const bool selectNewest = _visualCoordinator.show_newest_task_on_next_refresh() &&
                               state == ReminderState::Busy;
     const int preferred = app_logic::select_preferred_task_index(
@@ -1196,10 +1238,10 @@ struct PendingMacUpdate {
     _selectedTaskIndex = app_logic::reconcile_task_selection(
         state, content.task_titles, _selectedTaskIndex, selectedTitle, selectNewest, preferred);
     _renderState.state = state;
-    _renderState.status_text = content.status_text;
-    _renderState.thought_text = content.thought_text;
-    _renderState.task_titles = content.task_titles;
-    _renderState.progress_labels = content.progress_labels;
+    _renderState.status_text = std::move(content.status_text);
+    _renderState.thought_text = std::move(content.thought_text);
+    _renderState.task_titles = std::move(content.task_titles);
+    _renderState.progress_labels = std::move(content.progress_labels);
     _renderState.selected_task_index = _selectedTaskIndex;
     if (selectNewest) _visualCoordinator.consume_newest_task_focus();
 
@@ -1311,7 +1353,7 @@ struct PendingMacUpdate {
         } else {
             _rotationSeconds = 0;
         }
-        const std::string text = _renderState.task_titles.empty() ? _renderState.thought_text
+        const std::string& text = _renderState.task_titles.empty() ? _renderState.thought_text
             : _renderState.task_titles[std::clamp(_selectedTaskIndex, 0,
                                                    static_cast<int>(_renderState.task_titles.size()) - 1)];
         const int lines = std::max(1, static_cast<int>(text.size() / 24) +

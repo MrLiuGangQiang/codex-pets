@@ -428,6 +428,17 @@ void test_session_monitor_lifecycle() {
     (void)monitor.take_events();
     CHECK_EQ(1, monitor.active_count());
     CHECK_EQ(std::string("Hello title test"), monitor.primary_active_title());
+    const auto lean_snapshot = monitor.snapshot(false);
+    CHECK(lean_snapshot.diagnostics_text.empty());
+    CHECK_EQ(1, lean_snapshot.active_count);
+
+    const std::string large_response(180 * 1024, 'x');
+    append(file,
+        "{\"timestamp\":\"2026-08-01T00:00:02.5Z\",\"type\":\"response_item\","
+        "\"payload\":{\"type\":\"message\",\"content\":\"" + large_response +
+        " \\\"type\\\":\\\"event_msg\\\"\"}}\n");
+    monitor.poll();
+    CHECK_EQ(1, monitor.active_count());
 
     append(file,
         "{\"timestamp\":\"2026-08-01T00:00:03Z\",\"type\":\"response_item\",\"payload\":{" 
