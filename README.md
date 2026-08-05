@@ -22,6 +22,16 @@ CodeXPets 是一个面向 Codex 的**原生桌面宠物**。它以只读方式�
   </tr>
 </table>
 
+## 左右边缘吸附
+
+宠物可以拖到屏幕左侧或右侧边缘，吸附后保留云朵提示，并支持自动隐藏与边缘唤出：
+
+<table>
+  <tr>
+    <td align="center"><strong>左侧吸附</strong><br><img src="docs/screenshots/dock-left-idle.png" alt="CodeXPets 左侧吸附状态" width="420"></td>
+    <td align="center"><strong>右侧吸附</strong><br><img src="docs/screenshots/dock-right-idle.png" alt="CodeXPets 右侧吸附状态" width="420"></td>
+  </tr>
+</table>
 ## 主要功能
 
 ### Codex 任务监控
