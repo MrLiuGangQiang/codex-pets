@@ -1370,8 +1370,34 @@ int NativeApp::run_utility(HINSTANCE instance, const std::vector<std::wstring>& 
     }
     if (has(L"--smoke-test") || has(L"--preview")) {
         RenderState state;
-        state.task_titles = {"原生渲染检查"};
-        state.progress_labels = {std::optional<std::string>("1/3")};
+        MonitorSnapshot preview_snapshot;
+        preview_snapshot.active_count = 1;
+        preview_snapshot.active_titles = {"原生渲染检查"};
+        preview_snapshot.active_plan_progress_labels = {std::optional<std::string>("1/3")};
+        preview_snapshot.completed_plan_step_count = 1;
+        preview_snapshot.total_plan_step_count = 3;
+        preview_snapshot.last_completed_title = "原生渲染检查：任务已完成";
+        preview_snapshot.last_aborted_title = "原生渲染检查：模拟异常";
+        preview_snapshot.last_interrupted_title = "原生渲染检查：任务已中断";
+        const auto configure_preview_state = [&](ReminderState visual) {
+            MonitorSnapshot snapshot = preview_snapshot;
+            if (visual == ReminderState::Idle) {
+                snapshot.active_count = 0;
+                snapshot.active_titles.clear();
+                snapshot.active_plan_progress_labels.clear();
+                snapshot.completed_plan_step_count = 0;
+                snapshot.total_plan_step_count = 0;
+            }
+            const auto content = make_visual_content(visual, snapshot);
+            state.state = visual;
+            state.status_text = content.status_text;
+            state.thought_text = content.thought_text;
+            state.task_titles = content.task_titles;
+            state.progress_labels = content.progress_labels;
+            state.selected_task_index = 0;
+            state.scroll_offset = 0;
+            state.animation_tick = (visual == ReminderState::Busy || visual == ReminderState::Completed) ? 18 : 0;
+        };
         const std::array<std::pair<ReminderState, const char*>, 5> states{{
             {ReminderState::Idle, "idle"}, {ReminderState::Busy, "busy"},
             {ReminderState::Completed, "completed"}, {ReminderState::Error, "error"},
@@ -1383,8 +1409,7 @@ int NativeApp::run_utility(HINSTANCE instance, const std::vector<std::wstring>& 
             std::filesystem::create_directories(preview_folder);
         }
         for (const auto& [visual, name] : states) {
-            state.state = visual; state.status_text = name;
-            state.animation_tick = (visual == ReminderState::Busy || visual == ReminderState::Completed) ? 18 : 0;
+            configure_preview_state(visual);
             if (preview_folder.empty()) {
                 if (!renderer.render(state, 1.0, &error)) return finish(1);
             } else if (!renderer.save_preview(preview_folder / (std::string(name) + ".png"), state, 1.0, &error)) {
@@ -1393,12 +1418,10 @@ int NativeApp::run_utility(HINSTANCE instance, const std::vector<std::wstring>& 
         }
         state.docked = true;
         for (const auto& [visual, name] : states) {
-            state.state = visual;
-            state.animation_tick = visual == ReminderState::Idle ? 0 : 18;
+            configure_preview_state(visual);
             for (const auto edge : {DockEdge::Left, DockEdge::Right}) {
                 state.dock_edge = edge;
                 const auto side = edge == DockEdge::Left ? "left" : "right";
-                state.status_text = std::string("dock-") + name + "-" + side;
                 if (preview_folder.empty()) {
                     if (!renderer.render(state, 1.0, &error)) return finish(1);
                 } else if (!renderer.save_preview(

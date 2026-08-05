@@ -1694,18 +1694,42 @@ int RunMacUtility(int argc, const char* const* argv) {
         if (ioError) { std::cerr << ioError.message() << '\n'; return 1; }
 
         MacRenderState state;
-        state.task_titles = {"原生渲染检查"};
-        state.progress_labels = {std::optional<std::string>("1/3")};
+        MonitorSnapshot previewSnapshot;
+        previewSnapshot.active_count = 1;
+        previewSnapshot.active_titles = {"原生渲染检查"};
+        previewSnapshot.active_plan_progress_labels = {std::optional<std::string>("1/3")};
+        previewSnapshot.completed_plan_step_count = 1;
+        previewSnapshot.total_plan_step_count = 3;
+        previewSnapshot.last_completed_title = "原生渲染检查：任务已完成";
+        previewSnapshot.last_aborted_title = "原生渲染检查：模拟异常";
+        previewSnapshot.last_interrupted_title = "原生渲染检查：任务已中断";
+        const auto configurePreviewState = [&](ReminderState visual) {
+            MonitorSnapshot snapshot = previewSnapshot;
+            if (visual == ReminderState::Idle) {
+                snapshot.active_count = 0;
+                snapshot.active_titles.clear();
+                snapshot.active_plan_progress_labels.clear();
+                snapshot.completed_plan_step_count = 0;
+                snapshot.total_plan_step_count = 0;
+            }
+            const auto content = make_visual_content(visual, snapshot);
+            state.state = visual;
+            state.status_text = content.status_text;
+            state.thought_text = content.thought_text;
+            state.task_titles = content.task_titles;
+            state.progress_labels = content.progress_labels;
+            state.selected_task_index = 0;
+            state.scroll_offset = 0;
+            state.animation_tick = (visual == ReminderState::Busy ||
+                                    visual == ReminderState::Completed) ? 18 : 0;
+        };
         const std::array<std::pair<ReminderState, const char*>, 5> states{{
             {ReminderState::Idle, "idle"}, {ReminderState::Busy, "busy"},
             {ReminderState::Completed, "completed"}, {ReminderState::Error, "error"},
             {ReminderState::Interrupted, "interrupted"}}};
         NSString* renderError = nil;
         for (const auto& [visual, name] : states) {
-            state.state = visual;
-            state.status_text = name;
-            state.animation_tick = (visual == ReminderState::Busy ||
-                                    visual == ReminderState::Completed) ? 18 : 0;
+            configurePreviewState(visual);
             const auto path = outputDirectory / (std::string(name) + ".png");
             if (![renderer savePreview:state toPath:Ns(path_to_utf8(path)) error:&renderError]) {
                 std::cerr << Utf8(renderError ? renderError : @"render failed") << '\n';
@@ -1715,12 +1739,10 @@ int RunMacUtility(int argc, const char* const* argv) {
         }
         state.docked = true;
         for (const auto& [visual, name] : states) {
-            state.state = visual;
-            state.animation_tick = visual == ReminderState::Idle ? 0 : 18;
+            configurePreviewState(visual);
             for (const auto edge : {DockEdge::Left, DockEdge::Right}) {
                 state.dock_edge = edge;
                 const auto side = edge == DockEdge::Left ? "left" : "right";
-                state.status_text = std::string("dock-") + name + "-" + side;
                 const auto path = outputDirectory /
                     (std::string("dock-") + side + "-" + name + ".png");
                 if (![renderer savePreview:state toPath:Ns(path_to_utf8(path))
