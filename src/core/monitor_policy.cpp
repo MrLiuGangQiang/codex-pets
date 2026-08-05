@@ -19,7 +19,6 @@ std::vector<MonitorEventEffect> apply_monitor_event_policy(
                 ? snapshot.latest_event_active_title_index
                 : -1;
         MonitorEventEffect effect;
-        effect.event = event;
         switch (event) {
             case MonitorEventKind::TaskStarted:
                 visual_coordinator.record_started(preferred_task_index);

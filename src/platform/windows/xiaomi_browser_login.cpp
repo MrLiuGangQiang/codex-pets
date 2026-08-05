@@ -16,12 +16,13 @@
 #endif
 
 #include <algorithm>
-
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <system_error>
 #include <functional>
+#include <system_error>
+#include <thread>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -35,6 +36,55 @@ using Microsoft::WRL::ComPtr;
 constexpr wchar_t kLoginClass[] = L"CodeXPets.XiaomiBrowserLogin";
 constexpr wchar_t kLoginUrl[] = L"https://account.xiaomi.com/pass/serviceLogin?sid=micoapi&_locale=zh_CN";
 std::shared_ptr<class XiaomiBrowserLogin> g_login;
+
+std::wstring make_user_data_folder() {
+    GUID id{};
+    if (FAILED(CoCreateGuid(&id))) return {};
+    wchar_t text[64]{};
+    if (StringFromGUID2(id, text, static_cast<int>(std::size(text))) <= 0) return {};
+
+    std::error_code error;
+    const auto temporary_root = std::filesystem::temp_directory_path(error);
+    if (error || temporary_root.empty()) return {};
+    try {
+        return (temporary_root / (std::wstring(L"CodeXPets-XiaomiLogin-") + text)).wstring();
+    } catch (...) {
+        return {};
+    }
+}
+
+void remove_user_data_folder(std::wstring folder) {
+    if (folder.empty()) return;
+    try {
+        std::thread([folder = std::move(folder)] {
+            try {
+                std::error_code error;
+                const auto root = std::filesystem::temp_directory_path(error).lexically_normal();
+                if (error || root.empty()) return;
+
+                const auto target = std::filesystem::path(folder).lexically_normal();
+                const auto name = target.filename().wstring();
+                constexpr std::wstring_view prefix = L"CodeXPets-XiaomiLogin-";
+                if (target.parent_path() != root || name.size() <= prefix.size() ||
+                    name.compare(0, prefix.size(), prefix) != 0) {
+                    return;
+                }
+
+                for (int attempt = 0; attempt < 20; ++attempt) {
+                    error.clear();
+                    std::filesystem::remove_all(target, error);
+                    error.clear();
+                    if (!std::filesystem::exists(target, error) && !error) return;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            } catch (...) {
+                // Cleanup is best effort; never let a background cleanup failure terminate the app.
+            }
+        }).detach();
+    } catch (...) {
+        // A transient thread-creation failure must not break login completion.
+    }
+}
 
 using CreateEnvironment = HRESULT(STDAPICALLTYPE *)(
     PCWSTR, PCWSTR, ICoreWebView2EnvironmentOptions*,
@@ -231,10 +281,11 @@ private:
 
 class XiaomiBrowserLogin : public std::enable_shared_from_this<XiaomiBrowserLogin> {
 public:
-    XiaomiBrowserLogin(HWND owner, std::wstring folder, std::function<void(std::string, std::string)> done)
-        : owner_(owner), folder_(std::move(folder)), done_(std::move(done)) {}
+    XiaomiBrowserLogin(HWND owner, std::function<void(std::string, std::string)> done)
+        : owner_(owner), folder_(make_user_data_folder()), done_(std::move(done)) {}
 
     void show() {
+        if (folder_.empty()) { finish({}, "无法创建临时小米登录目录"); return; }
         WNDCLASSEXW wc{sizeof(wc)};
         wc.lpfnWndProc = window_proc;
         wc.hInstance = GetModuleHandleW(nullptr);
@@ -422,12 +473,26 @@ private:
 
     void finish(std::string cookies, std::string error) {
         if (finished_) return;
+        const auto keep_alive = shared_from_this();
         finished_ = true;
         if (hwnd_) KillTimer(hwnd_, kCookiePollTimer);
+        if (webview_ && navigation_handler_) {
+            webview_->remove_NavigationCompleted(navigation_token_);
+        }
         if (controller_) controller_->Close();
+        webview2_.Reset();
+        webview_.Reset();
+        controller_.Reset();
+        navigation_handler_.Reset();
+        controller_handler_.Reset();
+        environment_handler_.Reset();
         if (hwnd_) DestroyWindow(hwnd_);
-        auto done = std::move(done_); g_login.reset();
+        auto done = std::move(done_);
+        auto folder = std::move(folder_);
+        g_login.reset();
+        remove_user_data_folder(std::move(folder));
         if (done) done(std::move(cookies), std::move(error));
+        (void)keep_alive;
     }
 
     static constexpr UINT_PTR kCookiePollTimer = 1;
@@ -453,14 +518,12 @@ private:
 } // namespace
 
 void start_xiaomi_browser_login(
-    HWND owner, std::wstring user_data_folder,
-    std::function<void(std::string cookies, std::string error)> completed) {
+    HWND owner, std::function<void(std::string cookies, std::string error)> completed) {
     if (g_login) {
         if (completed) completed({}, "小米登录窗口已经打开");
         return;
     }
-    g_login = std::make_shared<XiaomiBrowserLogin>(
-        owner, std::move(user_data_folder), std::move(completed));
+    g_login = std::make_shared<XiaomiBrowserLogin>(owner, std::move(completed));
     g_login->show();
 }
 } // namespace codexpets::windows

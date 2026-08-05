@@ -1022,12 +1022,6 @@ int CodexSessionMonitor::completed_plan_step_count() const {
 std::vector<std::optional<std::string>> CodexSessionMonitor::active_plan_progress_labels() const {
     return impl_->make_snapshot(false).active_plan_progress_labels;
 }
-std::vector<std::string> CodexSessionMonitor::active_titles() const {
-    return impl_->make_snapshot(false).active_titles;
-}
-int CodexSessionMonitor::get_active_title_index(const std::filesystem::path& source_path) const {
-    return impl_->active_title_index(source_path);
-}
 std::string CodexSessionMonitor::diagnostics_text() const { return impl_->make_diagnostics(); }
 void CodexSessionMonitor::report_unexpected_error(std::string_view operation, std::string_view error) {
     impl_->report_error(operation, error);

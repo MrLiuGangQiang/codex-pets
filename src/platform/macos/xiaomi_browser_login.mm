@@ -147,9 +147,8 @@ static __strong XiaomiBrowserLogin* g_login = nil;
 namespace codexpets::macos {
 
 void start_xiaomi_browser_login(
-    NSWindow* owner, std::string user_data_folder,
+    NSWindow* owner,
     std::function<void(std::string cookies, std::string error)> completed) {
-    (void)user_data_folder;
     if (g_login) {
         if (completed) completed({}, "小米登录窗口已经打开");
         return;

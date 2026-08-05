@@ -12,7 +12,7 @@ class NSWindow;
 namespace codexpets::macos {
 
 void start_xiaomi_browser_login(
-    NSWindow* owner, std::string user_data_folder,
+    NSWindow* owner,
     std::function<void(std::string cookies, std::string error)> completed);
 
 } // namespace codexpets::macos

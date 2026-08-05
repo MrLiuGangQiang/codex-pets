@@ -605,8 +605,7 @@ bool XiaoAiNotifier::discover_devices(const XiaoAiSettings& settings,
         devices->clear();
         devices->reserve(found.size());
         for (const auto& device : found) {
-            devices->push_back({device.id, device.name, device.alias, device.hardware,
-                                device.serial, device.mac, device.ip, device.sn_profile});
+            devices->push_back({device.id, device.name, device.alias, device.hardware});
         }
         return true;
     } catch (const std::exception& exception) {

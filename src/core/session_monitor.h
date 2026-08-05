@@ -35,8 +35,6 @@ public:
     [[nodiscard]] int total_plan_step_count() const;
     [[nodiscard]] int completed_plan_step_count() const;
     [[nodiscard]] std::vector<std::optional<std::string>> active_plan_progress_labels() const;
-    [[nodiscard]] std::vector<std::string> active_titles() const;
-    [[nodiscard]] int get_active_title_index(const std::filesystem::path& source_path) const;
     [[nodiscard]] std::string diagnostics_text() const;
     void report_unexpected_error(std::string_view operation, std::string_view error);
 

@@ -28,7 +28,7 @@ jobs:
             rid: win-arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Toolchain versions
         shell: pwsh
         run: |
@@ -50,13 +50,13 @@ jobs:
           $process = Start-Process -FilePath $exe.FullName -ArgumentList @('--preview', $previewDir) `
             -Wait -PassThru -NoNewWindow
           if ($process.ExitCode -ne 0) { exit $process.ExitCode }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: CodeXPets-windows-preview-${{ matrix.arch }}
           path: artifacts/windows-preview-${{ matrix.arch }}/*.png
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: CodeXPets-${{ matrix.rid }}
           path: |
@@ -80,7 +80,7 @@ jobs:
             rid: osx-x64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Toolchain versions
         run: |
           cmake --version
@@ -93,13 +93,13 @@ jobs:
           preview_dir="artifacts/macos-preview-${{ matrix.arch }}"
           mkdir -p "$preview_dir"
           "build/macos-${{ matrix.arch }}/CodeXPets.app/Contents/MacOS/CodeXPets" --preview "$preview_dir"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: CodeXPets-macos-preview-${{ matrix.arch }}
           path: artifacts/macos-preview-${{ matrix.arch }}/*.png
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: CodeXPets-macos-${{ matrix.arch }}
           path: |

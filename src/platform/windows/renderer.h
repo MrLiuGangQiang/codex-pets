@@ -78,7 +78,6 @@ private:
     void draw_cloud(Gdiplus::Graphics& graphics, const RenderState& state, double scale);
     void draw_pet(Gdiplus::Graphics& graphics, const RenderState& state, double scale);
     void draw_text(Gdiplus::Graphics& graphics, const RenderState& state, double scale);
-    static std::wstring utf8_to_wide_safe(std::string_view value);
     static int png_encoder_clsid(CLSID* clsid);
 
     HINSTANCE instance_{};

@@ -37,10 +37,6 @@ struct XiaoAiDeviceInfo {
     std::string name;
     std::string alias;
     std::string hardware;
-    std::string serial;
-    std::string mac;
-    std::string ip;
-    std::string sn_profile;
 };
 
 // Keeps only the MiNA session cookies that are needed by the notifier.

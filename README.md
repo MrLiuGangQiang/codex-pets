@@ -1,6 +1,6 @@
 # CodeXPets
 
-CodeXPets 4.0.3 是一个面向 Codex 的**原生桌面宠物**。本版本将原来的 .NET/Avalonia/SkiaSharp 架构完全替换为轻量 C++20 核心和系统原生 UI：
+CodeXPets 4.1.0 是一个面向 Codex 的**原生桌面宠物**。本版本将原来的 .NET/Avalonia/SkiaSharp 架构完全替换为轻量 C++20 核心和系统原生 UI：
 
 - Windows：Win32 + GDI+
 - macOS：AppKit + Core Graphics
@@ -12,10 +12,10 @@ CodeXPets 4.0.3 是一个面向 Codex 的**原生桌面宠物**。本版本将�
 
 | 系统 | 架构 | 构建/发布目标 | 文件 |
 |---|---:|---|---|
-| Windows | x64 | `win-x64` | `CodeXPets-v4.0.3-win-x64.exe` / `.zip` |
-| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.0.3-win-arm64.exe` / `.zip` |
-| macOS | Intel | `osx-x64` | `CodeXPets-v4.0.3-macos-x64.zip` / `.dmg` |
-| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.0.3-macos-arm64.zip` / `.dmg` |
+| Windows | x64 | `win-x64` | `CodeXPets-v4.1.0-win-x64.exe` / `.zip` |
+| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.1.0-win-arm64.exe` / `.zip` |
+| macOS | Intel | `osx-x64` | `CodeXPets-v4.1.0-macos-x64.zip` / `.dmg` |
+| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.1.0-macos-arm64.zip` / `.dmg` |
 
 macOS 最低支持 macOS 13。Windows 版本是一个自包含原生 EXE；macOS 版本是标准 `CodeXPets.app`。两者都不要求用户安装 .NET、Electron、Qt 或其他附加运行时。
 
@@ -52,9 +52,9 @@ CodeXPets 只读取 Codex 会话文件，不会修改、移动或删除这些文
 
 ### 可选的小爱音箱主动播报
 
-在“设置”中可以启用小爱音箱主动播报。在 Windows 中点击“浏览器登录”，在内置 Edge 登录页面完成小米账号验证；扫描后选择目标音箱（也可填写设备 ID 或米家显示名称），再点击“测试播报”。保存后，Codex 的开始、完成、错误和中断事件会同步发送到音箱。
+在“设置”中可以启用小爱音箱主动播报。Windows 点击“浏览器登录”后，会在内置 Edge WebView2 窗口中完成小米账号验证；macOS 使用系统 WKWebView 完成同样的登录流程。两端登录都使用一次性、非持久化的浏览器会话，登录完成后不会留下网页缓存或账号密码。扫描后选择目标音箱（也可填写设备 ID 或米家显示名称），再点击“测试播报”。保存后，Codex 的开始、完成、错误和中断事件会同步发送到音箱。
 
-该功能通过小米 MiNA 接口发送 TTS 命令，并非直接向音箱发起本地 HTTP 请求。播报内容使用“开始工作、任务完成、执行出错、任务被中断”等事件提示，并追加当前项目名称，不再播报 `Codex` 或具体任务标题。登录授权信息仅保存在 Windows 凭据管理器中，不会写入 `settings.json`，也不会保存小米账号密码。目标音箱留空时，账号下只有一台在线小爱音箱才会自动选中；多台音箱必须显式选择，避免播报到错误设备。功能默认关闭，未启用时不会产生网络请求。
+该功能通过小米 MiNA 接口发送 TTS 命令，并非直接向音箱发起本地 HTTP 请求。播报内容使用“开始工作、任务完成、执行出错、任务被中断”等事件提示，并追加当前项目名称，不再播报 `Codex` 或具体任务标题。登录授权信息仅保存在 Windows 凭据管理器或 macOS Keychain 中，不会写入 `settings.json`，也不会保存小米账号密码。Windows 的 WebView2 loader 已嵌入 EXE，不需要旁置 DLL；macOS 不需要额外运行库。目标音箱留空时，账号下只有一台在线小爱音箱才会自动选中；多台音箱必须显式选择，避免播报到错误设备。功能默认关闭，未启用时不会产生网络请求。
 
 ## 运行监控策略
 
@@ -138,7 +138,7 @@ bash scripts/build-macos.sh osx-x64     # Intel
 ## 体积和内存优化
 
 - 不携带 .NET、JIT、Electron、Qt、SkiaSharp 或大型跨平台 UI 库。
-- Windows 与 macOS 都使用同一份像素云朵资源；发布包只携带 540×220 的运行时云朵图，不会让 2122×734 原图进入发布包或以解码位图形式驻留内存。
+- Windows 与 macOS 都使用同一份像素云朵资源；发布包只携带运行时所需的云朵资源，不会把未使用的源素材带入发布包。
 - 浮动精灵只缓存当前状态的 8 帧；扒边帧按需读取。
 - Windows 链接器使用 dead-strip/折叠等尺寸优化；macOS 使用 `-dead_strip`。
 - 发布脚本对 EXE、APP、ZIP、DMG 统一执行 10 MiB 硬限制。

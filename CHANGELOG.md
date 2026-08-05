@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.1.0] - 2026-08-05
+
+### Added
+- Windows 和 macOS 统一支持小爱音箱主动播报：共享 MiNA 核心、设备扫描、TTS、授权校验和事件文案；Windows 使用 WebView2，macOS 使用 WKWebView。
+- Windows WebView2 loader 按 x64/ARM64 嵌入单 EXE，发布包不再需要旁置 loader DLL。
+
+### Changed
+- 将监控事件副作用收敛到共享策略和有界更新队列，统一 Windows/macOS 的开始、完成、异常和中断行为，并用 generation 隔离 sessions 目录切换后的旧回调。
+- 登录流程改用一次性非持久化浏览器会话；Windows 临时 WebView2 profile 在登录结束后异步清理，macOS 使用非持久化 WebKit 数据存储。
+- 缩小小爱设备公共 DTO，删除未使用的会话监控 API、平台辅助函数和无用 include。
+- 删除未引用的旧云朵资源，并增强 Windows 启动冒烟和 macOS 打包临时目录清理。
+- CI/CD 升级 Actions 版本，发布前严格检查 8 个平台文件，发布后下载并验证 9 个资产及 SHA-256 校验和。
+
+### Tests
+- Windows x64/ARM64、macOS Intel/Apple Silicon 均执行原生构建、核心测试、资源校验、冒烟测试、预览图生成和打包；发布 workflow 另行验证正式 Release 的资产集合、标签和校验和。
 ## [4.0.3] - 2026-08-05
 
 ### Fixed

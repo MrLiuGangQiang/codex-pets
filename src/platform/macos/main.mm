@@ -24,14 +24,10 @@
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <cfloat>
-#include <cstdlib>
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -1096,8 +1092,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
 - (void)openXiaoAiLogin:(id)sender {
     (void)sender;
     __weak AppDelegate* weakSelf = self;
-    const auto folder = path_to_utf8(paths::application_data_directory() / "xiaomi-webview");
-    macos::start_xiaomi_browser_login(_settingsWindow, folder,
+    macos::start_xiaomi_browser_login(_settingsWindow,
         [weakSelf](std::string cookies, std::string error) {
             AppDelegate* strongSelf = weakSelf;
             if (!strongSelf) return;
@@ -1170,8 +1165,16 @@ using PendingMacUpdate = PendingMonitorUpdate;
 - (void)testXiaoAi:(id)sender {
     (void)sender;
     if (!_xiaoaiNotifier) return;
+    XiaoAiSettings candidate = _settings.xiaoai;
+    const NSInteger selectedDevice = _settingsXiaoAiDeviceField.indexOfSelectedItem;
+    if (selectedDevice >= 0 &&
+        selectedDevice < static_cast<NSInteger>(_xiaoaiDevices.size())) {
+        candidate.device_id = _xiaoaiDevices[static_cast<std::size_t>(selectedDevice)].id;
+    } else if (_settingsXiaoAiDeviceField) {
+        candidate.device_id = Utf8(_settingsXiaoAiDeviceField.stringValue);
+    }
     std::string error;
-    if (!_xiaoaiNotifier->test(_settings.xiaoai, &error)) {
+    if (!_xiaoaiNotifier->test(candidate, &error)) {
         NSAlert* alert = [[NSAlert alloc] init];
         alert.messageText = @"小米测试播报失败";
         alert.informativeText = Ns(error);

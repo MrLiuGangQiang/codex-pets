@@ -85,6 +85,12 @@ fi
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 TEMP_ROOT="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/codexpets-package.XXXXXX")"
+cleanup_temp_root() {
+  if [[ -n "${TEMP_ROOT:-}" && -d "$TEMP_ROOT" ]]; then
+    rm -rf -- "$TEMP_ROOT"
+  fi
+}
+trap cleanup_temp_root EXIT
 if [[ -n "$NOTARY_PROFILE" && "$IDENTITY" != "-" ]]; then
   NOTARY_ZIP="$TEMP_ROOT/CodeXPets-notary.zip"
   ditto -c -k --sequesterRsrc --keepParent "$APP" "$NOTARY_ZIP"

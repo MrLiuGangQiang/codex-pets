@@ -111,24 +111,30 @@ if ($canRun) {
     $startupCodex = Join-Path $startupRoot 'codex'
     $startupSessions = Join-Path $startupCodex 'sessions'
     $startupSettingsDirectory = Join-Path $startupLocal 'CodeXPets'
-    New-Item -ItemType Directory -Force -Path $startupSettingsDirectory, $startupSessions | Out-Null
-    $startupSettings = [ordered]@{
-        DockHoverHeight = 240
-        DockIdleHideSeconds = 10
-        DockRevealSeconds = 3
-        DockNotificationSeconds = 5
-        SoundEnabled = $false
-        PetVisible = $false
-        SessionsRoot = $startupSessions
-        PetPosition = $null
+    $buildRoot = [IO.Path]::GetFullPath($BuildDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $startupRootFull = [IO.Path]::GetFullPath($startupRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if (-not $startupRootFull.StartsWith($buildRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw "拒绝清理构建目录之外的启动冒烟临时目录：$startupRootFull"
     }
-    [IO.File]::WriteAllText(
-        (Join-Path $startupSettingsDirectory 'settings.json'),
-        ($startupSettings | ConvertTo-Json -Depth 4),
-        $utf8)
     $previousLocalAppData = $env:LOCALAPPDATA
     $previousCodexHome = $env:CODEX_HOME
     try {
+        New-Item -ItemType Directory -Force -Path $startupSettingsDirectory, $startupSessions | Out-Null
+        $startupSettings = [ordered]@{
+            DockHoverHeight = 240
+            DockIdleHideSeconds = 10
+            DockRevealSeconds = 3
+            DockNotificationSeconds = 5
+            SoundEnabled = $false
+            PetVisible = $false
+            SessionsRoot = $startupSessions
+            PetPosition = $null
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $startupSettingsDirectory 'settings.json'),
+            ($startupSettings | ConvertTo-Json -Depth 4),
+            $utf8)
         $env:LOCALAPPDATA = $startupLocal
         $env:CODEX_HOME = $startupCodex
         & $executable.FullName --startup-smoke-test
@@ -137,6 +143,17 @@ if ($canRun) {
     finally {
         $env:LOCALAPPDATA = $previousLocalAppData
         $env:CODEX_HOME = $previousCodexHome
+        for ($attempt = 0; $attempt -lt 20 -and (Test-Path -LiteralPath $startupRootFull); $attempt++) {
+            try {
+                [IO.Directory]::Delete($startupRootFull, $true)
+            }
+            catch {
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if (Test-Path -LiteralPath $startupRootFull) {
+            Write-Warning "启动冒烟临时目录未能立即删除，将由系统临时目录清理：$startupRootFull"
+        }
     }
 }
 else {

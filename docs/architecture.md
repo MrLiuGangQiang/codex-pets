@@ -1,4 +1,4 @@
-# CodeXPets 4.0 原生架构
+# CodeXPets 4.1 原生架构
 
 ## 总览
 
@@ -30,6 +30,8 @@ Codex sessions/*.jsonl
 - `paths.*`：`CODEX_HOME`、用户目录、配置文件和 settings 路径。
 - `settings.*`：设置归一化、原子写入、旧 Windows/macOS 位置迁移。
 - `session_monitor.*`：JSONL 增量读取、活动 turn、异常、完成和计划进度。
+- `monitor_policy.*`：将任务生命周期事件统一归约为窗口唤出、声音和小爱播报副作用，保持 Windows/macOS 行为一致。
+- `monitor_update_queue.*`：有界、可合并的监控更新队列；目录切换使用 generation 隔离旧会话回调。
 - `app_logic.*`：视觉状态、吸附、边缘触发、任务选择和动画帧规则。
 - `visual_state.*`：完成、异常和中断的可见时段与新任务聚焦状态。
 - `presentation.*`：五种视觉状态的标题、正文、任务列表和计划进度文本合同。
@@ -46,17 +48,17 @@ Codex sessions/*.jsonl
 - Win32 分层透明窗口和 `WM_NCHITTEST` Alpha 穿透。
 - GDI+ 绘制文字、灯泡及精灵；云朵直接加载与 macOS 相同的 `540×220` 像素资源。
 - 通知区域图标、注册表登录启动、MCI MP3 播放。
-- `MonitorWorker` 事件通过隐藏消息窗口投递到 UI 线程；待处理快照在锁内合并并限制事件数量；通知标志确保消息队列中最多只有一条待处理的监控唤醒消息。
+- `MonitorWorker` 事件通过隐藏消息窗口投递到 UI 线程；平台层使用共享 `monitor_policy` 和 `monitor_update_queue`，待处理快照在锁内合并并限制事件数量；通知标志确保消息队列中最多只有一条待处理的监控唤醒消息。
 - 屏幕标识格式包含设备名和几何信息，兼容旧注册表中的 Base64 标识。
 
-发布时使用静态运行库/原生系统库，不携带第三方 DLL。链接阶段打开尺寸优化和 dead code elimination。
+发布时使用静态运行库/原生系统库。小爱登录所需的 WebView2 SDK loader 按目标架构嵌入 EXE 资源，并在首次使用时安全释放到用户运行时目录，不作为旁置 DLL 发布；链接阶段打开尺寸优化和 dead code elimination。
 
 ## macOS
 
 `src/platform/macos/main.mm` 使用：
 
 - `NSPanel` 透明无边框窗口，菜单栏 `NSStatusItem`。
-- `NSImage` 按需缓存精灵；云朵直接加载与 Windows 相同的 `540×220` 运行时 PNG，不会解码或常驻 2122×734 源图。灯泡及连接点使用 AppKit 绘制。
+- `NSImage` 按需缓存精灵；云朵直接加载与 Windows 相同的运行时 PNG。灯泡及连接点使用 AppKit 绘制。
 - `setIgnoresMouseEvents:` 配合 50 ms 全局鼠标轮询实现透明点击穿透；鼠标路径与边缘触发区相交时也会唤出吸附桌宠。
 - 手动拖动、左/右吸附、局部边缘唤出、多显示器恢复和 `--expression-demo` 五状态轮换。
 - `SMAppService` 登录启动，`NSSound` 播放语音。
@@ -83,8 +85,13 @@ Codex sessions/*.jsonl
 - `icons/`：菜单栏/通知区域状态图标。
 - `audio/`：开始、完成、异常语音。
 
-两个原生发布包都只携带 540×220 的运行时云朵图；2122×734 的源图仅保留在源码树中。macOS 构建只复制运行时目录，并由 `make-macos-icon.sh` 使用系统 `sips`/`iconutil` 生成 `AppIcon.icns`。
+两个原生发布包都只复制运行时真正需要的资源。macOS 构建只复制运行时目录，并由 `make-macos-icon.sh` 使用系统 `sips`/`iconutil` 生成 `AppIcon.icns`。
 
+## 小爱音箱与平台适配
+
+`xiaomi_speaker.*` 位于共享核心，负责 MiNA 请求、设备发现、授权校验、TTS 命令和统一错误处理。平台适配只实现传输与凭据存储：Windows 使用 WinHTTP 和 Credential Manager，macOS 使用 `NSURLSession` 和 Keychain；两端设置页面都提供登录、扫描、目标设备选择和测试播报。
+
+Windows 登录使用嵌入式 WebView2 loader 和一次性临时 profile，完成或取消后异步清理 profile；macOS 使用 `WKWebsiteDataStore` 的非持久化会话。两端只保存经过校验并压缩后的授权信息，不保存账号密码或网页缓存。
 ## 设置和迁移
 
 统一 JSON 设置文件通过临时文件加原子替换写入。启动时：

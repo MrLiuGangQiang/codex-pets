@@ -25,8 +25,6 @@
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <fstream>
-#include <sstream>
 
 
 namespace codexpets::windows {
@@ -1011,8 +1009,7 @@ void NativeApp::notify_xiaoai(XiaoAiEvent event, std::string_view title) {
 
 void NativeApp::open_xiaomi_login() {
     const auto owner = settings_window_ && IsWindow(settings_window_) ? settings_window_ : pet_window_;
-    const auto data_folder = (settings_store_.settings_file_path().parent_path() / L"xiaomi-webview").wstring();
-    start_xiaomi_browser_login(owner, data_folder, [this, owner](std::string cookies, std::string error) {
+    start_xiaomi_browser_login(owner, [this, owner](std::string cookies, std::string error) {
         if (!error.empty()) {
             MessageBoxW(owner, to_wide(error).c_str(), L"小米账号登录", MB_ICONWARNING | MB_OK);
             return;

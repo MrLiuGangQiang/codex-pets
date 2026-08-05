@@ -27,7 +27,7 @@ jobs:
             rid: win-arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Verify release version
         shell: pwsh
         run: |
@@ -38,7 +38,7 @@ jobs:
       - name: Build, test, and package
         shell: pwsh
         run: ./package.ps1 -RuntimeIdentifier ${{ matrix.rid }} -Toolchain msvc
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: release-${{ matrix.rid }}
           path: |
@@ -60,7 +60,7 @@ jobs:
             rid: osx-x64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Verify release version
         run: test "v$(tr -d '[:space:]' < VERSION)" = "${GITHUB_REF_NAME}"
       - name: Check signing secrets
@@ -133,7 +133,7 @@ jobs:
           if [[ -n "${MACOS_API_KEY_PATH:-}" ]]; then
             rm -f "$MACOS_API_KEY_PATH"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: release-macos-${{ matrix.arch }}
           path: |
@@ -146,23 +146,137 @@ jobs:
     needs: [windows, macos]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8.0.1
         with:
           pattern: release-*
           merge-multiple: true
           path: release
-      - name: Generate SHA-256 checksums
+      - name: Verify release asset set
+        shell: bash
         run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          expected=(
+            "CodeXPets-v${version}-win-x64.exe"
+            "CodeXPets-v${version}-win-x64.zip"
+            "CodeXPets-v${version}-win-arm64.exe"
+            "CodeXPets-v${version}-win-arm64.zip"
+            "CodeXPets-v${version}-macos-x64.zip"
+            "CodeXPets-v${version}-macos-x64.dmg"
+            "CodeXPets-v${version}-macos-arm64.zip"
+            "CodeXPets-v${version}-macos-arm64.dmg"
+          )
+          declare -A expected_set=()
+          for file in "${expected[@]}"; do
+            expected_set["$file"]=1
+            [[ -f "release/$file" ]] || {
+              echo "Missing release asset: $file" >&2
+              exit 1
+            }
+          done
+          actual_count=0
+          for path in release/*; do
+            [[ -f "$path" ]] || continue
+            actual_count=$((actual_count + 1))
+            name="$(basename "$path")"
+            [[ -n "${expected_set[$name]:-}" ]] || {
+              echo "Unexpected release file: $name" >&2
+              exit 1
+            }
+          done
+          [[ "$actual_count" -eq "${#expected[@]}" ]] || {
+            echo "Expected ${#expected[@]} platform files, found $actual_count" >&2
+            exit 1
+          }
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
           cd release
-          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\0' \
-            | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          sha256sum \
+            "CodeXPets-v${version}-win-x64.exe" \
+            "CodeXPets-v${version}-win-x64.zip" \
+            "CodeXPets-v${version}-win-arm64.exe" \
+            "CodeXPets-v${version}-win-arm64.zip" \
+            "CodeXPets-v${version}-macos-x64.zip" \
+            "CodeXPets-v${version}-macos-x64.dmg" \
+            "CodeXPets-v${version}-macos-arm64.zip" \
+            "CodeXPets-v${version}-macos-arm64.dmg" > SHA256SUMS.txt
+          sha256sum --check --strict SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           gh release create "${GITHUB_REF_NAME}" release/* \
             --repo "${GITHUB_REPOSITORY}" \
             --title "CodeXPets ${GITHUB_REF_NAME}" \
             --generate-notes \
             --verify-tag
+
+  verify:
+    name: Verify published GitHub release
+    needs: publish
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-verification
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir release-verification \
+            --clobber
+      - name: Validate assets and checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          expected=(
+            "CodeXPets-v${version}-win-x64.exe"
+            "CodeXPets-v${version}-win-x64.zip"
+            "CodeXPets-v${version}-win-arm64.exe"
+            "CodeXPets-v${version}-win-arm64.zip"
+            "CodeXPets-v${version}-macos-x64.zip"
+            "CodeXPets-v${version}-macos-x64.dmg"
+            "CodeXPets-v${version}-macos-arm64.zip"
+            "CodeXPets-v${version}-macos-arm64.dmg"
+            "SHA256SUMS.txt"
+          )
+          declare -A expected_set=()
+          for file in "${expected[@]}"; do
+            expected_set["$file"]=1
+            [[ -f "release-verification/$file" ]] || {
+              echo "Missing published asset: $file" >&2
+              exit 1
+            }
+          done
+          actual_count=0
+          for path in release-verification/*; do
+            [[ -f "$path" ]] || continue
+            actual_count=$((actual_count + 1))
+            name="$(basename "$path")"
+            [[ -n "${expected_set[$name]:-}" ]] || {
+              echo "Unexpected published asset: $name" >&2
+              exit 1
+            }
+          done
+          [[ "$actual_count" -eq "${#expected[@]}" ]] || {
+            echo "Expected ${#expected[@]} published assets, found $actual_count" >&2
+            exit 1
+          }
+          cd release-verification
+          sha256sum --check --strict SHA256SUMS.txt
+          metadata="$(gh release view "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json tagName,isDraft,isPrerelease)"
+          jq -e --arg tag "${GITHUB_REF_NAME}" \
+            '.tagName == $tag and (.isDraft | not) and (.isPrerelease | not)' \
+            <<< "$metadata" >/dev/null
+          echo "Published release ${GITHUB_REF_NAME} contains all expected assets and valid checksums."

@@ -15,7 +15,6 @@ namespace codexpets {
 enum class SoundCue : std::uint8_t { Started, Completed, Error };
 
 struct MonitorEventEffect {
-    MonitorEventKind event{MonitorEventKind::StateChanged};
     bool reveal_pet{};
     std::optional<SoundCue> sound;
     std::optional<XiaoAiEvent> xiaoai_event;

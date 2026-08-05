@@ -12,4 +12,4 @@
 - `assets/audio/`：开始、完成和异常语音提示。
 - `assets/app/AppIcon.png`：macOS 构建时由系统 `sips`/`iconutil` 转换为 `AppIcon.icns`；Windows 图标由原生资源脚本编译。
 
-CodeXPets 4.0 的运行时不依赖第三方 UI 或音频库；图片由 Win32 GDI+ 或 AppKit 按需加载，音频由 Windows MCI 或 macOS `NSSound` 播放。
+CodeXPets 4.1 的运行时不依赖第三方 UI 或音频库；图片由 Win32 GDI+ 或 AppKit 按需加载，音频由 Windows MCI 或 macOS `NSSound` 播放。Windows 小爱登录使用 Microsoft WebView2 SDK 的 loader（随源代码分发的 `LICENSE.txt` 与 `NOTICE.txt` 适用），并按目标架构嵌入应用资源。
