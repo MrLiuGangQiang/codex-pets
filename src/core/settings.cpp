@@ -70,6 +70,7 @@ std::optional<PetPositionState> parse_position(const JsonValue* value,
 }
 
 std::string serialize_settings(const AppSettings& settings) {
+    const auto& xiaoai = settings.xiaoai;
     std::ostringstream stream;
     stream << "{\n"
            << "  \"DockHoverHeight\": " << settings.dock_hover_height << ",\n"
@@ -77,6 +78,14 @@ std::string serialize_settings(const AppSettings& settings) {
            << "  \"DockRevealSeconds\": " << settings.dock_reveal_seconds << ",\n"
            << "  \"DockNotificationSeconds\": " << settings.dock_notification_seconds << ",\n"
            << "  \"SoundEnabled\": " << (settings.sound_enabled ? "true" : "false") << ",\n"
+           << "  \"XiaoAi\": {\n"
+           << "    \"Enabled\": " << (xiaoai.enabled ? "true" : "false") << ",\n"
+           << "    \"DeviceId\": \"" << json_escape(xiaoai.device_id) << "\",\n"
+           << "    \"NotifyStarted\": " << (xiaoai.notify_started ? "true" : "false") << ",\n"
+           << "    \"NotifyCompleted\": " << (xiaoai.notify_completed ? "true" : "false") << ",\n"
+           << "    \"NotifyError\": " << (xiaoai.notify_error ? "true" : "false") << ",\n"
+           << "    \"NotifyInterrupted\": " << (xiaoai.notify_interrupted ? "true" : "false") << "\n"
+           << "  },\n"
            << "  \"PetVisible\": " << (settings.pet_visible ? "true" : "false") << ",\n"
            << "  \"SessionsRoot\": \"" << json_escape(path_to_utf8(settings.sessions_root)) << "\",\n"
            << "  \"PetPosition\": ";
@@ -145,6 +154,14 @@ AppSettings JsonSettingsStore::load() const noexcept {
         result.dock_notification_seconds = read_int(root, "DockNotificationSeconds", result.dock_notification_seconds);
         result.sound_enabled = read_bool(root, "SoundEnabled", result.sound_enabled);
         result.pet_visible = read_bool(root, "PetVisible", result.pet_visible);
+        if (const auto* xiaoai = property(root, "XiaoAi"); xiaoai && xiaoai->is_object()) {
+            result.xiaoai.enabled = read_bool(*xiaoai, "Enabled", result.xiaoai.enabled);
+            result.xiaoai.device_id = read_string(*xiaoai, "DeviceId");
+            result.xiaoai.notify_started = read_bool(*xiaoai, "NotifyStarted", result.xiaoai.notify_started);
+            result.xiaoai.notify_completed = read_bool(*xiaoai, "NotifyCompleted", result.xiaoai.notify_completed);
+            result.xiaoai.notify_error = read_bool(*xiaoai, "NotifyError", result.xiaoai.notify_error);
+            result.xiaoai.notify_interrupted = read_bool(*xiaoai, "NotifyInterrupted", result.xiaoai.notify_interrupted);
+        }
         const auto sessions = read_string(root, "SessionsRoot");
         if (!sessions.empty()) result.sessions_root = path_from_utf8(sessions);
         result.pet_position = parse_position(property(root, "PetPosition"), false);

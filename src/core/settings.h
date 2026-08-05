@@ -8,6 +8,17 @@
 
 namespace codexpets {
 
+struct XiaoAiSettings {
+    bool enabled{};
+    // Saved in the OS credential store, never in settings.json.
+    std::string auth_cookies;
+    std::string device_id;
+    bool notify_started{true};
+    bool notify_completed{true};
+    bool notify_error{true};
+    bool notify_interrupted{true};
+};
+
 struct AppSettings {
     int dock_hover_height{240};
     int dock_idle_hide_seconds{10};
@@ -17,6 +28,7 @@ struct AppSettings {
     bool pet_visible{true};
     std::filesystem::path sessions_root;
     std::optional<PetPositionState> pet_position;
+    XiaoAiSettings xiaoai;
 
     AppSettings();
     void normalize();

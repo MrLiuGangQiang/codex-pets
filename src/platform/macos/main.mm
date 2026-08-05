@@ -6,6 +6,8 @@
 #include <unistd.h>
 
 #include "app_logic.h"
+#include "monitor_policy.h"
+#include "monitor_update_queue.h"
 #include "paths.h"
 #include "platform_text.h"
 #include "presentation.h"
@@ -13,14 +15,17 @@
 #include "session_monitor.h"
 #include "settings.h"
 #include "visual_state.h"
+#include "xiaomi_browser_login.h"
+#include "xiaomi_credentials.h"
+#include "xiaomi_transport.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cfloat>
 #include <cstdlib>
-#include <deque>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -108,14 +113,6 @@ std::string NormalizedText(std::string value) {
         result.push_back(ch);
     }
     return result;
-}
-
-void AppendPendingMonitorEvents(std::vector<MonitorEventKind>& target,
-                                const std::vector<MonitorEventKind>& source) {
-    const auto available = monitor_pending_event_limit -
-        std::min(monitor_pending_event_limit, target.size());
-    const auto count = std::min(source.size(), available);
-    target.insert(target.end(), source.begin(), source.begin() + count);
 }
 
 struct MacRenderState {
@@ -680,11 +677,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 @property(nonatomic, weak) AppDelegate* owner;
 @end
 
-struct PendingMacUpdate {
-    std::uint64_t generation{};
-    std::vector<MonitorEventKind> events;
-    MonitorSnapshot snapshot;
-};
+using PendingMacUpdate = PendingMonitorUpdate;
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate, NSSoundDelegate> {
 @private
@@ -701,11 +694,15 @@ struct PendingMacUpdate {
     NSTextField* _settingsNotificationField;
     NSTextField* _settingsRootField;
     NSButton* _settingsSoundButton;
+    NSButton* _settingsXiaoAiEnabledButton;
+    NSComboBox* _settingsXiaoAiDeviceField;
     std::unique_ptr<JsonSettingsStore> _settingsStore;
     AppSettings _settings;
     VisualStateCoordinator _visualCoordinator;
     MonitorSnapshot _snapshot;
     std::unique_ptr<MonitorWorker> _monitorWorker;
+    std::unique_ptr<XiaoAiNotifier> _xiaoaiNotifier;
+    std::vector<XiaoAiDeviceInfo> _xiaoaiDevices;
     MacRenderState _renderState;
     DockEdge _dockEdge;
     std::string _dockScreenIdentifier;
@@ -732,19 +729,23 @@ struct PendingMacUpdate {
     bool _hasLastHoverCursor;
     NSInteger _lastMouseReception;
     id _globalMouseMonitor;
-    std::mutex _pendingMonitorMutex;
-    std::deque<PendingMacUpdate> _pendingMonitorUpdates;
+    MonitorUpdateQueue _pendingMonitorUpdates;
     std::uint64_t _monitorGeneration;
     bool _hasSnapshot;
     bool _expressionDemo;
     int _expressionDemoIndex;
     Clock::time_point _expressionDemoNext;
-    bool _terminating;
+    std::atomic_bool _terminating{false};
 }
 - (void)loadOrMigrateSettings;
 - (void)saveSettings;
 - (void)playSoundNamed:(NSString*)name;
 - (void)releaseCurrentSound;
+- (void)notifyXiaoAi:(XiaoAiEvent)event context:(std::string_view)context;
+- (void)openXiaoAiLogin:(id)sender;
+- (void)scanXiaoAiDevices:(id)sender;
+- (void)testXiaoAi:(id)sender;
+- (void)populateXiaoAiDevices;
 - (NSMenuItem*)menuItem:(NSString*)title action:(SEL)action;
 - (void)updateMenu:(NSMenu*)menu;
 - (void)togglePet:(id)sender;
@@ -867,14 +868,12 @@ struct PendingMacUpdate {
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender {
     (void)sender;
-    {
-        std::lock_guard lock(_pendingMonitorMutex);
-        _terminating = true;
-        _pendingMonitorUpdates.clear();
-    }
+    _terminating.store(true, std::memory_order_release);
+    _pendingMonitorUpdates.clear();
     [_timer invalidate];
     [self removeMouseMonitor];
     if (_monitorWorker) _monitorWorker->stop();
+    if (_xiaoaiNotifier) _xiaoaiNotifier->stop();
     [self releaseCurrentSound];
     [_renderer trimTransientImages];
     [self savePosition];
@@ -884,30 +883,40 @@ struct PendingMacUpdate {
 - (void)loadOrMigrateSettings {
     if (std::filesystem::exists(_settingsStore->settings_file_path())) {
         _settings = _settingsStore->load();
-        return;
+    } else {
+        AppSettings migrated;
+        NSUserDefaults* defaults = [[NSUserDefaults alloc]
+            initWithSuiteName:@"com.mrliugangqiang.codexpets"];
+        auto integer = [&](NSString* key, int fallback) {
+            return [defaults objectForKey:key] ? static_cast<int>([defaults integerForKey:key])
+                                               : fallback;
+        };
+        migrated.dock_hover_height = integer(@"DockHoverHeight", migrated.dock_hover_height);
+        migrated.dock_idle_hide_seconds = integer(@"DockIdleHideSeconds", migrated.dock_idle_hide_seconds);
+        migrated.dock_reveal_seconds = integer(@"DockRevealSeconds", migrated.dock_reveal_seconds);
+        migrated.dock_notification_seconds = integer(@"DockNotificationSeconds",
+                                                      migrated.dock_notification_seconds);
+        if ([defaults objectForKey:@"SoundEnabled"]) {
+            migrated.sound_enabled = [defaults boolForKey:@"SoundEnabled"];
+        }
+        NSString* root = [defaults stringForKey:@"SessionsRoot.macOS"];
+        if (!root) root = [defaults stringForKey:@"SessionsRoot"];
+        if (root.length > 0) migrated.sessions_root = path_from_utf8(Utf8(root));
+        NSData* position = [defaults dataForKey:@"PetPositionV1.macOS"];
+        if (!position) position = [defaults dataForKey:@"PetPositionV1"];
+        if (position.length > 0) {
+            std::string json(static_cast<const char*>(position.bytes), position.length);
+            migrated.pet_position = deserialize_legacy_macos_position(json);
+        }
+        migrated.normalize();
+        _settings = migrated;
+        std::string ignored;
+        _settingsStore->save(_settings, &ignored);
     }
-    AppSettings migrated;
-    NSUserDefaults* defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.mrliugangqiang.codexpets"];
-    auto integer = [&](NSString* key, int fallback) {
-        return [defaults objectForKey:key] ? static_cast<int>([defaults integerForKey:key]) : fallback;
-    };
-    migrated.dock_hover_height = integer(@"DockHoverHeight", migrated.dock_hover_height);
-    migrated.dock_idle_hide_seconds = integer(@"DockIdleHideSeconds", migrated.dock_idle_hide_seconds);
-    migrated.dock_reveal_seconds = integer(@"DockRevealSeconds", migrated.dock_reveal_seconds);
-    migrated.dock_notification_seconds = integer(@"DockNotificationSeconds", migrated.dock_notification_seconds);
-    if ([defaults objectForKey:@"SoundEnabled"]) migrated.sound_enabled = [defaults boolForKey:@"SoundEnabled"];
-    NSString* root = [defaults stringForKey:@"SessionsRoot.macOS"];
-    if (!root) root = [defaults stringForKey:@"SessionsRoot"];
-    if (root.length > 0) migrated.sessions_root = path_from_utf8(Utf8(root));
-    NSData* position = [defaults dataForKey:@"PetPositionV1.macOS"];
-    if (!position) position = [defaults dataForKey:@"PetPositionV1"];
-    if (position.length > 0) {
-        std::string json(static_cast<const char*>(position.bytes), position.length);
-        migrated.pet_position = deserialize_legacy_macos_position(json);
-    }
-    migrated.normalize();
-    _settings = migrated;
-    std::string ignored; _settingsStore->save(_settings, &ignored);
+    _settings.normalize();
+    _settings.xiaoai.auth_cookies = macos::load_xiaoai_authorization();
+    _xiaoaiNotifier = std::make_unique<XiaoAiNotifier>(macos::make_xiaoai_http_transport());
+    _xiaoaiNotifier->configure(_settings.xiaoai);
 }
 
 - (void)createPetWindow {
@@ -1079,6 +1088,100 @@ struct PendingMacUpdate {
     _currentSound = nil;
 }
 
+- (void)notifyXiaoAi:(XiaoAiEvent)event context:(std::string_view)context {
+    if (_xiaoaiNotifier) _xiaoaiNotifier->notify(event, context);
+}
+
+- (void)openXiaoAiLogin:(id)sender {
+    (void)sender;
+    __weak AppDelegate* weakSelf = self;
+    const auto folder = path_to_utf8(paths::application_data_directory() / "xiaomi-webview");
+    macos::start_xiaomi_browser_login(_settingsWindow, folder,
+        [weakSelf](std::string cookies, std::string error) {
+            AppDelegate* strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (!error.empty()) {
+                NSAlert* alert = [[NSAlert alloc] init];
+                alert.messageText = @"小米登录失败";
+                alert.informativeText = Ns(error);
+                [alert runModal];
+                return;
+            }
+            XiaoAiSettings candidate = strongSelf->_settings.xiaoai;
+            candidate.auth_cookies = std::move(cookies);
+            std::string validationError;
+            if (!strongSelf->_xiaoaiNotifier ||
+                !strongSelf->_xiaoaiNotifier->validate(candidate, &validationError)) {
+                NSAlert* alert = [[NSAlert alloc] init];
+                alert.messageText = @"小米授权校验失败";
+                alert.informativeText = Ns(validationError);
+                [alert runModal];
+                return;
+            }
+            std::string saveError;
+            if (!macos::save_xiaoai_authorization(candidate.auth_cookies, &saveError)) {
+                NSAlert* alert = [[NSAlert alloc] init];
+                alert.messageText = @"无法保存小米授权";
+                alert.informativeText = Ns(saveError);
+                [alert runModal];
+                return;
+            }
+            strongSelf->_settings.xiaoai.auth_cookies = candidate.auth_cookies;
+            strongSelf->_xiaoaiNotifier->configure(strongSelf->_settings.xiaoai);
+            [strongSelf saveSettings];
+            [strongSelf scanXiaoAiDevices:nil];
+        });
+}
+
+- (void)populateXiaoAiDevices {
+    if (!_settingsXiaoAiDeviceField) return;
+    [_settingsXiaoAiDeviceField removeAllItems];
+    NSInteger selected = NSNotFound;
+    for (std::size_t index = 0; index < _xiaoaiDevices.size(); ++index) {
+        const auto& device = _xiaoaiDevices[index];
+        std::string label = device.name.empty() ? device.id : device.name;
+        if (!device.alias.empty() && device.alias != device.name) {
+            label += " (" + device.alias + ")";
+        }
+        [_settingsXiaoAiDeviceField addItemWithObjectValue:Ns(label)];
+        if (device.id == _settings.xiaoai.device_id) selected = static_cast<NSInteger>(index);
+    }
+    if (selected != NSNotFound) [_settingsXiaoAiDeviceField selectItemAtIndex:selected];
+    else _settingsXiaoAiDeviceField.stringValue = Ns(_settings.xiaoai.device_id);
+}
+
+- (void)scanXiaoAiDevices:(id)sender {
+    (void)sender;
+    if (!_xiaoaiNotifier) return;
+    std::vector<XiaoAiDeviceInfo> devices;
+    std::string error;
+    if (!_xiaoaiNotifier->discover_devices(_settings.xiaoai, &devices, &error)) {
+        NSAlert* alert = [[NSAlert alloc] init];
+        alert.messageText = @"扫描小爱音箱失败";
+        alert.informativeText = Ns(error);
+        [alert runModal];
+        return;
+    }
+    _xiaoaiDevices = std::move(devices);
+    [self populateXiaoAiDevices];
+}
+
+- (void)testXiaoAi:(id)sender {
+    (void)sender;
+    if (!_xiaoaiNotifier) return;
+    std::string error;
+    if (!_xiaoaiNotifier->test(_settings.xiaoai, &error)) {
+        NSAlert* alert = [[NSAlert alloc] init];
+        alert.messageText = @"小米测试播报失败";
+        alert.informativeText = Ns(error);
+        [alert runModal];
+        return;
+    }
+    NSAlert* alert = [[NSAlert alloc] init];
+    alert.messageText = @"测试播报已发送";
+    [alert runModal];
+}
+
 - (void)setExpressionDemoEnabled:(BOOL)enabled { _expressionDemo = enabled; }
 
 - (void)startMonitor {
@@ -1097,29 +1200,12 @@ struct PendingMacUpdate {
 }
 
 - (void)enqueueMonitorUpdate:(PendingMacUpdate)update {
-    std::lock_guard lock(_pendingMonitorMutex);
-    if (_terminating) return;
-    if (_pendingMonitorUpdates.empty() ||
-        update.generation > _pendingMonitorUpdates.back().generation) {
-        _pendingMonitorUpdates.clear();
-        if (update.events.size() > monitor_pending_event_limit) {
-            update.events.resize(monitor_pending_event_limit);
-        }
-        _pendingMonitorUpdates.push_back(std::move(update));
-        return;
-    }
-    if (update.generation < _pendingMonitorUpdates.back().generation) return;
-    auto& pending = _pendingMonitorUpdates.back();
-    AppendPendingMonitorEvents(pending.events, update.events);
-    pending.snapshot = std::move(update.snapshot);
+    if (_terminating.load(std::memory_order_acquire)) return;
+    _pendingMonitorUpdates.push(std::move(update));
 }
 
 - (void)processMonitorUpdates {
-    std::deque<PendingMacUpdate> updates;
-    {
-        std::lock_guard lock(_pendingMonitorMutex);
-        updates.swap(_pendingMonitorUpdates);
-    }
+    auto updates = _pendingMonitorUpdates.take();
     for (auto& update : updates) [self applyMonitorUpdate:update];
 }
 
@@ -1128,36 +1214,19 @@ struct PendingMacUpdate {
     const BOOL first = !_hasSnapshot;
     _snapshot = std::move(update.snapshot);
     _hasSnapshot = true;
-    const auto now = Clock::now();
-    for (const auto event : update.events) {
-        const auto preferredTaskIndex = event == MonitorEventKind::PlanUpdated
-            ? _snapshot.latest_plan_update_active_title_index
-            : event == MonitorEventKind::TaskStarted
-                ? _snapshot.latest_event_active_title_index
-                : -1;
-        if (event == MonitorEventKind::TaskStarted) {
-            _visualCoordinator.record_started(preferredTaskIndex);
-            if (_settings.pet_visible) [_petWindow orderFrontRegardless];
-            [self playSoundNamed:@"voice-start"];
-        } else if (event == MonitorEventKind::TaskCompleted) {
-            _visualCoordinator.record_completed(now, std::chrono::seconds(
-                app_logic::cloud_notification_seconds(ReminderState::Completed,
-                                                       _settings.dock_notification_seconds)));
-            if (_settings.pet_visible) [_petWindow orderFrontRegardless];
-            [self playSoundNamed:@"voice-complete"];
-        } else if (event == MonitorEventKind::TaskAborted) {
-            _visualCoordinator.record_aborted(now, std::chrono::seconds(
-                app_logic::cloud_notification_seconds(ReminderState::Error,
-                                                       _settings.dock_notification_seconds)));
-            if (_settings.pet_visible) [_petWindow orderFrontRegardless];
-            [self playSoundNamed:@"voice-error"];
-        } else if (event == MonitorEventKind::TaskInterrupted) {
-            _visualCoordinator.record_interrupted(now, std::chrono::seconds(
-                app_logic::cloud_notification_seconds(ReminderState::Interrupted,
-                                                       _settings.dock_notification_seconds)));
-            if (_settings.pet_visible) [_petWindow orderFrontRegardless];
-        } else if (event == MonitorEventKind::PlanUpdated) {
-            _visualCoordinator.record_started(preferredTaskIndex);
+    const auto effects = apply_monitor_event_policy(
+        _visualCoordinator, _snapshot, update.events, _settings);
+    for (const auto& effect : effects) {
+        if (effect.reveal_pet && _settings.pet_visible) [_petWindow orderFrontRegardless];
+        if (effect.sound && _settings.sound_enabled) {
+            switch (*effect.sound) {
+                case SoundCue::Started: [self playSoundNamed:@"voice-start"]; break;
+                case SoundCue::Completed: [self playSoundNamed:@"voice-complete"]; break;
+                case SoundCue::Error: [self playSoundNamed:@"voice-error"]; break;
+            }
+        }
+        if (effect.xiaoai_event) {
+            [self notifyXiaoAi:*effect.xiaoai_event context:effect.xiaoai_context];
         }
     }
     if (first || !update.events.empty()) [self refreshVisual:YES];
@@ -1669,7 +1738,7 @@ struct PendingMacUpdate {
 - (void)showSettings:(id)sender {
     (void)sender;
     if (!_settingsWindow) {
-        _settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 620, 440)
+        _settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 620, 620)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                       NSWindowStyleMaskMiniaturizable
             backing:NSBackingStoreBuffered defer:NO];
@@ -1678,35 +1747,52 @@ struct PendingMacUpdate {
         _settingsWindow.collectionBehavior = NSWindowCollectionBehaviorMoveToActiveSpace;
         NSView* content = _settingsWindow.contentView;
 
-        NSTextField* heading = MakeLabel(@"桌面宠物与会话监听", NSMakeRect(22, 392, 380, 28));
+        NSTextField* heading = MakeLabel(@"桌面宠物与会话监听", NSMakeRect(22, 572, 380, 28));
         heading.font = [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold];
         [content addSubview:heading];
 
         const CGFloat labelX = 22, fieldX = 270;
-        [content addSubview:MakeLabel(@"边缘唤出区域高度（像素）", NSMakeRect(labelX, 346, 235, 24))];
-        [content addSubview:MakeLabel(@"吸附隐藏（秒，0=关闭）", NSMakeRect(labelX, 306, 235, 24))];
-        [content addSubview:MakeLabel(@"鼠标唤出后保持（秒）", NSMakeRect(labelX, 266, 235, 24))];
-        [content addSubview:MakeLabel(@"任务状态云朵保持（秒）", NSMakeRect(labelX, 226, 235, 24))];
-        [content addSubview:MakeLabel(@"Codex 会话目录", NSMakeRect(labelX, 183, 235, 24))];
-        _settingsHoverField = MakeTextField(@"", NSMakeRect(fieldX, 342, 130, 28));
-        _settingsIdleField = MakeTextField(@"", NSMakeRect(fieldX, 302, 130, 28));
-        _settingsRevealField = MakeTextField(@"", NSMakeRect(fieldX, 262, 130, 28));
-        _settingsNotificationField = MakeTextField(@"", NSMakeRect(fieldX, 222, 130, 28));
-        _settingsRootField = MakeTextField(@"", NSMakeRect(fieldX, 179, 242, 28));
+        [content addSubview:MakeLabel(@"边缘唤出区域高度（像素）", NSMakeRect(labelX, 526, 235, 24))];
+        [content addSubview:MakeLabel(@"吸附隐藏（秒，0=关闭）", NSMakeRect(labelX, 486, 235, 24))];
+        [content addSubview:MakeLabel(@"鼠标唤出后保持（秒）", NSMakeRect(labelX, 446, 235, 24))];
+        [content addSubview:MakeLabel(@"任务状态云朵保持（秒）", NSMakeRect(labelX, 406, 235, 24))];
+        [content addSubview:MakeLabel(@"Codex 会话目录", NSMakeRect(labelX, 363, 235, 24))];
+        _settingsHoverField = MakeTextField(@"", NSMakeRect(fieldX, 522, 130, 28));
+        _settingsIdleField = MakeTextField(@"", NSMakeRect(fieldX, 482, 130, 28));
+        _settingsRevealField = MakeTextField(@"", NSMakeRect(fieldX, 442, 130, 28));
+        _settingsNotificationField = MakeTextField(@"", NSMakeRect(fieldX, 402, 130, 28));
+        _settingsRootField = MakeTextField(@"", NSMakeRect(fieldX, 359, 242, 28));
         for (NSTextField* field in @[_settingsHoverField, _settingsIdleField,
                                     _settingsRevealField, _settingsNotificationField,
                                     _settingsRootField]) [content addSubview:field];
         [content addSubview:MakeButton(@"浏览…", self, @selector(browseSessionsRoot:),
-                                       NSMakeRect(520, 178, 78, 30))];
+                                       NSMakeRect(520, 358, 78, 30))];
         _settingsSoundButton = [NSButton checkboxWithTitle:@"播放开始、完成和异常语音提醒"
                                                     target:nil action:nil];
-        _settingsSoundButton.frame = NSMakeRect(22, 137, 390, 28);
+        _settingsSoundButton.frame = NSMakeRect(22, 320, 390, 28);
         [content addSubview:_settingsSoundButton];
+
+        _settingsXiaoAiEnabledButton = [NSButton checkboxWithTitle:@"启用小爱音箱主动播报"
+                                                              target:nil action:nil];
+        _settingsXiaoAiEnabledButton.frame = NSMakeRect(22, 278, 300, 28);
+        [content addSubview:_settingsXiaoAiEnabledButton];
+        [content addSubview:MakeLabel(@"目标音箱（可填写设备 ID 或名称）",
+                                      NSMakeRect(22, 238, 240, 24))];
+        _settingsXiaoAiDeviceField = [[NSComboBox alloc] initWithFrame:NSMakeRect(270, 234, 328, 28)];
+        _settingsXiaoAiDeviceField.editable = YES;
+        _settingsXiaoAiDeviceField.usesDataSource = NO;
+        [content addSubview:_settingsXiaoAiDeviceField];
+        [content addSubview:MakeButton(@"浏览器登录", self, @selector(openXiaoAiLogin:),
+                                       NSMakeRect(22, 194, 108, 30))];
+        [content addSubview:MakeButton(@"扫描设备", self, @selector(scanXiaoAiDevices:),
+                                       NSMakeRect(142, 194, 108, 30))];
+        [content addSubview:MakeButton(@"测试播报", self, @selector(testXiaoAi:),
+                                       NSMakeRect(262, 194, 108, 30))];
 
         NSTextField* hint = MakeLabel(
             @"CodeXPets 仅增量读取该目录中的 JSONL 会话文件；使用轻量轮询，"
-             @"不会启动额外服务，也不会修改 Codex 文件。",
-            NSMakeRect(22, 75, 576, 48));
+             @"不会启动额外服务，也不会修改 Codex 文件。小米授权只保存在系统钥匙串中。",
+            NSMakeRect(22, 122, 576, 48));
         hint.textColor = NSColor.secondaryLabelColor;
         hint.lineBreakMode = NSLineBreakByWordWrapping;
         hint.maximumNumberOfLines = 2;
@@ -1728,6 +1814,9 @@ struct PendingMacUpdate {
     _settingsNotificationField.integerValue = _settings.dock_notification_seconds;
     _settingsRootField.stringValue = Ns(path_to_utf8(_settings.sessions_root));
     _settingsSoundButton.state = _settings.sound_enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    _settingsXiaoAiEnabledButton.state = _settings.xiaoai.enabled
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    [self populateXiaoAiDevices];
     [_settingsWindow makeKeyAndOrderFront:nil];
 }
 
@@ -1755,6 +1844,9 @@ struct PendingMacUpdate {
     _settingsNotificationField.integerValue = defaults.dock_notification_seconds;
     _settingsRootField.stringValue = Ns(path_to_utf8(defaults.sessions_root));
     _settingsSoundButton.state = defaults.sound_enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    _settingsXiaoAiEnabledButton.state = NSControlStateValueOff;
+    _settingsXiaoAiDeviceField.stringValue = @"";
+    [_settingsXiaoAiDeviceField removeAllItems];
 }
 
 - (void)cancelSettings:(id)sender {
@@ -1771,9 +1863,19 @@ struct PendingMacUpdate {
     next.dock_notification_seconds = static_cast<int>(_settingsNotificationField.integerValue);
     next.sessions_root = path_from_utf8(Utf8(_settingsRootField.stringValue));
     next.sound_enabled = _settingsSoundButton.state == NSControlStateValueOn;
+    next.xiaoai.enabled = _settingsXiaoAiEnabledButton.state == NSControlStateValueOn;
+    next.xiaoai.auth_cookies = _settings.xiaoai.auth_cookies;
+    const NSInteger selectedDevice = _settingsXiaoAiDeviceField.indexOfSelectedItem;
+    if (selectedDevice >= 0 &&
+        selectedDevice < static_cast<NSInteger>(_xiaoaiDevices.size())) {
+        next.xiaoai.device_id = _xiaoaiDevices[static_cast<std::size_t>(selectedDevice)].id;
+    } else {
+        next.xiaoai.device_id = Utf8(_settingsXiaoAiDeviceField.stringValue);
+    }
     next.normalize();
     const bool rootChanged = next.sessions_root != _settings.sessions_root;
     _settings = std::move(next);
+    if (_xiaoaiNotifier) _xiaoaiNotifier->configure(_settings.xiaoai);
     [self saveSettings];
     if (rootChanged) {
         if (_monitorWorker) _monitorWorker->stop();
@@ -1781,10 +1883,7 @@ struct PendingMacUpdate {
         _snapshot = MonitorSnapshot{};
         _hasSnapshot = false;
         _visualCoordinator = VisualStateCoordinator{};
-        {
-            std::lock_guard lock(_pendingMonitorMutex);
-            _pendingMonitorUpdates.clear();
-        }
+        _pendingMonitorUpdates.clear();
         [self startMonitor];
     }
     [_settingsWindow orderOut:nil];

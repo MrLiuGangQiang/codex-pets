@@ -53,12 +53,16 @@ struct PetPositionState {
 struct MonitorSnapshot {
     int active_count{};
     std::vector<std::string> active_titles;
+    std::vector<std::string> active_project_names;
     std::vector<std::optional<std::string>> active_plan_progress_labels;
     int total_plan_step_count{};
     int completed_plan_step_count{};
     std::string last_completed_title;
+    std::string last_completed_project_name;
     std::string last_aborted_title;
+    std::string last_aborted_project_name;
     std::string last_interrupted_title;
+    std::string last_interrupted_project_name;
     std::string last_event_type;
     int latest_event_active_title_index{-1};
     std::string diagnostics_text;

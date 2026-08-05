@@ -17,6 +17,8 @@ compile_commands.json
 *.exe
 *.pdb
 *.dll
+!third_party/webview2/x64/WebView2Loader.dll
+!third_party/webview2/arm64/WebView2Loader.dll
 *.dylib
 *.dSYM/
 *.app/

@@ -1,11 +1,14 @@
-﻿#include "app_logic.h"
+#include "app_logic.h"
 #include "json.h"
+#include "monitor_policy.h"
+#include "monitor_update_queue.h"
 #include "paths.h"
 #include "platform_text.h"
 #include "presentation.h"
 #include "render_layout.h"
 #include "session_monitor.h"
 #include "settings.h"
+#include "xiaomi_speaker.h"
 
 #include <chrono>
 #include <cmath>
@@ -131,6 +134,14 @@ void test_app_logic() {
     CHECK(!app_logic::should_mirror_floating_sprite({1500, 500}, work));
     CHECK_EQ(10, app_logic::cloud_notification_seconds(ReminderState::Error, 5));
     CHECK_EQ(5, app_logic::cloud_notification_seconds(ReminderState::Completed, 5));
+
+    const std::vector<std::string> active_titles{"任务 A", "任务 B"};
+    const std::vector<std::string> project_names{"项目 A", "项目 B"};
+    CHECK_EQ(std::string_view("项目 B"),
+             app_logic::select_notification_label(project_names, 1));
+    CHECK_EQ(std::string_view("项目 A"),
+             app_logic::select_notification_label(project_names, -1));
+    CHECK(app_logic::select_notification_label({}, 0).empty());
 
     CHECK_EQ(std::string("进行中(1/3) • 2/4"),
              app_logic::format_busy_header(std::string_view("1/3"), 1, 4));
@@ -391,6 +402,10 @@ void test_paths_and_settings() {
     settings.dock_notification_seconds = 8;
     settings.sound_enabled = false;
     settings.pet_visible = false;
+    settings.xiaoai.enabled = true;
+    settings.xiaoai.auth_cookies = "serviceToken=test-token";
+    settings.xiaoai.device_id = "speaker-device";
+    settings.xiaoai.notify_interrupted = false;
     settings.sessions_root = root.path / "sessions";
     settings.pet_position = PetPositionState{DockEdge::Right, "Display A|0,0,1920,1080", 1, 0.42};
     std::string error;
@@ -402,6 +417,10 @@ void test_paths_and_settings() {
     CHECK_EQ(8, loaded.dock_notification_seconds);
     CHECK(!loaded.sound_enabled);
     CHECK(!loaded.pet_visible);
+    CHECK(loaded.xiaoai.enabled);
+    CHECK(loaded.xiaoai.auth_cookies.empty());
+    CHECK_EQ(settings.xiaoai.device_id, loaded.xiaoai.device_id);
+    CHECK(!loaded.xiaoai.notify_interrupted);
     CHECK_EQ(std::filesystem::absolute(settings.sessions_root).lexically_normal(), loaded.sessions_root);
     CHECK(loaded.pet_position == settings.pet_position);
     CHECK(!std::filesystem::exists(root.path / "settings.json.tmp"));
@@ -419,9 +438,154 @@ void test_paths_and_settings() {
     CHECK(!deserialize_legacy_macos_position("{ invalid json").has_value());
 }
 
+void test_xiaoai_protocol() {
+    std::vector<XiaoAiHttpRequest> requests;
+    XiaoAiHttpTransport transport = [&](const XiaoAiHttpRequest& request) {
+        requests.push_back(request);
+        XiaoAiHttpResponse response;
+        response.status = 200;
+        if (requests.size() == 1) {
+            response.body = R"({"code":0,"data":[{"deviceID":"speaker-device","hardware":"l09a","serialNumber":"speaker-serial","mac":"aa:bb:cc:dd:ee:ff","alias":"Art"}]})";
+        } else {
+            response.body = R"({"code":0})";
+        }
+        return response;
+    };
+    XiaoAiSettings settings;
+    settings.enabled = true;
+    settings.auth_cookies = "userId=user; serviceToken=token";
+    settings.device_id = "speaker-device";
+    XiaoAiNotifier notifier(std::move(transport));
+    std::string error;
+    CHECK(notifier.validate(settings, &error));
+    CHECK(error.empty());
+    CHECK_EQ(1, static_cast<int>(requests.size()));
+    requests.clear();
+    CHECK(notifier.test(settings, &error));
+    CHECK(error.empty());
+    CHECK_EQ(2, static_cast<int>(requests.size()));
+    CHECK(requests[0].url.find("/admin/v2/device_list?") != std::string::npos);
+    CHECK(requests[0].url.find("master=0") != std::string::npos);
+    CHECK(requests[0].headers[0].second.find("MICO/AndroidApp/") != std::string::npos);
+    const auto cookie = std::find_if(requests[0].headers.begin(), requests[0].headers.end(),
+        [](const auto& header) { return header.first == "Cookie"; });
+    CHECK(cookie != requests[0].headers.end());
+    CHECK(cookie->second.find("serviceToken=token") != std::string::npos);
+    CHECK(requests[1].body.find("text_to_speech") != std::string::npos);
+    CHECK(requests[1].body.find("Codex") == std::string::npos);
+    const auto ubus_cookie = std::find_if(requests[1].headers.begin(), requests[1].headers.end(),
+        [](const auto& header) { return header.first == "Cookie"; });
+    CHECK(ubus_cookie != requests[1].headers.end());
+    CHECK(ubus_cookie->second.find("sn=speaker-serial") != std::string::npos);
+    CHECK(ubus_cookie->second.find("hardware=l09a") != std::string::npos);
+    CHECK(ubus_cookie->second.find("deviceId=speaker-device") != std::string::npos);
+
+    std::vector<XiaoAiHttpRequest> passport_requests;
+    XiaoAiHttpTransport passport_transport = [&](const XiaoAiHttpRequest& request) {
+        passport_requests.push_back(request);
+        if (request.url.find("account.xiaomi.com/pass/serviceLogin") != std::string::npos) {
+            return XiaoAiHttpResponse{200,
+                R"(&&&START&&&{"code":0,"ssecurity":"abc","nonce":"123","location":"https://api2.mina.mi.com/sts?sid=micoapi"})",
+                {{"Set-Cookie", "serviceToken=account-token; Path=/; HttpOnly"}}};
+        }
+        if (request.url.find("/sts?") != std::string::npos) {
+            return XiaoAiHttpResponse{302, {}, {{"Set-Cookie", "serviceToken=mina-token; Path=/; HttpOnly"}}};
+        }
+        return XiaoAiHttpResponse{200,
+            R"({"code":0,"data":[{"deviceID":"speaker-device","hardware":"l09a"}]})", {}};
+    };
+    XiaoAiSettings passport_settings;
+    passport_settings.enabled = true;
+    passport_settings.auth_cookies = "userId=user; passToken=passport-token; deviceId=browser-device";
+    passport_settings.device_id = "speaker-device";
+    XiaoAiNotifier passport_notifier(std::move(passport_transport));
+    CHECK(passport_notifier.validate(passport_settings, &error));
+    CHECK(error.empty());
+    CHECK_EQ(3, static_cast<int>(passport_requests.size()));
+    CHECK(passport_requests[0].url.find("sid=micoapi") != std::string::npos);
+    CHECK(passport_requests[1].url.find("_userIdNeedEncrypt=true") != std::string::npos);
+    CHECK(passport_requests[1].url.find("clientSign=ehDduSM16SqOGc9aZjJ7lp3PGUk%3D") != std::string::npos);
+    CHECK(!passport_requests[1].follow_redirects);
+    CHECK(passport_requests[2].url.find("/admin/v2/device_list?") != std::string::npos);
+    const auto mina_cookie = std::find_if(passport_requests[2].headers.begin(), passport_requests[2].headers.end(),
+        [](const auto& header) { return header.first == "Cookie"; });
+    CHECK(mina_cookie != passport_requests[2].headers.end());
+    CHECK(mina_cookie->second.find("serviceToken=mina-token") != std::string::npos);
+    CHECK(mina_cookie->second.find("serviceToken=account-token") == std::string::npos);
+    CHECK(passport_settings.auth_cookies.find("serviceToken=mina-token") != std::string::npos);
+
+    XiaoAiHttpTransport rejected_transport = [](const XiaoAiHttpRequest&) {
+        return XiaoAiHttpResponse{401, {}, {}};
+    };
+    XiaoAiNotifier rejected_notifier(std::move(rejected_transport));
+    CHECK(!rejected_notifier.test(settings, &error));
+    CHECK_EQ(std::string("小米设备列表请求失败（HTTP 401）"), error);
+
+    XiaoAiSettings malformed = settings;
+    malformed.auth_cookies = "notserviceToken=token";
+    CHECK(!rejected_notifier.test(malformed, &error));
+    CHECK_EQ(std::string("请先点击“浏览器登录”完成小米授权"), error);
+
+    XiaoAiHttpTransport failing_transport = [](const XiaoAiHttpRequest&) -> XiaoAiHttpResponse {
+        throw std::runtime_error("network unavailable");
+    };
+    XiaoAiNotifier failing_notifier(std::move(failing_transport));
+    CHECK(!failing_notifier.test(settings, &error));
+    CHECK_EQ(std::string("network unavailable"), error);
+}
+void test_monitor_update_queue_and_policy() {
+    MonitorUpdateQueue queue;
+    MonitorSnapshot first_snapshot;
+    first_snapshot.active_count = 1;
+    CHECK(queue.push(PendingMonitorUpdate{1, {MonitorEventKind::TaskStarted}, first_snapshot}));
+    MonitorSnapshot second_snapshot;
+    second_snapshot.active_count = 2;
+    CHECK(queue.push(PendingMonitorUpdate{1,
+        {MonitorEventKind::PlanUpdated, MonitorEventKind::TaskCompleted}, second_snapshot}));
+    CHECK(!queue.push(PendingMonitorUpdate{0, {MonitorEventKind::TaskAborted}, {}}));
+    auto updates = queue.take();
+    CHECK_EQ(std::size_t(1), updates.size());
+    CHECK_EQ(2, updates.front().snapshot.active_count);
+    CHECK_EQ(std::size_t(3), updates.front().events.size());
+    CHECK_EQ(MonitorEventKind::TaskCompleted, updates.front().events.back());
+
+    CHECK(queue.push(PendingMonitorUpdate{2, {MonitorEventKind::TaskStarted}, {}}));
+    updates = queue.take();
+    CHECK_EQ(std::uint64_t{2}, updates.front().generation);
+
+    AppSettings settings;
+    settings.dock_notification_seconds = 5;
+    MonitorSnapshot snapshot;
+    snapshot.active_count = 2;
+    snapshot.active_project_names = {"alpha", "beta"};
+    snapshot.latest_event_active_title_index = 1;
+    snapshot.last_completed_project_name = "alpha";
+    VisualStateCoordinator coordinator;
+    const auto effects = apply_monitor_event_policy(
+        coordinator, snapshot,
+        {MonitorEventKind::TaskStarted, MonitorEventKind::TaskCompleted}, settings,
+        Clock::now());
+    CHECK_EQ(std::size_t(2), effects.size());
+    CHECK(effects[0].reveal_pet);
+    CHECK(effects[0].sound.has_value());
+    CHECK_EQ(SoundCue::Started, *effects[0].sound);
+    CHECK_EQ(XiaoAiEvent::Started, *effects[0].xiaoai_event);
+    CHECK_EQ(std::string("beta"), effects[0].xiaoai_context);
+    CHECK_EQ(SoundCue::Completed, *effects[1].sound);
+    CHECK_EQ(std::string("alpha"), effects[1].xiaoai_context);
+    CHECK_EQ(ReminderState::Completed, coordinator.select(snapshot.active_count, Clock::now()));
+}
+
+void test_xiaoai_authorization_compaction() {
+    CHECK_EQ(std::string("userId=u; serviceToken=s; deviceId=d"),
+             compact_xiaoai_authorization("foo=x; userId=u; serviceToken=s; deviceId=d; bar=y"));
+    CHECK(compact_xiaoai_authorization("userId=u").empty());
+}
+
 void test_session_monitor_lifecycle() {
     TempDirectory root("CodeXPetsMonitor_");
     const auto file = create_session(root.path, "rollout-main.jsonl",
+        "{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"cwd\":\"D:\\\\Projects\\alpha\",\"git\":{\"repository_url\":\"https://github.com/example/alpha.git\"}}}\n"
         "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"A\"}}\n"
         "{\"timestamp\":\"2026-08-01T00:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello title test\"}}\n");
     CodexSessionMonitor monitor(root.path);
@@ -431,6 +595,8 @@ void test_session_monitor_lifecycle() {
     const auto lean_snapshot = monitor.snapshot(false);
     CHECK(lean_snapshot.diagnostics_text.empty());
     CHECK_EQ(1, lean_snapshot.active_count);
+    CHECK_EQ(std::size_t(1), lean_snapshot.active_project_names.size());
+    CHECK_EQ(std::string("alpha"), lean_snapshot.active_project_names.front());
 
     const std::string large_response(180 * 1024, 'x');
     append(file,
@@ -461,6 +627,7 @@ void test_session_monitor_lifecycle() {
     monitor.poll();
     CHECK_EQ(0, monitor.active_count());
     CHECK_EQ(std::string("Hello title test"), monitor.last_completed_title());
+    CHECK_EQ(std::string("alpha"), monitor.snapshot(false).last_completed_project_name);
     auto events = monitor.take_events();
     CHECK(std::find(events.begin(), events.end(), MonitorEventKind::TaskCompleted) != events.end());
 
@@ -762,6 +929,9 @@ int main() {
         {"render_layout_contract", test_render_layout_contract},
         {"visual_content_contract", test_visual_content_contract},
         {"paths_and_settings", test_paths_and_settings},
+        {"xiaoai_protocol", test_xiaoai_protocol},
+        {"xiaoai_authorization_compaction", test_xiaoai_authorization_compaction},
+        {"monitor_update_queue_and_policy", test_monitor_update_queue_and_policy},
         {"session_monitor_lifecycle", test_session_monitor_lifecycle},
         {"session_monitor_success_and_order", test_session_monitor_success_and_order},
         {"plan_update_focus_survives_later_event", test_plan_update_focus_survives_later_event},
@@ -787,4 +957,3 @@ int main() {
               << " test groups passed\n";
     return failures == 0 ? 0 : 1;
 }
-

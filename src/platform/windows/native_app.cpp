@@ -1,6 +1,10 @@
 #include "native_app.h"
+#include "xiaomi_transport.h"
+#include "xiaomi_browser_login.h"
+#include "xiaomi_credentials.h"
 
 #include "../../../src/core/app_logic.h"
+#include "../../../src/core/monitor_policy.h"
 #include "../../../src/core/platform_text.h"
 #include "../../../src/core/paths.h"
 #include "../../../src/core/presentation.h"
@@ -54,6 +58,11 @@ constexpr UINT kSettingsRoot = 4105;
 constexpr UINT kSettingsSound = 4106;
 constexpr UINT kSettingsHeader = 4107;
 constexpr UINT kSettingsHint = 4108;
+constexpr UINT kSettingsXiaoAiEnabled = 4109;
+constexpr UINT kSettingsXiaoAiDevice = 4113;
+constexpr UINT kSettingsXiaoAiTest = 4114;
+constexpr UINT kSettingsXiaoAiLogin = 4115;
+constexpr UINT kSettingsXiaoAiScan = 4116;
 
 int read_edit_int(HWND parent, int control, int fallback) {
     wchar_t buffer[64]{};
@@ -99,6 +108,8 @@ std::string decode_base64_utf8(std::wstring_view encoded) {
     result.resize(size);
     return result;
 }
+
+std::string win32_error(std::string_view action, DWORD code);
 
 std::string win32_error(std::string_view action, DWORD code) {
     std::string result(action);
@@ -225,6 +236,10 @@ bool NativeApp::initialize(std::string* error) {
         save_settings();
     } else settings_ = settings_store_.load();
     settings_.normalize();
+    remove_legacy_xiaoai_authorization();
+    settings_.xiaoai.auth_cookies = load_xiaoai_authorization();
+    xiaoai_notifier_ = std::make_unique<XiaoAiNotifier>(make_xiaoai_http_transport());
+    xiaoai_notifier_->configure(settings_.xiaoai);
 
     if (!renderer_.initialize(instance_, error)) return false;
     if (!renderer_.validate(error)) return false;
@@ -287,29 +302,16 @@ bool NativeApp::create_pet_window(std::string* error) {
 
 void NativeApp::start_monitor() {
     monitor_message_posted_.store(false, std::memory_order_release);
+    const auto generation = ++monitor_generation_;
     monitor_worker_ = std::make_unique<MonitorWorker>(settings_.sessions_root,
-        [this](std::vector<MonitorEventKind> events, MonitorSnapshot snapshot) {
-            constexpr auto max_pending_events = monitor_pending_event_limit;
-            bool post_message = false;
-            {
-                std::lock_guard lock(pending_mutex_);
-                if (pending_updates_.empty()) {
-                    PendingUpdate update;
-                    const auto count = std::min(events.size(), max_pending_events);
-                    update.events.insert(update.events.end(), events.begin(), events.begin() + count);
-                    update.snapshot = std::move(snapshot);
-                    pending_updates_.push_back(std::move(update));
-                } else {
-                    auto& update = pending_updates_.back();
-                    const auto available = max_pending_events - std::min(max_pending_events,
-                                                                          update.events.size());
-                    const auto count = std::min(events.size(), available);
-                    update.events.insert(update.events.end(), events.begin(), events.begin() + count);
-                    update.snapshot = std::move(snapshot);
-                }
-                post_message = !monitor_message_posted_.exchange(true, std::memory_order_acq_rel);
+        [this, generation](std::vector<MonitorEventKind> events, MonitorSnapshot snapshot) {
+            if (!pending_updates_.push(PendingMonitorUpdate{
+                    generation, std::move(events), std::move(snapshot)})) return;
+            const bool post_message =
+                !monitor_message_posted_.exchange(true, std::memory_order_acq_rel);
+            if (post_message && message_window_) {
+                PostMessageW(message_window_, kMonitorMessage, 0, 0);
             }
-            if (post_message && message_window_) PostMessageW(message_window_, kMonitorMessage, 0, 0);
         });
     monitor_worker_->start();
 }
@@ -342,6 +344,7 @@ void NativeApp::shutdown() noexcept {
     shutting_down_ = true;
     if (pet_window_) KillTimer(pet_window_, timer_id_);
     if (monitor_worker_) monitor_worker_->stop();
+    if (xiaoai_notifier_) xiaoai_notifier_->stop();
     save_position();
     remove_tray_icon();
     if (settings_window_) DestroyWindow(settings_window_);
@@ -518,64 +521,34 @@ void NativeApp::save_settings() {
     settings_store_.save(settings_, &ignored);
 }
 
-void NativeApp::handle_monitor_event(MonitorEventKind event, int preferred_task_index) {
-    const auto now = Clock::now();
-    switch (event) {
-        case MonitorEventKind::TaskStarted:
-            visual_coordinator_.record_started(preferred_task_index);
-            show_pet(settings_.pet_visible);
-            if (settings_.sound_enabled) play_sound(NotificationSound::Started);
-            break;
-        case MonitorEventKind::TaskCompleted:
-            visual_coordinator_.record_completed(now,
-                std::chrono::seconds(app_logic::cloud_notification_seconds(
-                    ReminderState::Completed, settings_.dock_notification_seconds)));
-            show_pet(settings_.pet_visible);
-            if (settings_.sound_enabled) play_sound(NotificationSound::Completed);
-            break;
-        case MonitorEventKind::TaskAborted:
-            visual_coordinator_.record_aborted(now,
-                std::chrono::seconds(app_logic::cloud_notification_seconds(
-                    ReminderState::Error, settings_.dock_notification_seconds)));
-            show_pet(settings_.pet_visible);
-            if (settings_.sound_enabled) play_sound(NotificationSound::Error);
-            break;
-        case MonitorEventKind::TaskInterrupted:
-            visual_coordinator_.record_interrupted(now,
-                std::chrono::seconds(app_logic::cloud_notification_seconds(
-                    ReminderState::Interrupted, settings_.dock_notification_seconds)));
-            show_pet(settings_.pet_visible);
-            break;
-        case MonitorEventKind::StateChanged:
-            break;
-        case MonitorEventKind::PlanUpdated:
-            visual_coordinator_.record_started(preferred_task_index);
-            break;
-    }
-}
-
-void NativeApp::handle_monitor_update(const PendingUpdate& update) {
+void NativeApp::handle_monitor_update(const PendingMonitorUpdate& update) {
+    if (update.generation != monitor_generation_) return;
     const bool first = !has_snapshot_;
     snapshot_ = update.snapshot;
     has_snapshot_ = true;
-    for (const auto event : update.events) {
-        const auto preferred_task_index = event == MonitorEventKind::PlanUpdated
-            ? snapshot_.latest_plan_update_active_title_index
-            : event == MonitorEventKind::TaskStarted
-                ? snapshot_.latest_event_active_title_index
-                : -1;
-        handle_monitor_event(event, preferred_task_index);
+    const auto effects = apply_monitor_event_policy(
+        visual_coordinator_, snapshot_, update.events, settings_);
+    for (const auto& effect : effects) {
+        if (effect.reveal_pet) show_pet(settings_.pet_visible);
+        if (settings_.sound_enabled && effect.sound) {
+            switch (*effect.sound) {
+                case SoundCue::Started: play_sound(NotificationSound::Started); break;
+                case SoundCue::Completed: play_sound(NotificationSound::Completed); break;
+                case SoundCue::Error: play_sound(NotificationSound::Error); break;
+            }
+        }
+        if (effect.xiaoai_event) {
+            notify_xiaoai(*effect.xiaoai_event, effect.xiaoai_context);
+        }
     }
     if (first || !update.events.empty()) refresh_visual(true);
 }
 
 void NativeApp::process_monitor_updates() {
-    std::deque<PendingUpdate> updates;
-    {
-        std::lock_guard lock(pending_mutex_);
-        updates.swap(pending_updates_);
-        monitor_message_posted_.store(false, std::memory_order_release);
-    }
+    // Clear the posted bit before taking the queue. A worker that races with
+    // this method may post an extra wake-up, but can never strand an update.
+    monitor_message_posted_.store(false, std::memory_order_release);
+    auto updates = pending_updates_.take();
     for (const auto& update : updates) handle_monitor_update(update);
 }
 
@@ -1032,6 +1005,123 @@ std::wstring NativeApp::audio_path(NotificationSound sound) {
     return path.native();
 }
 
+void NativeApp::notify_xiaoai(XiaoAiEvent event, std::string_view title) {
+    if (xiaoai_notifier_) xiaoai_notifier_->notify(event, title);
+}
+
+void NativeApp::open_xiaomi_login() {
+    const auto owner = settings_window_ && IsWindow(settings_window_) ? settings_window_ : pet_window_;
+    const auto data_folder = (settings_store_.settings_file_path().parent_path() / L"xiaomi-webview").wstring();
+    start_xiaomi_browser_login(owner, data_folder, [this, owner](std::string cookies, std::string error) {
+        if (!error.empty()) {
+            MessageBoxW(owner, to_wide(error).c_str(), L"小米账号登录", MB_ICONWARNING | MB_OK);
+            return;
+        }
+        XiaoAiSettings candidate = settings_.xiaoai;
+        candidate.auth_cookies = cookies;
+        std::string validation_error;
+        if (!xiaoai_notifier_ || !xiaoai_notifier_->validate(candidate, &validation_error)) {
+            const auto message = std::string("小米登录已完成，但授权验证失败：") + validation_error +
+                "。授权信息未保存，请重新登录。";
+            MessageBoxW(owner, to_wide(message).c_str(), L"小米账号登录", MB_ICONERROR | MB_OK);
+            return;
+        }
+        candidate.auth_cookies = compact_xiaoai_authorization(candidate.auth_cookies);
+        std::string save_error;
+        if (!save_xiaoai_authorization(candidate.auth_cookies, &save_error)) {
+            MessageBoxW(owner, to_wide(save_error).c_str(), L"小米账号登录", MB_ICONERROR | MB_OK);
+            return;
+        }
+        // A verified login enables XiaoAi notifications immediately; otherwise a
+        // successful manual test would still leave all automatic events disabled.
+        settings_.xiaoai.enabled = true;
+        settings_.xiaoai.auth_cookies = std::move(candidate.auth_cookies);
+        if (settings_window_ && IsWindow(settings_window_)) {
+            SendDlgItemMessageW(settings_window_, kSettingsXiaoAiEnabled, BM_SETCHECK, BST_CHECKED, 0);
+        }
+        if (xiaoai_notifier_) xiaoai_notifier_->configure(settings_.xiaoai);
+        save_settings();
+        std::vector<XiaoAiDeviceInfo> found;
+        std::string scan_error;
+        if (xiaoai_notifier_ && xiaoai_notifier_->discover_devices(settings_.xiaoai, &found, &scan_error)) {
+            xiaoai_devices_ = std::move(found);
+            if (settings_window_ && IsWindow(settings_window_)) populate_xiaoai_device_selector(settings_window_);
+        }
+        MessageBoxW(owner, L"小米账号授权已验证。已扫描音箱，请从下拉框选择目标后测试播报。", L"小米账号登录", MB_OK);
+    });
+}
+
+void NativeApp::populate_xiaoai_device_selector(HWND hwnd) {
+    auto* selector = GetDlgItem(hwnd, kSettingsXiaoAiDevice);
+    if (!selector) return;
+    wchar_t current[1024]{};
+    GetWindowTextW(selector, current, ARRAYSIZE(current));
+    const auto wanted = to_utf8(current);
+    SendMessageW(selector, CB_RESETCONTENT, 0, 0);
+    int selected = CB_ERR;
+    for (std::size_t i = 0; i < xiaoai_devices_.size(); ++i) {
+        const auto& device = xiaoai_devices_[i];
+        const auto label = !device.alias.empty() ? device.alias : !device.name.empty() ? device.name : device.hardware;
+        if (label.empty()) continue;
+        const auto index = static_cast<int>(SendMessageW(selector, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(to_wide(label).c_str())));
+        if (index == CB_ERR || index == CB_ERRSPACE) continue;
+        SendMessageW(selector, CB_SETITEMDATA, static_cast<WPARAM>(index), static_cast<LPARAM>(i));
+        if (wanted == device.id || wanted == device.name || wanted == device.alias ||
+            settings_.xiaoai.device_id == device.id || settings_.xiaoai.device_id == device.name ||
+            settings_.xiaoai.device_id == device.alias) selected = index;
+    }
+    if (selected != CB_ERR) SendMessageW(selector, CB_SETCURSEL, static_cast<WPARAM>(selected), 0);
+    else if (!wanted.empty()) SetWindowTextW(selector, current);
+    else if (!settings_.xiaoai.device_id.empty()) SetWindowTextW(selector, to_wide(settings_.xiaoai.device_id).c_str());
+}
+
+void NativeApp::scan_xiaoai_devices() {
+    if (!xiaoai_notifier_) return;
+    XiaoAiSettings candidate = settings_.xiaoai;
+    if (settings_window_ && IsWindow(settings_window_)) {
+        const auto selected = static_cast<int>(SendDlgItemMessageW(settings_window_, kSettingsXiaoAiDevice, CB_GETCURSEL, 0, 0));
+        if (selected != CB_ERR) {
+            const auto data = static_cast<std::size_t>(SendDlgItemMessageW(settings_window_, kSettingsXiaoAiDevice, CB_GETITEMDATA, selected, 0));
+            if (data < xiaoai_devices_.size()) candidate.device_id = xiaoai_devices_[data].id;
+        }
+    }
+    std::vector<XiaoAiDeviceInfo> found;
+    std::string error;
+    if (!xiaoai_notifier_->discover_devices(candidate, &found, &error)) {
+        show_error(L"小爱音箱", to_wide(error));
+        return;
+    }
+    xiaoai_devices_ = std::move(found);
+    if (settings_window_ && IsWindow(settings_window_)) populate_xiaoai_device_selector(settings_window_);
+    MessageBoxW(settings_window_ ? settings_window_ : pet_window_,
+                (L"已扫描到 " + std::to_wstring(xiaoai_devices_.size()) + L" 台在线小爱音箱，请在下拉框中直接选择。").c_str(),
+                L"小爱音箱", MB_OK);
+}
+
+void NativeApp::test_xiaoai() {
+    if (!xiaoai_notifier_) return;
+    auto candidate = settings_.xiaoai;
+    if (settings_window_ && IsWindow(settings_window_)) {
+        const auto selected = static_cast<int>(SendDlgItemMessageW(settings_window_, kSettingsXiaoAiDevice, CB_GETCURSEL, 0, 0));
+        if (selected != CB_ERR) {
+            const auto data = static_cast<std::size_t>(SendDlgItemMessageW(settings_window_, kSettingsXiaoAiDevice, CB_GETITEMDATA, selected, 0));
+            if (data < xiaoai_devices_.size()) candidate.device_id = xiaoai_devices_[data].id;
+        } else {
+            wchar_t buffer[1024]{};
+            GetDlgItemTextW(settings_window_, kSettingsXiaoAiDevice, buffer, ARRAYSIZE(buffer));
+            candidate.device_id = to_utf8(buffer);
+        }
+    }
+    std::string error;
+    if (!xiaoai_notifier_->test(candidate, &error)) {
+        show_error(L"小爱音箱", to_wide(error));
+        return;
+    }
+    MessageBoxW(settings_window_ ? settings_window_ : pet_window_,
+                L"测试播报已发送。", L"小爱音箱", MB_OK);
+}
+
 void NativeApp::play_sound(NotificationSound sound) {
     const auto path = audio_path(sound);
     mciSendStringW(L"close codexpets_voice", nullptr, 0, nullptr);
@@ -1061,7 +1151,7 @@ void NativeApp::show_settings() {
     settings_window_ = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
                                        kSettingsClassName, L"CodeXPets 设置",
                                        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                       CW_USEDEFAULT, CW_USEDEFAULT, 560, 470,
+                                       CW_USEDEFAULT, CW_USEDEFAULT, 560, 650,
                                        pet_window_, nullptr, instance_, this);
     if (!settings_window_) return;
     ShowWindow(settings_window_, SW_SHOWNORMAL);
@@ -1127,17 +1217,49 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 24, 292, 180, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsSound)), instance_, nullptr);
             set_control_font(sound);
             SendMessageW(sound, BM_SETCHECK, settings_.sound_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+
+            auto* xiaoai = CreateWindowExW(0, L"BUTTON", L"启用小爱音箱主动播报",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 330, 230, 24, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiEnabled)), instance_, nullptr);
+            set_control_font(xiaoai);
+            SendMessageW(xiaoai, BM_SETCHECK, settings_.xiaoai.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+            auto* target_label = CreateWindowExW(0, L"STATIC", L"目标音箱",
+                WS_CHILD | WS_VISIBLE, 24, 362, 130, 24, hwnd, nullptr, instance_, nullptr);
+            set_control_font(target_label);
+            auto* target = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWN | CBS_AUTOHSCROLL,
+                160, 359, 365, 180, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiDevice)), instance_, nullptr);
+            set_control_font(target);
+            SetWindowTextW(target, to_wide(settings_.xiaoai.device_id).c_str());
+            populate_xiaoai_device_selector(hwnd);
+            auto* xiaoai_events = CreateWindowExW(0, L"STATIC",
+                L"播报事件：开始、完成、错误、中断（保存后生效）",
+                WS_CHILD | WS_VISIBLE, 24, 398, 430, 24, hwnd, nullptr, instance_, nullptr);
+            set_control_font(xiaoai_events);
+            auto* scan = CreateWindowExW(0, L"BUTTON", L"扫描音箱",
+                WS_CHILD | WS_VISIBLE, 235, 426, 100, 28, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiScan)), instance_, nullptr);
+            set_control_font(scan);
+            auto* login = CreateWindowExW(0, L"BUTTON", L"浏览器登录",
+                WS_CHILD | WS_VISIBLE, 340, 426, 105, 28, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiLogin)), instance_, nullptr);
+            set_control_font(login);
+            auto* test = CreateWindowExW(0, L"BUTTON", L"测试播报",
+                WS_CHILD | WS_VISIBLE, 450, 426, 100, 28, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiTest)), instance_, nullptr);
+            set_control_font(test);
             auto* hint = CreateWindowExW(0, L"STATIC",
-                L"程序只读取 JSONL，不修改 Codex 会话文件；设置会写入用户数据目录。",
-                WS_CHILD | WS_VISIBLE, 24, 326, 500, 34, hwnd,
+                L"有多台音箱时，请在“目标音箱”填写米家中显示的音箱名称；授权信息仅保存在 Windows 凭据管理器中。",
+                WS_CHILD | WS_VISIBLE, 24, 468, 510, 34, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsHint)), instance_, nullptr);
             set_control_font(hint);
             auto* defaults = CreateWindowExW(0, L"BUTTON", L"恢复默认", WS_CHILD | WS_VISIBLE,
-                24, 370, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsDefaults)), instance_, nullptr);
+                24, 535, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsDefaults)), instance_, nullptr);
             auto* cancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE,
-                370, 370, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsCancel)), instance_, nullptr);
+                370, 535, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsCancel)), instance_, nullptr);
             auto* apply = CreateWindowExW(0, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                455, 370, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsApply)), instance_, nullptr);
+                455, 535, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsApply)), instance_, nullptr);
             set_control_font(defaults); set_control_font(cancel); set_control_font(apply);
             return 0;
         }
@@ -1151,6 +1273,8 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 set_edit_int(hwnd, kSettingsNotification, defaults.dock_notification_seconds);
                 SetDlgItemTextW(hwnd, kSettingsRoot, defaults.sessions_root.c_str());
                 SendDlgItemMessageW(hwnd, kSettingsSound, BM_SETCHECK, BST_CHECKED, 0);
+                SendDlgItemMessageW(hwnd, kSettingsXiaoAiEnabled, BM_SETCHECK, BST_UNCHECKED, 0);
+                SetDlgItemTextW(hwnd, kSettingsXiaoAiDevice, L"");
                 return 0;
             }
             if (id == kSettingsBrowse) {
@@ -1164,6 +1288,9 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 }
                 return 0;
             }
+            if (id == kSettingsXiaoAiScan) { scan_xiaoai_devices(); return 0; }
+            if (id == kSettingsXiaoAiLogin) { open_xiaomi_login(); return 0; }
+            if (id == kSettingsXiaoAiTest) { test_xiaoai(); return 0; }
             if (id == kSettingsCancel) { DestroyWindow(hwnd); return 0; }
             if (id == kSettingsApply) {
                 AppSettings next = settings_;
@@ -1174,17 +1301,25 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 wchar_t root[32768]{}; GetDlgItemTextW(hwnd, kSettingsRoot, root, ARRAYSIZE(root));
                 next.sessions_root = std::filesystem::path(root);
                 next.sound_enabled = SendDlgItemMessageW(hwnd, kSettingsSound, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                next.xiaoai.enabled = SendDlgItemMessageW(hwnd, kSettingsXiaoAiEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                wchar_t xiaoai_buffer[1024]{};
+                const auto selected_device = static_cast<int>(SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, CB_GETCURSEL, 0, 0));
+                if (selected_device != CB_ERR) {
+                    const auto data = static_cast<std::size_t>(SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, CB_GETITEMDATA, selected_device, 0));
+                    if (data < xiaoai_devices_.size()) next.xiaoai.device_id = xiaoai_devices_[data].id;
+                } else {
+                    GetDlgItemTextW(hwnd, kSettingsXiaoAiDevice, xiaoai_buffer, ARRAYSIZE(xiaoai_buffer));
+                    next.xiaoai.device_id = to_utf8(xiaoai_buffer);
+                }
                 next.normalize();
                 const auto root_changed = next.sessions_root != settings_.sessions_root;
                 settings_ = next;
+                if (xiaoai_notifier_) xiaoai_notifier_->configure(settings_.xiaoai);
                 save_settings();
                 if (root_changed) {
                     if (monitor_worker_) monitor_worker_->stop();
-                    {
-                        std::lock_guard lock(pending_mutex_);
-                        pending_updates_.clear();
-                        monitor_message_posted_.store(false, std::memory_order_release);
-                    }
+                    pending_updates_.clear();
+                    monitor_message_posted_.store(false, std::memory_order_release);
                     snapshot_ = MonitorSnapshot{};
                     has_snapshot_ = false;
                     visual_coordinator_ = VisualStateCoordinator{};

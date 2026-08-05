@@ -1,10 +1,17 @@
-add_executable(CodeXPets MACOSX_BUNDLE main.mm)
+add_executable(CodeXPets MACOSX_BUNDLE
+    main.mm
+    xiaomi_browser_login.mm
+    xiaomi_credentials.mm
+    xiaomi_transport.mm
+)
 target_link_libraries(CodeXPets PRIVATE
     codexpets_core
     "-framework AppKit"
     "-framework CoreGraphics"
     "-framework ImageIO"
     "-framework ServiceManagement"
+    "-framework Security"
+    "-framework WebKit"
 )
 target_compile_options(CodeXPets PRIVATE
     -Wall -Wextra -Wpedantic -Werror

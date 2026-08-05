@@ -2,17 +2,17 @@
 
 #include "renderer.h"
 
+#include "monitor_update_queue.h"
 #include "session_monitor.h"
 #include "settings.h"
 #include "visual_state.h"
+#include "xiaomi_speaker.h"
 
 #include <windows.h>
 #include <shellapi.h>
 
 #include <atomic>
-#include <deque>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -30,10 +30,6 @@ public:
     static int run_utility(HINSTANCE instance, const std::vector<std::wstring>& arguments);
 
 private:
-    struct PendingUpdate {
-        std::vector<MonitorEventKind> events;
-        MonitorSnapshot snapshot;
-    };
     struct ScreenInfo {
         HMONITOR monitor{};
         RECT work{};
@@ -50,8 +46,7 @@ private:
     void start_monitor();
     void process_monitor_updates();
     void show_expression_demo_state(int index, Clock::time_point now);
-    void handle_monitor_update(const PendingUpdate& update);
-    void handle_monitor_event(MonitorEventKind event, int preferred_task_index = -1);
+    void handle_monitor_update(const PendingMonitorUpdate& update);
     void refresh_visual(bool force_text);
     void on_timer();
     void render_and_present();
@@ -79,6 +74,11 @@ private:
     void exit_application();
     void save_settings();
     void play_sound(NotificationSound sound);
+    void notify_xiaoai(XiaoAiEvent event, std::string_view title = {});
+    void open_xiaomi_login();
+    void scan_xiaoai_devices();
+    void populate_xiaoai_device_selector(HWND hwnd);
+    void test_xiaoai();
     bool is_autostart_enabled() const;
     void set_autostart_enabled(bool enabled);
     std::wstring audio_path(NotificationSound sound);
@@ -157,8 +157,10 @@ private:
     MonitorSnapshot snapshot_;
     bool has_snapshot_{};
     std::unique_ptr<MonitorWorker> monitor_worker_;
-    mutable std::mutex pending_mutex_;
-    std::deque<PendingUpdate> pending_updates_;
+    std::unique_ptr<XiaoAiNotifier> xiaoai_notifier_;
+    std::vector<XiaoAiDeviceInfo> xiaoai_devices_;
+    MonitorUpdateQueue pending_updates_;
+    std::uint64_t monitor_generation_{};
     std::atomic_bool monitor_message_posted_{};
 };
 

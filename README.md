@@ -50,6 +50,12 @@ CodeXPets 只读取 Codex 会话文件，不会修改、移动或删除这些文
 - Windows：`%LOCALAPPDATA%\\CodeXPets\\settings.json`
 - macOS：`~/Library/Application Support/CodeXPets/settings.json`
 
+### 可选的小爱音箱主动播报
+
+在“设置”中可以启用小爱音箱主动播报。在 Windows 中点击“浏览器登录”，在内置 Edge 登录页面完成小米账号验证；扫描后选择目标音箱（也可填写设备 ID 或米家显示名称），再点击“测试播报”。保存后，Codex 的开始、完成、错误和中断事件会同步发送到音箱。
+
+该功能通过小米 MiNA 接口发送 TTS 命令，并非直接向音箱发起本地 HTTP 请求。播报内容使用“开始工作、任务完成、执行出错、任务被中断”等事件提示，并追加当前项目名称，不再播报 `Codex` 或具体任务标题。登录授权信息仅保存在 Windows 凭据管理器中，不会写入 `settings.json`，也不会保存小米账号密码。目标音箱留空时，账号下只有一台在线小爱音箱才会自动选中；多台音箱必须显式选择，避免播报到错误设备。功能默认关闭，未启用时不会产生网络请求。
+
 ## 运行监控策略
 
 为了避免 `FileSystemWatcher`、FSEvents 和大型 UI 运行时带来的额外常驻开销，原生版本采用轻量自适应轮询：

@@ -47,7 +47,8 @@ $BuildDirectory = [IO.Path]::GetFullPath($BuildDirectory)
 New-Item -ItemType Directory -Force -Path $BuildDirectory | Out-Null
 
 $configure = @('-S', $root, '-B', $BuildDirectory,
-    '-DCODEXPETS_BUILD_APP=ON', '-DCODEXPETS_BUILD_TESTS=ON')
+    '-DCODEXPETS_BUILD_APP=ON', '-DCODEXPETS_BUILD_TESTS=ON',
+    "-DCODEXPETS_WINDOWS_ARCH=$Architecture")
 
 if ($Toolchain -eq 'zig') {
     if (($hostArchitecture -eq 'arm64' -and $Architecture -ne 'arm64') -or

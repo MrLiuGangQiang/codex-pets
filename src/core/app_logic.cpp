@@ -34,6 +34,19 @@ int select_preferred_task_index(bool focus_latest_task, int latest_task_index) n
     return focus_latest_task ? latest_task_index : -1;
 }
 
+std::string_view select_notification_label(
+    const std::vector<std::string>& labels, int preferred_task_index) noexcept {
+    if (labels.empty()) return {};
+    if (preferred_task_index >= 0 &&
+        preferred_task_index < static_cast<int>(labels.size())) {
+        return labels[static_cast<std::size_t>(preferred_task_index)];
+    }
+    for (const auto& label : labels) {
+        if (!label.empty()) return label;
+    }
+    return {};
+}
+
 int reconcile_task_selection(ReminderState state, const std::vector<std::string>& titles,
                              int previous_index, std::string_view previously_selected_title,
                              bool select_newest_task, int preferred_task_index) noexcept {

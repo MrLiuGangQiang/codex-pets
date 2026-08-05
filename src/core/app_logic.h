@@ -13,6 +13,8 @@ namespace codexpets::app_logic {
 std::string format_abnormal_task_text(std::string_view title);
 std::string format_interrupted_task_text(std::string_view title);
 int select_preferred_task_index(bool focus_latest_task, int latest_task_index) noexcept;
+std::string_view select_notification_label(
+    const std::vector<std::string>& labels, int preferred_task_index) noexcept;
 int reconcile_task_selection(ReminderState state, const std::vector<std::string>& titles,
                              int previous_index, std::string_view previously_selected_title,
                              bool select_newest_task, int preferred_task_index) noexcept;

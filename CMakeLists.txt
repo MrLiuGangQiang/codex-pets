@@ -25,6 +25,8 @@ endif()
 add_library(codexpets_core STATIC
     src/core/app_logic.cpp
     src/core/json.cpp
+    src/core/monitor_policy.cpp
+    src/core/monitor_update_queue.cpp
     src/core/paths.cpp
     src/core/platform_text.cpp
     src/core/presentation.cpp
@@ -32,6 +34,7 @@ add_library(codexpets_core STATIC
     src/core/session_monitor.cpp
     src/core/settings.cpp
     src/core/visual_state.cpp
+    src/core/xiaomi_speaker.cpp
 )
 target_include_directories(codexpets_core PUBLIC src/core)
 target_compile_definitions(codexpets_core PUBLIC CODEXPETS_VERSION="${PROJECT_VERSION}")

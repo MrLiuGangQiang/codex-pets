@@ -292,6 +292,7 @@ struct CodexSessionMonitor::Impl {
     struct ActiveTurn {
         std::string turn_id;
         std::filesystem::path source_path;
+        std::string project_name;
         std::uint64_t start_sequence{};
         SystemClock::time_point started{};
         std::string title;
@@ -308,14 +309,19 @@ struct CodexSessionMonitor::Impl {
 
     std::filesystem::path sessions_root;
     std::unordered_map<std::filesystem::path, TailState, PathHash, PathEqual> files;
+    std::unordered_map<std::filesystem::path, std::string, PathHash, PathEqual>
+        project_names_by_file;
     std::unordered_map<std::filesystem::path, std::filesystem::file_time_type, PathHash, PathEqual>
         discovery_directory_writes;
     std::unordered_map<std::string, ActiveTurn> active_turns;
     std::unordered_map<std::filesystem::path, Plan, PathHash, PathEqual> plans_by_file;
     std::vector<MonitorEventKind> events;
     std::string last_completed_title;
+    std::string last_completed_project_name;
     std::string last_aborted_title;
+    std::string last_aborted_project_name;
     std::string last_interrupted_title;
+    std::string last_interrupted_project_name;
     std::filesystem::path last_read_file;
     std::string last_event_type;
     std::filesystem::path last_event_file;
@@ -366,6 +372,32 @@ struct CodexSessionMonitor::Impl {
 
     static std::string compact_json_string(std::string_view line, std::string_view marker) {
         return std::string(compact_json_string_view(line, marker));
+    }
+
+    static std::string project_name_from_location(std::string value) {
+        while (!value.empty() && (value.back() == '/' || value.back() == '\\')) {
+            value.pop_back();
+        }
+        const auto separator = value.find_last_of("/\\");
+        auto name = value.substr(separator == std::string::npos ? 0 : separator + 1);
+        if (name.size() > 4 && name.ends_with(".git")) name.resize(name.size() - 4);
+        return name;
+    }
+
+    static std::string project_name_from_session_meta(std::string_view line) {
+        const auto repository = compact_json_string(line, "\"repository_url\":\"");
+        if (!repository.empty()) return project_name_from_location(repository);
+        return project_name_from_location(compact_json_string(line, "\"cwd\":\""));
+    }
+
+    void remember_project_name(const std::filesystem::path& source_path,
+                               std::string_view line) {
+        const auto project_name = project_name_from_session_meta(line);
+        if (project_name.empty()) return;
+        project_names_by_file[source_path] = project_name;
+        for (auto& [_, turn] : active_turns) {
+            if (PathEqual{}(turn.source_path, source_path)) turn.project_name = project_name;
+        }
     }
 
     void track_tool_call_lifecycle(std::string_view line,
@@ -616,6 +648,10 @@ struct CodexSessionMonitor::Impl {
         const auto line = normalize_json_line(raw);
         if (line.empty()) return false;
         track_tool_call_lifecycle(line, source_path);
+        if (line.find("\"type\":\"session_meta\"") != std::string_view::npos) {
+            remember_project_name(source_path, line);
+            return true;
+        }
         if (try_process_plan_update(line, source_path, suppress_notifications)) return true;
         if (line.find("\"type\":\"event_msg\"") == std::string_view::npos) {
             if (!complete_json(line)) return false;
@@ -667,6 +703,10 @@ struct CodexSessionMonitor::Impl {
                 ActiveTurn turn;
                 turn.turn_id = turn_id;
                 turn.source_path = source_path;
+                if (const auto project = project_names_by_file.find(source_path);
+                    project != project_names_by_file.end()) {
+                    turn.project_name = project->second;
+                }
                 turn.start_sequence = next_started_sequence++;
                 turn.started = event_at;
                 if (const auto plan = plans_by_file.find(source_path); plan != plans_by_file.end()) {
@@ -685,14 +725,17 @@ struct CodexSessionMonitor::Impl {
                 if (!suppress_notifications) {
                     if (is_abnormal_completion(*payload)) {
                         last_aborted_title = completed.title.empty() ? "发生异常的任务" : completed.title;
+                        last_aborted_project_name = completed.project_name;
                         emit(MonitorEventKind::TaskAborted);
                     } else {
                         last_completed_title = completed.title.empty() ? "已完成的任务" : completed.title;
+                        last_completed_project_name = completed.project_name;
                         emit(MonitorEventKind::TaskCompleted);
                     }
                 }
             } else if (!suppress_notifications && is_abnormal_completion(*payload)) {
                 last_aborted_title = "发生异常的任务";
+                last_aborted_project_name.clear();
                 emit(MonitorEventKind::TaskAborted);
             }
         } else if (event_type == "turn_aborted") {
@@ -702,10 +745,12 @@ struct CodexSessionMonitor::Impl {
                 active_turns.erase(it);
                 if (!suppress_notifications) {
                     last_interrupted_title = aborted.title.empty() ? "未知任务" : aborted.title;
+                    last_interrupted_project_name = aborted.project_name;
                     emit(MonitorEventKind::TaskInterrupted);
                 }
             } else if (!suppress_notifications) {
                 last_interrupted_title = "未知任务";
+                last_interrupted_project_name.clear();
                 emit(MonitorEventKind::TaskInterrupted);
             }
         } else if (is_failure_event_type(event_type)) {
@@ -715,6 +760,7 @@ struct CodexSessionMonitor::Impl {
                 active_turns.erase(it);
                 if (!suppress_notifications) {
                     last_aborted_title = aborted.title.empty() ? "发生异常的任务" : aborted.title;
+                    last_aborted_project_name = aborted.project_name;
                     emit(MonitorEventKind::TaskAborted);
                 }
             }
@@ -867,9 +913,11 @@ struct CodexSessionMonitor::Impl {
         const auto turns = ordered_turns();
         result.active_count = static_cast<int>(turns.size());
         result.active_titles.reserve(turns.size());
+        result.active_project_names.reserve(turns.size());
         result.active_plan_progress_labels.reserve(turns.size());
         for (const auto* turn : turns) {
             result.active_titles.push_back(turn->title.empty() ? "正在处理任务…" : turn->title);
+            result.active_project_names.push_back(turn->project_name);
             if (!turn->plan || turn->plan->total <= 1) result.active_plan_progress_labels.push_back(std::nullopt);
             else result.active_plan_progress_labels.push_back(
                 std::to_string(turn->plan->completed) + "/" + std::to_string(turn->plan->total));
@@ -879,8 +927,11 @@ struct CodexSessionMonitor::Impl {
             }
         }
         result.last_completed_title = last_completed_title;
+        result.last_completed_project_name = last_completed_project_name;
         result.last_aborted_title = last_aborted_title;
+        result.last_aborted_project_name = last_aborted_project_name;
         result.last_interrupted_title = last_interrupted_title;
+        result.last_interrupted_project_name = last_interrupted_project_name;
         result.last_event_type = last_event_type;
         result.latest_event_active_title_index = active_title_index(last_event_file);
         result.latest_plan_update_active_title_index = active_turn_index(last_plan_update_turn_id, turns);

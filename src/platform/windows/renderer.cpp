@@ -103,6 +103,27 @@ void draw_thought_dot(Graphics& graphics, const RectF& rect) {
     if(rect.Width>6&&rect.Height>6) fill_octagon(graphics,RectF(rect.X+3,rect.Y+3,rect.Width-6,rect.Height-6),1.0f,Color(255,241,248,255));
 }
 
+
+bool valid_embedded_loader(HINSTANCE instance) {
+    const auto resource = FindResourceW(instance, MAKEINTRESOURCEW(IDR_WEBVIEW2_LOADER), RT_RCDATA);
+    if (!resource) return false;
+    const auto size = SizeofResource(instance, resource);
+    const auto loaded = LoadResource(instance, resource);
+    const auto data = loaded ? static_cast<const std::byte*>(LockResource(loaded)) : nullptr;
+    if (!data || size < 0x40 || data[0] != std::byte{'M'} || data[1] != std::byte{'Z'}) return false;
+    std::uint32_t pe_offset{};
+    std::memcpy(&pe_offset, data + 0x3c, sizeof(pe_offset));
+    if (pe_offset > size - 6 || std::memcmp(data + pe_offset, "PE\0\0", 4) != 0) return false;
+    std::uint16_t machine{};
+    std::memcpy(&machine, data + pe_offset + 4, sizeof(machine));
+#if defined(_M_ARM64) || defined(__aarch64__)
+    constexpr std::uint16_t expected_machine = 0xaa64;
+#else
+    constexpr std::uint16_t expected_machine = 0x8664;
+#endif
+    return machine == expected_machine;
+}
+
 } // namespace
 
 Renderer::~Renderer() { shutdown(); }
@@ -399,6 +420,10 @@ bool Renderer::validate(std::string* error) {
             if (error) *error = "资源尺寸校验失败";
             return false;
         }
+    }
+    if (!valid_embedded_loader(instance_)) {
+        if (error) *error = "WebView2 loader 资源缺失或架构错误";
+        return false;
     }
     auto cloud = load_bitmap(IDR_CLOUD_BUBBLE);
     if (!cloud || cloud->GetWidth() != render_layout::cloud_bitmap_width ||
