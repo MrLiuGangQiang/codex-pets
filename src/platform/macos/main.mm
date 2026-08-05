@@ -246,6 +246,12 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 
 } // namespace
 
+@class MacRenderer;
+
+@interface PreviewCanvas : NSView
+- (instancetype)initWithRenderer:(MacRenderer*)renderer state:(const MacRenderState&)state;
+@end
+
 @interface MacRenderer : NSObject
 - (BOOL)validate:(NSString* __autoreleasing*)error;
 - (void)drawState:(const MacRenderState&)state inRect:(NSRect)rect;
@@ -544,44 +550,44 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
 }
 
 - (BOOL)savePreview:(const MacRenderState&)state toPath:(NSString*)path error:(NSString* __autoreleasing*)error {
-    constexpr size_t width = static_cast<size_t>(render_layout::logical_width);
-    constexpr size_t height = static_cast<size_t>(render_layout::logical_height);
-    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-    if (!colorSpace) {
-        if (error) *error = @"无法创建预览色彩空间";
-        return NO;
-    }
-    const CGBitmapInfo bitmapInfo = static_cast<CGBitmapInfo>(
-        static_cast<uint32_t>(kCGImageAlphaPremultipliedLast) |
-        static_cast<uint32_t>(kCGBitmapByteOrder32Big));
-    CGContextRef bitmapContext = CGBitmapContextCreate(nullptr, width, height, 8, width * 4,
-        colorSpace, bitmapInfo);
-    CGColorSpaceRelease(colorSpace);
-    if (!bitmapContext) {
+    PreviewCanvas* canvas = [[PreviewCanvas alloc] initWithRenderer:self state:state];
+    const NSRect bounds = canvas.bounds;
+    NSBitmapImageRep* bitmap = [canvas bitmapImageRepForCachingDisplayInRect:bounds];
+    if (!bitmap) {
         if (error) *error = @"无法创建预览位图";
         return NO;
     }
-    NSGraphicsContext* graphics = [NSGraphicsContext graphicsContextWithCGContext:bitmapContext
-                                                                          flipped:YES];
-    [NSGraphicsContext saveGraphicsState];
-    NSGraphicsContext.currentContext = graphics;
-    [self drawState:state inRect:NSMakeRect(0, 0, width, height)];
-    [graphics flushGraphics];
-    [NSGraphicsContext restoreGraphicsState];
-    CGImageRef image = CGBitmapContextCreateImage(bitmapContext);
-    CGContextRelease(bitmapContext);
-    if (!image) {
-        if (error) *error = @"无法生成预览图像";
-        return NO;
-    }
-    NSBitmapImageRep* bitmap = [[NSBitmapImageRep alloc] initWithCGImage:image];
-    CGImageRelease(image);
+    [canvas cacheDisplayInRect:bounds toBitmapImageRep:bitmap];
     NSData* png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
     if (!png || ![png writeToFile:path atomically:YES]) {
         if (error) *error = @"保存预览失败";
         return NO;
     }
     return YES;
+}
+
+@end
+
+@implementation PreviewCanvas {
+    MacRenderer* _renderer;
+    MacRenderState _state;
+}
+
+- (instancetype)initWithRenderer:(MacRenderer*)renderer state:(const MacRenderState&)state {
+    self = [super initWithFrame:NSMakeRect(0, 0, render_layout::logical_width,
+                                            render_layout::logical_height)];
+    if (self) {
+        _renderer = renderer;
+        _state = state;
+    }
+    return self;
+}
+
+- (BOOL)isFlipped { return YES; }
+
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    [_renderer drawState:_state inRect:self.bounds];
 }
 
 @end
@@ -1656,6 +1662,7 @@ int RunMacUtility(int argc, const char* const* argv) {
         return 0;
     }
 
+    [NSApplication sharedApplication];
     MacRenderer* renderer = [[MacRenderer alloc] init];
     NSString* validationError = nil;
     if (![renderer validate:&validationError]) {
