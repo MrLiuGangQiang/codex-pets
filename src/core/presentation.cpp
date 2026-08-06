@@ -3,21 +3,35 @@
 #include "app_logic.h"
 
 namespace codexpets {
+namespace {
+
+std::string join_status_lines(const std::vector<std::string>& lines) {
+    std::string result;
+    for (const auto& line : lines) {
+        if (line.empty()) continue;
+        if (!result.empty()) result += '\n';
+        result += line;
+    }
+    return result.empty() ? "空闲" : result;
+}
+
+} // namespace
 
 VisualContent make_visual_content(ReminderState state, const MonitorSnapshot& snapshot) {
     VisualContent result;
     if (state == ReminderState::Error) {
-        result.status_text = "异常";
+        result.status_lines = {"异常"};
     } else if (state == ReminderState::Interrupted) {
-        result.status_text = "已中断";
+        result.status_lines = {"已中断"};
     } else if (state == ReminderState::Completed) {
-        result.status_text = "已完成";
+        result.status_lines = {"已完成"};
     } else if (state == ReminderState::Busy) {
-        result.status_text = app_logic::format_active_task_statuses(
+        result.status_lines = app_logic::format_active_task_status_lines(
             snapshot.active_project_names, snapshot.active_titles, snapshot.active_plan_progress_labels);
     } else {
-        result.status_text = "空闲";
+        result.status_lines = {"空闲"};
     }
+    result.status_text = join_status_lines(result.status_lines);
 
     if (state == ReminderState::Error) {
         result.thought_text = "任务出现异常了。";

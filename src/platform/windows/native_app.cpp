@@ -667,6 +667,7 @@ void NativeApp::refresh_visual(bool force_text) {
     if (force_text || new_signature != last_status_signature_) {
         last_status_signature_ = new_signature;
         last_status_text_ = content.status_text;
+        last_status_lines_ = content.status_lines;
         update_tray_icon();
     }
     render_and_present();
@@ -713,7 +714,7 @@ void NativeApp::update_tray_icon() {
     if (!tray_added_) return;
     const int frame = last_visual_state_ == ReminderState::Busy
         ? std::abs(animation_tick_ / 2) % 8 : 0;
-    const auto tip = std::wstring(L"CodeXPets · ") + to_wide(last_status_text_);
+    const auto tip = to_wide(last_status_text_);
     if (tray_state_ == last_visual_state_ && tray_frame_ == frame && tray_tip_ == tip) return;
     tray_.hIcon = renderer_.tray_icon(last_visual_state_, frame);
     tray_.uFlags = NIF_ICON | NIF_TIP;
@@ -1216,7 +1217,13 @@ void NativeApp::show_settings() {
 
 HMENU NativeApp::build_menu(bool /*context_menu*/) {
     const auto menu = CreatePopupMenu();
-    add_menu_item(menu, kMenuStatus, std::wstring(L"状态：") + to_wide(last_status_text_), false);
+    if (last_status_lines_.empty()) {
+        add_menu_item(menu, kMenuStatus, to_wide(last_status_text_), false);
+    } else {
+        for (const auto& line : last_status_lines_) {
+            add_menu_item(menu, kMenuStatus, to_wide(line), false);
+        }
+    }
     add_menu_separator(menu);
     add_menu_item(menu, kMenuPet, L"显示桌面宠物");
     add_menu_item(menu, kMenuSound, L"播放语音提醒");

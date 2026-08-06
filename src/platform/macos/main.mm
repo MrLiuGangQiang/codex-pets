@@ -126,6 +126,7 @@ struct MacRenderState {
     int selected_task_index{};
     double scroll_offset{};
     std::string status_text{"空闲"};
+    std::vector<std::string> status_lines{"空闲"};
     std::string thought_text{"主人，现在没有在进行中的任务!别让我歇着!"};
     std::vector<std::string> task_titles;
     std::vector<std::optional<std::string>> progress_labels;
@@ -986,10 +987,6 @@ using PendingMacUpdate = PendingMonitorUpdate;
 - (NSMenu*)buildMenu {
     NSMenu* menu = [[NSMenu alloc] initWithTitle:@"CodeXPets"];
     menu.delegate = self;
-    NSMenuItem* status = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"状态：%@", Ns(_renderState.status_text)]
-                                                      action:nil keyEquivalent:@""];
-    status.enabled = NO; status.tag = 100;
-    [menu addItem:status];
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem* pet = [self menuItem:@"显示桌面宠物" action:@selector(togglePet:)]; pet.tag = 101;
     NSMenuItem* sound = [self menuItem:@"播放语音提醒" action:@selector(toggleSound:)]; sound.tag = 102;
@@ -1007,8 +1004,16 @@ using PendingMacUpdate = PendingMonitorUpdate;
 - (void)menuNeedsUpdate:(NSMenu*)menu { [self updateMenu:menu]; }
 
 - (void)updateMenu:(NSMenu*)menu {
-    NSMenuItem* status = [menu itemWithTag:100];
-    status.title = [NSString stringWithFormat:@"状态：%@", Ns(_renderState.status_text)];
+    while (NSMenuItem* status = [menu itemWithTag:100]) [menu removeItem:status];
+    NSUInteger index = 0;
+    const auto add_status = [&](std::string_view line) {
+        NSMenuItem* status = [[NSMenuItem alloc] initWithTitle:Ns(line) action:nil keyEquivalent:@""];
+        status.enabled = NO;
+        status.tag = 100;
+        [menu insertItem:status atIndex:index++];
+    };
+    if (_renderState.status_lines.empty()) add_status(_renderState.status_text);
+    else for (const auto& line : _renderState.status_lines) add_status(line);
     [menu itemWithTag:101].state = _settings.pet_visible ? NSControlStateValueOn : NSControlStateValueOff;
     [menu itemWithTag:102].state = _settings.sound_enabled ? NSControlStateValueOn : NSControlStateValueOff;
     [menu itemWithTag:103].state = [self autoStartEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1416,6 +1421,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
         state, content.task_titles, _selectedTaskIndex, selectedTitle, selectNewest, preferred);
     _renderState.state = state;
     _renderState.status_text = std::move(content.status_text);
+    _renderState.status_lines = std::move(content.status_lines);
     _renderState.thought_text = std::move(content.thought_text);
     _renderState.task_titles = std::move(content.task_titles);
     _renderState.progress_labels = std::move(content.progress_labels);
@@ -1426,7 +1432,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
     [_petView setNeedsDisplay:YES];
     _statusItem.button.image = [_renderer statusImageForState:state frame:_animationTick / 2];
     _statusItem.button.image.size = NSMakeSize(18, 18);
-    _statusItem.button.toolTip = [NSString stringWithFormat:@"CodeXPets · %@", Ns(_renderState.status_text)];
+    _statusItem.button.toolTip = Ns(_renderState.status_text);
 }
 
 - (void)updateRenderGeometry {

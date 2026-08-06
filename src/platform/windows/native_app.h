@@ -153,6 +153,7 @@ private:
     std::string displayed_thought_text_;
     std::string last_status_signature_;
     std::string last_status_text_;
+    std::vector<std::string> last_status_lines_;
     ReminderState last_visual_state_{ReminderState::Idle};
     AppSettings settings_;
     JsonSettingsStore settings_store_;

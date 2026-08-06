@@ -10,6 +10,7 @@ namespace codexpets {
 
 struct VisualContent {
     std::string status_text;
+    std::vector<std::string> status_lines;
     std::string thought_text;
     std::vector<std::string> task_titles;
     std::vector<std::optional<std::string>> progress_labels;

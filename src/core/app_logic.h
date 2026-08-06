@@ -39,7 +39,7 @@ bool is_task_switch_point(bool is_docked, bool bubble_visible, ReminderState sta
                           PointD point) noexcept;
 std::string format_busy_header(std::optional<std::string_view> step_progress,
                                int session_index, int session_count);
-std::string format_active_task_statuses(
+std::vector<std::string> format_active_task_status_lines(
     const std::vector<std::string>& project_names,
     const std::vector<std::string>& task_titles,
     const std::vector<std::optional<std::string>>& progress_labels);

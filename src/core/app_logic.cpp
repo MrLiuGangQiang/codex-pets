@@ -170,28 +170,30 @@ std::string format_busy_header(std::optional<std::string_view> step_progress,
     return header;
 }
 
-std::string format_active_task_statuses(
+std::vector<std::string> format_active_task_status_lines(
     const std::vector<std::string>& project_names,
     const std::vector<std::string>& task_titles,
     const std::vector<std::optional<std::string>>& progress_labels) {
     const auto count = std::max({project_names.size(), task_titles.size(), progress_labels.size()});
-    if (count == 0) return "进行中";
+    if (count == 0) return {"进行中"};
 
-    std::string result;
+    std::vector<std::string> result;
+    result.reserve(count);
     for (std::size_t index = 0; index < count; ++index) {
-        if (!result.empty()) result += "；";
         const auto project = index < project_names.size() ? std::string_view(project_names[index])
                                                           : std::string_view{};
         const auto title = index < task_titles.size() ? std::string_view(task_titles[index])
                                                        : std::string_view{};
-        if (!blank(project)) result += project;
-        else if (!blank(title)) result += title;
-        else result += "任务 " + std::to_string(index + 1);
-        result += "：进行中";
+        std::string line;
+        if (!blank(project)) line = project;
+        else if (!blank(title)) line = title;
+        else line = "任务 " + std::to_string(index + 1);
+        line += "：进行中";
         if (index < progress_labels.size() && progress_labels[index] &&
             !blank(*progress_labels[index])) {
-            result += "（" + *progress_labels[index] + "）";
+            line += "（" + *progress_labels[index] + "）";
         }
+        result.push_back(std::move(line));
     }
     return result;
 }
