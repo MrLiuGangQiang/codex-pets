@@ -1012,6 +1012,11 @@ using PendingMacUpdate = PendingMonitorUpdate;
     [menu addItem:[self menuItem:@"设置…" action:@selector(showSettings:)]];
     [menu addItem:[self menuItem:@"查看更新…" action:@selector(openUpdate:)]];
     [menu addItem:NSMenuItem.separatorItem];
+    NSMenuItem* version = [[NSMenuItem alloc]
+        initWithTitle:Ns(std::string("版本：v") + CODEXPETS_VERSION)
+               action:nil keyEquivalent:@""];
+    version.enabled = NO;
+    [menu addItem:version];
     [menu addItem:[self menuItem:@"退出" action:@selector(quit:)]];
     [self updateMenu:menu];
     return menu;

@@ -48,6 +48,7 @@ constexpr UINT kMenuSound = 4002;
 constexpr UINT kMenuStartup = 4003;
 constexpr UINT kMenuFolder = 4004;
 constexpr UINT kMenuSettings = 4005;
+constexpr UINT kMenuVersion = 4006;
 constexpr UINT kMenuUpdate = 4007;
 constexpr UINT kMenuExit = 4008;
 constexpr UINT kSettingsHover = 4101;
@@ -1232,6 +1233,8 @@ HMENU NativeApp::build_menu(bool /*context_menu*/) {
     add_menu_item(menu, kMenuSettings, L"设置…");
     add_menu_item(menu, kMenuUpdate, L"查看更新…");
     add_menu_separator(menu);
+    add_menu_item(menu, kMenuVersion,
+                  std::wstring(L"版本：v") + to_wide(CODEXPETS_VERSION), false);
     add_menu_item(menu, kMenuExit, L"退出");
     update_menu_checks(menu);
     return menu;
