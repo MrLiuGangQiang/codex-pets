@@ -90,6 +90,8 @@ private:
     int pixel_height_{};
     double scale_{1.0};
     HICON application_icon_{};
+    std::unique_ptr<Gdiplus::FontFamily> cloud_font_family_{};
+    std::unique_ptr<Gdiplus::FontFamily> body_font_family_{};
     BitmapPtr cloud_bitmap_{};
     std::array<BitmapPtr, 20> dock_cache_{};
     int dock_cache_side_{-1};

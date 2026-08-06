@@ -39,6 +39,30 @@ Color header_color(ReminderState state) {
     }
 }
 
+std::unique_ptr<FontFamily> make_cloud_font_family() {
+    return [] {
+        // YouYuan (幼圆) gives Chinese cloud text a softer, playful shape. Keep
+        // dependable CJK/system fallbacks for Windows editions without it.
+        for (const auto* name : {L"YouYuan", L"Microsoft YaHei UI", L"Segoe UI"}) {
+            auto candidate = std::make_unique<FontFamily>(name);
+            if (candidate->GetLastStatus() == Ok) return candidate;
+        }
+        return std::make_unique<FontFamily>(L"Arial");
+    }();
+}
+
+std::unique_ptr<FontFamily> make_body_font_family() {
+    return [] {
+        // Keep the playful rounded face for the header, but use a clearer CJK
+        // UI face for the task text so small strokes remain easy to read.
+        for (const auto* name : {L"Microsoft YaHei UI", L"Microsoft YaHei", L"Segoe UI"}) {
+            auto candidate = std::make_unique<FontFamily>(name);
+            if (candidate->GetLastStatus() == Ok) return candidate;
+        }
+        return std::make_unique<FontFamily>(L"Arial");
+    }();
+}
+
 std::wstring wide(std::string_view value) {
     if (value.empty()) return {};
     const auto count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
@@ -135,6 +159,13 @@ bool Renderer::initialize(HINSTANCE instance, std::string* error) {
         if (error) *error = "GDI+ 初始化失败";
         return false;
     }
+    cloud_font_family_ = make_cloud_font_family();
+    body_font_family_ = make_body_font_family();
+    if (!cloud_font_family_ || !body_font_family_) {
+        if (error) *error = "云朵字体初始化失败";
+        shutdown();
+        return false;
+    }
     application_icon_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(IDI_CODEXPETS_ICON),
                                                         IMAGE_ICON, 32, 32, LR_DEFAULTSIZE));
     if (!application_icon_) {
@@ -157,6 +188,8 @@ void Renderer::shutdown() noexcept {
     }
     if (application_icon_) DestroyIcon(application_icon_);
     application_icon_ = nullptr;
+    cloud_font_family_.reset();
+    body_font_family_.reset();
     cloud_bitmap_.reset();
     for (auto& bitmap : dock_cache_) bitmap.reset();
     dock_cache_side_ = -1;
@@ -330,8 +363,15 @@ void Renderer::draw_text(Graphics& graphics, const RenderState& state, double /*
     if (state.state == ReminderState::Busy && selected_index < static_cast<int>(state.progress_labels.size()) && state.progress_labels[static_cast<std::size_t>(selected_index)]) progress = *state.progress_labels[static_cast<std::size_t>(selected_index)];
     const auto header = state.state == ReminderState::Busy ? app_logic::format_busy_header(progress, state.selected_task_index, static_cast<int>(state.task_titles.size())) : state.status_text;
     const auto body = normalized_text(selected_body(state));
-    FontFamily family(L"Segoe UI"); Font header_font(&family,12.5f,FontStyleBold,UnitPixel); Font body_font(&family,11.5f,FontStyleRegular,UnitPixel);
-    SolidBrush header_brush(header_color(state.state)), body_brush(Color(255,45,60,78));
+    const auto& header_family = *cloud_font_family_;
+    const auto& body_family = *body_font_family_;
+    const auto header_style = header_family.IsStyleAvailable(FontStyleBold)
+        ? FontStyleBold : FontStyleRegular;
+    const auto body_style = body_family.IsStyleAvailable(FontStyleBold)
+        ? FontStyleBold : FontStyleRegular;
+    Font header_font(&header_family,13.0f,header_style,UnitPixel);
+    Font body_font(&body_family,12.0f,body_style,UnitPixel);
+    SolidBrush header_brush(header_color(state.state)), body_brush(Color(255,34,45,62));
     StringFormat hf;hf.SetAlignment(StringAlignmentCenter);hf.SetLineAlignment(StringAlignmentCenter);
     const auto header_rect = as_rect(render_layout::header_bounds(layout));
     const auto hw=wide(header);graphics.DrawString(hw.c_str(),-1,&header_font,header_rect,&hf,&header_brush);

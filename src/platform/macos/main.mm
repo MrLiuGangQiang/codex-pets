@@ -284,6 +284,31 @@ NSButton* MakeButton(NSString* title, id target, SEL action, NSRect frame) {
     return button;
 }
 
+NSFont* CloudFont(CGFloat size, BOOL bold) {
+    // Prefer Apple's rounded Chinese typeface to match Windows YouYuan. The
+    // rounded system design remains a safe fallback when the CJK face is absent.
+    NSArray<NSString*>* names = bold
+        ? @[@"STYuanti-SC-Bold", @"STYuanti-SC-Regular", @"HannotateSC-W7", @"WawatiSC-Regular"]
+        : @[@"STYuanti-SC-Regular", @"HannotateSC-W5", @"WawatiSC-Regular"];
+    for (NSString* name in names) {
+        if (NSFont* font = [NSFont fontWithName:name size:size]) return font;
+    }
+    NSFont* system = [NSFont systemFontOfSize:size
+                                      weight:bold ? NSFontWeightBold : NSFontWeightRegular];
+    NSFontDescriptor* rounded = [system.fontDescriptor
+        fontDescriptorWithDesign:NSFontDescriptorSystemDesignRounded];
+    return rounded ? [NSFont fontWithDescriptor:rounded size:size] : system;
+}
+
+NSFont* CloudBodyFont(CGFloat size) {
+    // PingFang's semibold CJK strokes stay much clearer than a simulated bold
+    // rounded face at the small size used inside the cloud.
+    for (NSString* name in @[@"PingFangSC-Semibold", @"PingFang SC", @"HiraginoSansGB-W6"]) {
+        if (NSFont* font = [NSFont fontWithName:name size:size]) return font;
+    }
+    return [NSFont systemFontOfSize:size weight:NSFontWeightSemibold];
+}
+
 std::string ArgumentAt(int argc, const char* const* argv, int index) {
     return index >= 0 && index < argc && argv[index] ? std::string(argv[index]) : std::string{};
 }
@@ -324,7 +349,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
         _cache = [NSMutableDictionary dictionary];
         NSMutableParagraphStyle* headerStyle = [[NSMutableParagraphStyle alloc] init];
         headerStyle.alignment = NSTextAlignmentCenter;
-        NSFont* headerFont = [NSFont systemFontOfSize:12.5 weight:NSFontWeightBold];
+        NSFont* headerFont = CloudFont(13.0, YES);
         _headerAttributes = @[
             @{NSFontAttributeName: headerFont, NSForegroundColorAttributeName: HeaderColor(ReminderState::Idle),
               NSParagraphStyleAttributeName: headerStyle},
@@ -339,11 +364,11 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
         ];
         NSMutableParagraphStyle* bodyStyle = [[NSMutableParagraphStyle alloc] init];
         bodyStyle.lineBreakMode = NSLineBreakByWordWrapping;
-        bodyStyle.minimumLineHeight = 15;
-        bodyStyle.maximumLineHeight = 15;
+        bodyStyle.minimumLineHeight = 16;
+        bodyStyle.maximumLineHeight = 16;
         _bodyAttributes = @{
-            NSFontAttributeName: [NSFont systemFontOfSize:11.5],
-            NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:45/255.0 green:60/255.0 blue:78/255.0 alpha:1],
+            NSFontAttributeName: CloudBodyFont(12.0),
+            NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:34/255.0 green:45/255.0 blue:62/255.0 alpha:1],
             NSParagraphStyleAttributeName: bodyStyle
         };
         _dotFillColor = [NSColor colorWithSRGBRed:241/255.0 green:248/255.0 blue:1 alpha:1];
