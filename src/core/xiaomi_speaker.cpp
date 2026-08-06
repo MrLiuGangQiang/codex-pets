@@ -617,6 +617,8 @@ void XiaoAiNotifier::configure(const XiaoAiSettings& settings) {
     settings_ = settings;
     std::queue<Job> empty;
     jobs_.swap(empty);
+    std::queue<std::function<void()>> empty_controls;
+    control_tasks_.swap(empty_controls);
 }
 
 void XiaoAiNotifier::notify(XiaoAiEvent event, std::string_view context_label) {
@@ -682,6 +684,40 @@ bool XiaoAiNotifier::test(const XiaoAiSettings& settings, std::string* error) {
     }
 }
 
+void XiaoAiNotifier::validate_async(XiaoAiSettings settings, ValidateCallback callback) {
+    std::lock_guard lock(mutex_);
+    if (stopping_) return;
+    control_tasks_.push([this, settings = std::move(settings), callback = std::move(callback)]() mutable {
+        std::string error;
+        (void)validate(settings, &error);
+        if (callback) callback(std::move(settings), std::move(error));
+    });
+    condition_.notify_one();
+}
+
+void XiaoAiNotifier::discover_devices_async(XiaoAiSettings settings, DiscoverCallback callback) {
+    std::lock_guard lock(mutex_);
+    if (stopping_) return;
+    control_tasks_.push([this, settings = std::move(settings), callback = std::move(callback)]() mutable {
+        std::vector<XiaoAiDeviceInfo> devices;
+        std::string error;
+        (void)discover_devices(settings, &devices, &error);
+        if (callback) callback(std::move(devices), std::move(error));
+    });
+    condition_.notify_one();
+}
+
+void XiaoAiNotifier::test_async(XiaoAiSettings settings, TestCallback callback) {
+    std::lock_guard lock(mutex_);
+    if (stopping_) return;
+    control_tasks_.push([this, settings = std::move(settings), callback = std::move(callback)]() mutable {
+        std::string error;
+        (void)test(settings, &error);
+        if (callback) callback(std::move(error));
+    });
+    condition_.notify_one();
+}
+
 void XiaoAiNotifier::stop() noexcept {
     {
         std::lock_guard lock(mutex_);
@@ -689,6 +725,8 @@ void XiaoAiNotifier::stop() noexcept {
         stopping_ = true;
         std::queue<Job> empty;
         jobs_.swap(empty);
+        std::queue<std::function<void()>> empty_controls;
+        control_tasks_.swap(empty_controls);
     }
     condition_.notify_all();
     if (worker_.joinable()) worker_.join();
@@ -700,8 +738,15 @@ void XiaoAiNotifier::worker_loop() {
         Job job;
         {
             std::unique_lock lock(mutex_);
-            condition_.wait(lock, [&] { return stopping_ || !jobs_.empty(); });
+            condition_.wait(lock, [&] { return stopping_ || !control_tasks_.empty() || !jobs_.empty(); });
             if (stopping_) return;
+            if (!control_tasks_.empty()) {
+                auto task = std::move(control_tasks_.front());
+                control_tasks_.pop();
+                lock.unlock();
+                try { task(); } catch (...) {}
+                continue;
+            }
             job = std::move(jobs_.front());
             jobs_.pop();
         }

@@ -37,6 +37,7 @@ constexpr wchar_t kMutexName[] = L"Local\\CodeXPets.Native.SingleInstance";
 constexpr wchar_t kReleaseUrl[] = L"https://github.com/MrLiuGangQiang/codex-pets/releases/latest";
 constexpr UINT kMonitorMessage = WM_APP + 20;
 constexpr UINT kTrayCallback = WM_APP + 21;
+constexpr UINT kXiaoAiResultMessage = WM_APP + 22;
 constexpr UINT kSettingsApply = 3001;
 constexpr UINT kSettingsCancel = 3002;
 constexpr UINT kSettingsDefaults = 3003;
@@ -64,6 +65,25 @@ constexpr UINT kSettingsXiaoAiLogin = 4115;
 constexpr UINT kSettingsXiaoAiScan = 4116;
 constexpr UINT kSettingsXiaoAiSelectAll = 4117;
 constexpr UINT kSettingsXiaoAiParallel = 4118;
+
+enum class XiaoAiUiOperation : unsigned char { ValidateLogin, ScanDevices, TestNotification };
+
+struct XiaoAiUiResult {
+    XiaoAiUiOperation operation;
+    HWND owner{};
+    XiaoAiSettings settings;
+    std::vector<XiaoAiDeviceInfo> devices;
+    std::string error;
+    bool login_follow_up{};
+};
+
+void post_xiaoai_ui_result(HWND message_window, XiaoAiUiResult result) {
+    auto* payload = new XiaoAiUiResult(std::move(result));
+    if (!message_window || !PostMessageW(message_window, kXiaoAiResultMessage, 0,
+                                        reinterpret_cast<LPARAM>(payload))) {
+        delete payload;
+    }
+}
 
 int read_edit_int(HWND parent, int control, int fallback) {
     wchar_t buffer[64]{};
@@ -346,6 +366,12 @@ void NativeApp::shutdown() noexcept {
     if (pet_window_) KillTimer(pet_window_, timer_id_);
     if (monitor_worker_) monitor_worker_->stop();
     if (xiaoai_notifier_) xiaoai_notifier_->stop();
+    if (message_window_) {
+        MSG queued{};
+        while (PeekMessageW(&queued, message_window_, kXiaoAiResultMessage, kXiaoAiResultMessage, PM_REMOVE)) {
+            delete reinterpret_cast<XiaoAiUiResult*>(queued.lParam);
+        }
+    }
     save_position();
     remove_tray_icon();
     if (settings_window_) DestroyWindow(settings_window_);
@@ -1010,44 +1036,40 @@ void NativeApp::notify_xiaoai(XiaoAiEvent event, std::string_view title) {
     if (xiaoai_notifier_) xiaoai_notifier_->notify(event, title);
 }
 
+void NativeApp::set_xiaoai_controls_enabled(bool enabled) {
+    if (!settings_window_ || !IsWindow(settings_window_)) return;
+    for (const UINT id : {kSettingsXiaoAiEnabled, kSettingsXiaoAiDevice, kSettingsXiaoAiTest,
+                          kSettingsXiaoAiLogin, kSettingsXiaoAiScan, kSettingsXiaoAiSelectAll,
+                          kSettingsXiaoAiParallel}) {
+        if (const auto control = GetDlgItem(settings_window_, static_cast<int>(id))) {
+            EnableWindow(control, enabled);
+        }
+    }
+}
+
 void NativeApp::open_xiaomi_login() {
+    if (xiaoai_operation_in_flight_ || !xiaoai_notifier_) return;
     const auto owner = settings_window_ && IsWindow(settings_window_) ? settings_window_ : pet_window_;
-    start_xiaomi_browser_login(owner, [this, owner](std::string cookies, std::string error) {
+    const auto message_window = message_window_;
+    xiaoai_operation_in_flight_ = true;
+    set_xiaoai_controls_enabled(false);
+    start_xiaomi_browser_login(owner, [this, owner, message_window](std::string cookies, std::string error) {
         if (!error.empty()) {
-            MessageBoxW(owner, to_wide(error).c_str(), L"小米账号登录", MB_ICONWARNING | MB_OK);
+            post_xiaoai_ui_result(message_window, {XiaoAiUiOperation::ValidateLogin, owner, {}, {},
+                std::string("小米登录失败：") + error});
+            return;
+        }
+        if (!xiaoai_notifier_) {
+            post_xiaoai_ui_result(message_window, {XiaoAiUiOperation::ValidateLogin, owner, {}, {},
+                "小爱播报服务未初始化。"});
             return;
         }
         XiaoAiSettings candidate = settings_.xiaoai;
-        candidate.auth_cookies = cookies;
-        std::string validation_error;
-        if (!xiaoai_notifier_ || !xiaoai_notifier_->validate(candidate, &validation_error)) {
-            const auto message = std::string("小米登录已完成，但授权验证失败：") + validation_error +
-                "。授权信息未保存，请重新登录。";
-            MessageBoxW(owner, to_wide(message).c_str(), L"小米账号登录", MB_ICONERROR | MB_OK);
-            return;
-        }
-        candidate.auth_cookies = compact_xiaoai_authorization(candidate.auth_cookies);
-        std::string save_error;
-        if (!save_xiaoai_authorization(candidate.auth_cookies, &save_error)) {
-            MessageBoxW(owner, to_wide(save_error).c_str(), L"小米账号登录", MB_ICONERROR | MB_OK);
-            return;
-        }
-        // A verified login enables XiaoAi notifications immediately; otherwise a
-        // successful manual test would still leave all automatic events disabled.
-        settings_.xiaoai.enabled = true;
-        settings_.xiaoai.auth_cookies = std::move(candidate.auth_cookies);
-        if (settings_window_ && IsWindow(settings_window_)) {
-            SendDlgItemMessageW(settings_window_, kSettingsXiaoAiEnabled, BM_SETCHECK, BST_CHECKED, 0);
-        }
-        if (xiaoai_notifier_) xiaoai_notifier_->configure(settings_.xiaoai);
-        save_settings();
-        std::vector<XiaoAiDeviceInfo> found;
-        std::string scan_error;
-        if (xiaoai_notifier_ && xiaoai_notifier_->discover_devices(settings_.xiaoai, &found, &scan_error)) {
-            xiaoai_devices_ = std::move(found);
-            if (settings_window_ && IsWindow(settings_window_)) populate_xiaoai_device_selector(settings_window_);
-        }
-        MessageBoxW(owner, L"小米账号授权已验证。已扫描音箱，请勾选目标音箱后测试播报。", L"小米账号登录", MB_OK);
+        candidate.auth_cookies = std::move(cookies);
+        xiaoai_notifier_->validate_async(std::move(candidate), [message_window, owner](XiaoAiSettings settings, std::string validation_error) {
+            post_xiaoai_ui_result(message_window, {XiaoAiUiOperation::ValidateLogin, owner, std::move(settings), {},
+                std::move(validation_error)});
+        });
     });
 }
 
@@ -1130,34 +1152,30 @@ void NativeApp::show_xiaoai_device_menu(HWND hwnd) {
 }
 
 void NativeApp::scan_xiaoai_devices() {
-    if (!xiaoai_notifier_) return;
-    std::vector<XiaoAiDeviceInfo> found;
-    std::string error;
-    if (!xiaoai_notifier_->discover_devices(settings_.xiaoai, &found, &error)) {
-        show_error(L"小爱音箱", to_wide(error));
-        return;
-    }
-    xiaoai_devices_ = std::move(found);
-    if (settings_window_ && IsWindow(settings_window_)) populate_xiaoai_device_selector(settings_window_);
-    MessageBoxW(settings_window_ ? settings_window_ : pet_window_,
-                (L"已扫描到 " + std::to_wstring(xiaoai_devices_.size()) + L" 台在线小爱音箱，可多选或点击全选。").c_str(),
-                L"小爱音箱", MB_OK);
+    if (xiaoai_operation_in_flight_ || !xiaoai_notifier_) return;
+    const auto owner = settings_window_ && IsWindow(settings_window_) ? settings_window_ : pet_window_;
+    xiaoai_operation_in_flight_ = true;
+    set_xiaoai_controls_enabled(false);
+    xiaoai_notifier_->discover_devices_async(settings_.xiaoai, [message_window = message_window_, owner](
+                                                        std::vector<XiaoAiDeviceInfo> devices, std::string error) {
+        post_xiaoai_ui_result(message_window, {XiaoAiUiOperation::ScanDevices, owner, {}, std::move(devices),
+            std::move(error)});
+    });
 }
 
 void NativeApp::test_xiaoai() {
-    if (!xiaoai_notifier_) return;
+    if (xiaoai_operation_in_flight_ || !xiaoai_notifier_) return;
     auto candidate = settings_.xiaoai;
+    const auto owner = settings_window_ && IsWindow(settings_window_) ? settings_window_ : pet_window_;
     if (settings_window_ && IsWindow(settings_window_)) {
         candidate.device_ids = selected_xiaoai_device_ids(settings_window_);
         candidate.device_id = candidate.device_ids.empty() ? std::string{} : candidate.device_ids.front();
     }
-    std::string error;
-    if (!xiaoai_notifier_->test(candidate, &error)) {
-        show_error(L"小爱音箱", to_wide(error));
-        return;
-    }
-    MessageBoxW(settings_window_ ? settings_window_ : pet_window_,
-                L"测试播报已发送。", L"小爱音箱", MB_OK);
+    xiaoai_operation_in_flight_ = true;
+    set_xiaoai_controls_enabled(false);
+    xiaoai_notifier_->test_async(std::move(candidate), [message_window = message_window_, owner](std::string error) {
+        post_xiaoai_ui_result(message_window, {XiaoAiUiOperation::TestNotification, owner, {}, {}, std::move(error)});
+    });
 }
 
 void NativeApp::play_sound(NotificationSound sound) {
@@ -1310,6 +1328,7 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
             auto* apply = CreateWindowExW(0, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                 455, 535, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsApply)), instance_, nullptr);
             set_control_font(defaults); set_control_font(cancel); set_control_font(apply);
+            set_xiaoai_controls_enabled(!xiaoai_operation_in_flight_);
             return 0;
         }
         case WM_COMMAND: {
@@ -1494,6 +1513,71 @@ LRESULT NativeApp::pet_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
 }
 
 LRESULT NativeApp::message_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == kXiaoAiResultMessage) {
+        std::unique_ptr<XiaoAiUiResult> result(reinterpret_cast<XiaoAiUiResult*>(lparam));
+        if (!result) return 0;
+        const auto owner = result->owner && IsWindow(result->owner) ? result->owner : pet_window_;
+        const auto complete = [this] {
+            xiaoai_operation_in_flight_ = false;
+            set_xiaoai_controls_enabled(true);
+        };
+        switch (result->operation) {
+            case XiaoAiUiOperation::ValidateLogin: {
+                if (!result->error.empty()) {
+                    complete();
+                    MessageBoxW(owner, to_wide(result->error).c_str(), L"小米账号登录", MB_ICONERROR | MB_OK);
+                    return 0;
+                }
+                auto authorization = compact_xiaoai_authorization(result->settings.auth_cookies);
+                std::string save_error;
+                if (!save_xiaoai_authorization(authorization, &save_error)) {
+                    complete();
+                    MessageBoxW(owner, to_wide(save_error).c_str(), L"小米账号登录", MB_ICONERROR | MB_OK);
+                    return 0;
+                }
+                settings_.xiaoai.enabled = true;
+                settings_.xiaoai.auth_cookies = std::move(authorization);
+                if (settings_window_ && IsWindow(settings_window_)) {
+                    SendDlgItemMessageW(settings_window_, kSettingsXiaoAiEnabled, BM_SETCHECK, BST_CHECKED, 0);
+                }
+                if (!xiaoai_notifier_) {
+                    complete();
+                    MessageBoxW(owner, L"小爱播报服务未初始化。", L"小米账号登录", MB_ICONERROR | MB_OK);
+                    return 0;
+                }
+                xiaoai_notifier_->configure(settings_.xiaoai);
+                save_settings();
+                xiaoai_notifier_->discover_devices_async(settings_.xiaoai, [message_window = hwnd, owner](
+                                                              std::vector<XiaoAiDeviceInfo> devices, std::string error) {
+                    post_xiaoai_ui_result(message_window, {XiaoAiUiOperation::ScanDevices, owner, {}, std::move(devices),
+                        std::move(error), true});
+                });
+                return 0;
+            }
+            case XiaoAiUiOperation::ScanDevices: {
+                complete();
+                if (!result->error.empty()) {
+                    MessageBoxW(owner, to_wide(result->error).c_str(), L"小爱音箱", MB_ICONERROR | MB_OK);
+                    return 0;
+                }
+                xiaoai_devices_ = std::move(result->devices);
+                if (settings_window_ && IsWindow(settings_window_)) populate_xiaoai_device_selector(settings_window_);
+                const std::wstring text = result->login_follow_up
+                    ? std::wstring(L"小米账号授权已验证。已扫描音箱，请勾选目标音箱后测试播报。")
+                    : L"已扫描到 " + std::to_wstring(xiaoai_devices_.size()) + L" 台在线小爱音箱，可多选或点击全选。";
+                MessageBoxW(owner, text.c_str(), L"小爱音箱", MB_OK);
+                return 0;
+            }
+            case XiaoAiUiOperation::TestNotification:
+                complete();
+                if (!result->error.empty()) {
+                    MessageBoxW(owner, to_wide(result->error).c_str(), L"小爱音箱", MB_ICONERROR | MB_OK);
+                } else {
+                    MessageBoxW(owner, L"测试播报已发送。", L"小爱音箱", MB_OK);
+                }
+                return 0;
+        }
+    }
     if (message == kMonitorMessage) { process_monitor_updates(); return 0; }
     if (message == kTrayCallback) {
         if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {

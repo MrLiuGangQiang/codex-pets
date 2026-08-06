@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <future>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -487,6 +488,50 @@ void test_xiaoai_protocol() {
     CHECK(ubus_cookie->second.find("sn=speaker-serial") != std::string::npos);
     CHECK(ubus_cookie->second.find("hardware=l09a") != std::string::npos);
     CHECK(ubus_cookie->second.find("deviceId=speaker-device") != std::string::npos);
+
+    XiaoAiHttpTransport async_transport = [](const XiaoAiHttpRequest& request) {
+        if (request.url.find("/admin/v2/device_list?") != std::string::npos) {
+            return XiaoAiHttpResponse{200,
+                R"({"code":0,"data":[{"deviceID":"speaker-device","hardware":"l09a","alias":"Desk"}]})", {}};
+        }
+        return XiaoAiHttpResponse{200, R"({"code":0})", {}};
+    };
+    XiaoAiNotifier async_notifier(std::move(async_transport));
+    const auto caller_thread = std::this_thread::get_id();
+    std::atomic_bool validate_callback_off_caller_thread{};
+    std::promise<std::pair<XiaoAiSettings, std::string>> validate_promise;
+    auto validate_future = validate_promise.get_future();
+    async_notifier.validate_async(settings, [&validate_promise, &validate_callback_off_caller_thread, caller_thread](
+                                          XiaoAiSettings validated, std::string async_error) {
+        validate_callback_off_caller_thread.store(std::this_thread::get_id() != caller_thread,
+                                                  std::memory_order_release);
+        validate_promise.set_value({std::move(validated), std::move(async_error)});
+    });
+    CHECK(validate_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    auto validated = validate_future.get();
+    CHECK(validated.second.empty());
+    CHECK(validated.first.auth_cookies.find("serviceToken=token") != std::string::npos);
+
+    std::promise<std::pair<std::vector<XiaoAiDeviceInfo>, std::string>> discover_promise;
+    auto discover_future = discover_promise.get_future();
+    async_notifier.discover_devices_async(settings, [&discover_promise](std::vector<XiaoAiDeviceInfo> devices,
+                                                                          std::string async_error) {
+        discover_promise.set_value({std::move(devices), std::move(async_error)});
+    });
+    CHECK(discover_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    auto discovered = discover_future.get();
+    CHECK(discovered.second.empty());
+    CHECK_EQ(1, static_cast<int>(discovered.first.size()));
+    CHECK_EQ(std::string("speaker-device"), discovered.first.front().id);
+
+    std::promise<std::string> test_promise;
+    auto test_future = test_promise.get_future();
+    async_notifier.test_async(settings, [&test_promise](std::string async_error) {
+        test_promise.set_value(std::move(async_error));
+    });
+    CHECK(test_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    CHECK(test_future.get().empty());
+    CHECK(validate_callback_off_caller_thread.load(std::memory_order_acquire));
 
     std::vector<XiaoAiHttpRequest> multi_requests;
     std::mutex multi_mutex;

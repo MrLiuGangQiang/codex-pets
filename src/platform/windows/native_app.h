@@ -76,6 +76,7 @@ private:
     void play_sound(NotificationSound sound);
     void notify_xiaoai(XiaoAiEvent event, std::string_view title = {});
     void open_xiaomi_login();
+    void set_xiaoai_controls_enabled(bool enabled);
     void scan_xiaoai_devices();
     void populate_xiaoai_device_selector(HWND hwnd);
     void show_xiaoai_device_menu(HWND hwnd);
@@ -162,6 +163,7 @@ private:
     std::unique_ptr<MonitorWorker> monitor_worker_;
     std::unique_ptr<XiaoAiNotifier> xiaoai_notifier_;
     std::vector<XiaoAiDeviceInfo> xiaoai_devices_;
+    bool xiaoai_operation_in_flight_{};
     MonitorUpdateQueue pending_updates_;
     std::uint64_t monitor_generation_{};
     std::atomic_bool monitor_message_posted_{};

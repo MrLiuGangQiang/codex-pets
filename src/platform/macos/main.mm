@@ -3,6 +3,8 @@
 #import <ImageIO/ImageIO.h>
 #import <ServiceManagement/ServiceManagement.h>
 
+#include <dispatch/dispatch.h>
+
 #include <unistd.h>
 
 #include "app_logic.h"
@@ -694,7 +696,11 @@ using PendingMacUpdate = PendingMonitorUpdate;
     NSButton* _settingsXiaoAiEnabledButton;
     NSTextField* _settingsXiaoAiParallelField;
     NSButton* _settingsXiaoAiSelectAllButton;
+    NSButton* _settingsXiaoAiLoginButton;
+    NSButton* _settingsXiaoAiScanButton;
+    NSButton* _settingsXiaoAiTestButton;
     NSStackView* _settingsXiaoAiDevicesStack;
+    BOOL _xiaoaiOperationInFlight;
     std::unique_ptr<JsonSettingsStore> _settingsStore;
     AppSettings _settings;
     VisualStateCoordinator _visualCoordinator;
@@ -742,6 +748,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
 - (void)releaseCurrentSound;
 - (void)notifyXiaoAi:(XiaoAiEvent)event context:(std::string_view)context;
 - (void)openXiaoAiLogin:(id)sender;
+- (void)setXiaoAiOperationInFlight:(BOOL)inFlight;
 - (void)scanXiaoAiDevices:(id)sender;
 - (void)testXiaoAi:(id)sender;
 - (void)populateXiaoAiDevices;
@@ -1094,45 +1101,94 @@ using PendingMacUpdate = PendingMonitorUpdate;
     if (_xiaoaiNotifier) _xiaoaiNotifier->notify(event, context);
 }
 
+- (void)setXiaoAiOperationInFlight:(BOOL)inFlight {
+    _xiaoaiOperationInFlight = inFlight;
+    const BOOL enabled = !inFlight;
+    _settingsXiaoAiLoginButton.enabled = enabled;
+    _settingsXiaoAiScanButton.enabled = enabled;
+    _settingsXiaoAiTestButton.enabled = enabled;
+}
+
 - (void)openXiaoAiLogin:(id)sender {
     (void)sender;
+    if (_xiaoaiOperationInFlight || !_xiaoaiNotifier) return;
+    [self setXiaoAiOperationInFlight:YES];
     __weak AppDelegate* weakSelf = self;
     macos::start_xiaomi_browser_login(_settingsWindow,
         [weakSelf](std::string cookies, std::string error) {
-            AppDelegate* strongSelf = weakSelf;
-            if (!strongSelf) return;
-            if (!error.empty()) {
-                NSAlert* alert = [[NSAlert alloc] init];
-                alert.messageText = @"小米登录失败";
-                alert.informativeText = Ns(error);
-                [alert runModal];
-                return;
-            }
-            XiaoAiSettings candidate = strongSelf->_settings.xiaoai;
-            candidate.auth_cookies = std::move(cookies);
-            std::string validationError;
-            if (!strongSelf->_xiaoaiNotifier ||
-                !strongSelf->_xiaoaiNotifier->validate(candidate, &validationError)) {
-                NSAlert* alert = [[NSAlert alloc] init];
-                alert.messageText = @"小米授权校验失败";
-                alert.informativeText = Ns(validationError);
-                [alert runModal];
-                return;
-            }
-            std::string saveError;
-            if (!macos::save_xiaoai_authorization(candidate.auth_cookies, &saveError)) {
-                NSAlert* alert = [[NSAlert alloc] init];
-                alert.messageText = @"无法保存小米授权";
-                alert.informativeText = Ns(saveError);
-                [alert runModal];
-                return;
-            }
-            strongSelf->_settings.xiaoai.enabled = true;
-            strongSelf->_settings.xiaoai.auth_cookies = candidate.auth_cookies;
-            strongSelf->_xiaoaiNotifier->configure(strongSelf->_settings.xiaoai);
-            strongSelf->_settingsXiaoAiEnabledButton.state = NSControlStateValueOn;
-            [strongSelf saveSettings];
-            [strongSelf scanXiaoAiDevices:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AppDelegate* strongSelf = weakSelf;
+                if (!strongSelf || strongSelf->_terminating.load(std::memory_order_acquire)) return;
+                if (!error.empty()) {
+                    [strongSelf setXiaoAiOperationInFlight:NO];
+                    NSAlert* alert = [[NSAlert alloc] init];
+                    alert.messageText = @"小米登录失败";
+                    alert.informativeText = Ns(error);
+                    [alert runModal];
+                    return;
+                }
+                if (!strongSelf->_xiaoaiNotifier) {
+                    [strongSelf setXiaoAiOperationInFlight:NO];
+                    return;
+                }
+                XiaoAiSettings candidate = strongSelf->_settings.xiaoai;
+                candidate.auth_cookies = std::move(cookies);
+                strongSelf->_xiaoaiNotifier->validate_async(std::move(candidate),
+                    [weakSelf](XiaoAiSettings validated, std::string validationError) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            AppDelegate* resultSelf = weakSelf;
+                            if (!resultSelf || resultSelf->_terminating.load(std::memory_order_acquire)) return;
+                            if (!validationError.empty()) {
+                                [resultSelf setXiaoAiOperationInFlight:NO];
+                                NSAlert* alert = [[NSAlert alloc] init];
+                                alert.messageText = @"小米授权校验失败";
+                                alert.informativeText = Ns(validationError);
+                                [alert runModal];
+                                return;
+                            }
+                            std::string saveError;
+                            const auto authorization = compact_xiaoai_authorization(validated.auth_cookies);
+                            if (!macos::save_xiaoai_authorization(authorization, &saveError)) {
+                                [resultSelf setXiaoAiOperationInFlight:NO];
+                                NSAlert* alert = [[NSAlert alloc] init];
+                                alert.messageText = @"无法保存小米授权";
+                                alert.informativeText = Ns(saveError);
+                                [alert runModal];
+                                return;
+                            }
+                            if (!resultSelf->_xiaoaiNotifier) {
+                                [resultSelf setXiaoAiOperationInFlight:NO];
+                                return;
+                            }
+                            resultSelf->_settings.xiaoai.enabled = true;
+                            resultSelf->_settings.xiaoai.auth_cookies = authorization;
+                            resultSelf->_xiaoaiNotifier->configure(resultSelf->_settings.xiaoai);
+                            resultSelf->_settingsXiaoAiEnabledButton.state = NSControlStateValueOn;
+                            [resultSelf saveSettings];
+                            resultSelf->_xiaoaiNotifier->discover_devices_async(resultSelf->_settings.xiaoai,
+                                [weakSelf](std::vector<XiaoAiDeviceInfo> devices, std::string scanError) {
+                                    dispatch_async(dispatch_get_main_queue(), ^{
+                                        AppDelegate* scanSelf = weakSelf;
+                                        if (!scanSelf || scanSelf->_terminating.load(std::memory_order_acquire)) return;
+                                        [scanSelf setXiaoAiOperationInFlight:NO];
+                                        if (!scanError.empty()) {
+                                            NSAlert* alert = [[NSAlert alloc] init];
+                                            alert.messageText = @"扫描小爱音箱失败";
+                                            alert.informativeText = Ns(scanError);
+                                            [alert runModal];
+                                            return;
+                                        }
+                                        scanSelf->_xiaoaiDevices = std::move(devices);
+                                        [scanSelf populateXiaoAiDevices];
+                                        NSAlert* alert = [[NSAlert alloc] init];
+                                        alert.messageText = @"小米账号授权已验证";
+                                        alert.informativeText = @"已扫描音箱，请勾选目标音箱后测试播报。";
+                                        [alert runModal];
+                                    });
+                                });
+                        });
+                    });
+            });
         });
 }
 
@@ -1186,37 +1242,52 @@ using PendingMacUpdate = PendingMonitorUpdate;
 
 - (void)scanXiaoAiDevices:(id)sender {
     (void)sender;
-    if (!_xiaoaiNotifier) return;
-    std::vector<XiaoAiDeviceInfo> devices;
-    std::string error;
-    if (!_xiaoaiNotifier->discover_devices(_settings.xiaoai, &devices, &error)) {
-        NSAlert* alert = [[NSAlert alloc] init];
-        alert.messageText = @"扫描小爱音箱失败";
-        alert.informativeText = Ns(error);
-        [alert runModal];
-        return;
-    }
-    _xiaoaiDevices = std::move(devices);
-    [self populateXiaoAiDevices];
+    if (_xiaoaiOperationInFlight || !_xiaoaiNotifier) return;
+    [self setXiaoAiOperationInFlight:YES];
+    const XiaoAiSettings candidate = _settings.xiaoai;
+    __weak AppDelegate* weakSelf = self;
+    _xiaoaiNotifier->discover_devices_async(candidate,
+        [weakSelf](std::vector<XiaoAiDeviceInfo> devices, std::string error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AppDelegate* strongSelf = weakSelf;
+                if (!strongSelf || strongSelf->_terminating.load(std::memory_order_acquire)) return;
+                [strongSelf setXiaoAiOperationInFlight:NO];
+                if (!error.empty()) {
+                    NSAlert* alert = [[NSAlert alloc] init];
+                    alert.messageText = @"扫描小爱音箱失败";
+                    alert.informativeText = Ns(error);
+                    [alert runModal];
+                    return;
+                }
+                strongSelf->_xiaoaiDevices = std::move(devices);
+                [strongSelf populateXiaoAiDevices];
+            });
+        });
 }
 
 - (void)testXiaoAi:(id)sender {
     (void)sender;
-    if (!_xiaoaiNotifier) return;
+    if (_xiaoaiOperationInFlight || !_xiaoaiNotifier) return;
     XiaoAiSettings candidate = _settings.xiaoai;
     candidate.device_ids = [self selectedXiaoAiDeviceIds];
     candidate.device_id = candidate.device_ids.empty() ? std::string{} : candidate.device_ids.front();
-    std::string error;
-    if (!_xiaoaiNotifier->test(candidate, &error)) {
-        NSAlert* alert = [[NSAlert alloc] init];
-        alert.messageText = @"小米测试播报失败";
-        alert.informativeText = Ns(error);
-        [alert runModal];
-        return;
-    }
-    NSAlert* alert = [[NSAlert alloc] init];
-    alert.messageText = @"测试播报已发送";
-    [alert runModal];
+    [self setXiaoAiOperationInFlight:YES];
+    __weak AppDelegate* weakSelf = self;
+    _xiaoaiNotifier->test_async(std::move(candidate), [weakSelf](std::string error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate* strongSelf = weakSelf;
+            if (!strongSelf || strongSelf->_terminating.load(std::memory_order_acquire)) return;
+            [strongSelf setXiaoAiOperationInFlight:NO];
+            NSAlert* alert = [[NSAlert alloc] init];
+            if (!error.empty()) {
+                alert.messageText = @"小米测试播报失败";
+                alert.informativeText = Ns(error);
+            } else {
+                alert.messageText = @"测试播报已发送";
+            }
+            [alert runModal];
+        });
+    });
 }
 
 - (void)setExpressionDemoEnabled:(BOOL)enabled { _expressionDemo = enabled; }
@@ -1830,12 +1901,15 @@ using PendingMacUpdate = PendingMonitorUpdate;
         _settingsXiaoAiDevicesStack.spacing = 2;
         devicesScroll.documentView = _settingsXiaoAiDevicesStack;
         [content addSubview:devicesScroll];
-        [content addSubview:MakeButton(@"浏览器登录", self, @selector(openXiaoAiLogin:),
-                                       NSMakeRect(22, 92, 108, 30))];
-        [content addSubview:MakeButton(@"扫描设备", self, @selector(scanXiaoAiDevices:),
-                                       NSMakeRect(142, 92, 108, 30))];
-        [content addSubview:MakeButton(@"测试播报", self, @selector(testXiaoAi:),
-                                       NSMakeRect(262, 92, 108, 30))];
+        _settingsXiaoAiLoginButton = MakeButton(@"浏览器登录", self, @selector(openXiaoAiLogin:),
+                                                  NSMakeRect(22, 92, 108, 30));
+        [content addSubview:_settingsXiaoAiLoginButton];
+        _settingsXiaoAiScanButton = MakeButton(@"扫描设备", self, @selector(scanXiaoAiDevices:),
+                                                NSMakeRect(142, 92, 108, 30));
+        [content addSubview:_settingsXiaoAiScanButton];
+        _settingsXiaoAiTestButton = MakeButton(@"测试播报", self, @selector(testXiaoAi:),
+                                                NSMakeRect(262, 92, 108, 30));
+        [content addSubview:_settingsXiaoAiTestButton];
 
         NSTextField* hint = MakeLabel(
             @"扫描后可多选目标音箱，或使用“全选”对全部在线设备播报。CodeXPets 仅增量读取 JSONL 会话文件；"
@@ -1866,6 +1940,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
         ? NSControlStateValueOn : NSControlStateValueOff;
     _settingsXiaoAiParallelField.integerValue = _settings.xiaoai.max_parallel_requests;
     [self populateXiaoAiDevices];
+    [self setXiaoAiOperationInFlight:_xiaoaiOperationInFlight];
     [_settingsWindow makeKeyAndOrderFront:nil];
 }
 

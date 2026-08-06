@@ -56,6 +56,12 @@ public:
     bool validate(XiaoAiSettings& settings, std::string* error);
     bool discover_devices(const XiaoAiSettings& settings, std::vector<XiaoAiDeviceInfo>* devices, std::string* error);
     bool test(const XiaoAiSettings& settings, std::string* error);
+    using ValidateCallback = std::function<void(XiaoAiSettings, std::string)>;
+    using DiscoverCallback = std::function<void(std::vector<XiaoAiDeviceInfo>, std::string)>;
+    using TestCallback = std::function<void(std::string)>;
+    void validate_async(XiaoAiSettings settings, ValidateCallback callback);
+    void discover_devices_async(XiaoAiSettings settings, DiscoverCallback callback);
+    void test_async(XiaoAiSettings settings, TestCallback callback);
     void stop() noexcept;
 
 private:
@@ -71,6 +77,7 @@ private:
     std::mutex mutex_;
     std::condition_variable condition_;
     std::queue<Job> jobs_;
+    std::queue<std::function<void()>> control_tasks_;
     bool stopping_{};
     std::thread worker_;
 };
