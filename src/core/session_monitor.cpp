@@ -316,6 +316,8 @@ struct CodexSessionMonitor::Impl {
     std::unordered_map<std::string, ActiveTurn> active_turns;
     std::unordered_map<std::filesystem::path, Plan, PathHash, PathEqual> plans_by_file;
     std::vector<MonitorEventKind> events;
+    std::vector<std::string> event_contexts;
+    std::vector<std::string> last_taken_event_contexts;
     std::string last_completed_title;
     std::string last_completed_project_name;
     std::string last_aborted_title;
@@ -349,7 +351,10 @@ struct CodexSessionMonitor::Impl {
         return result;
     }
 
-    void emit(MonitorEventKind event) { events.push_back(event); }
+    void emit(MonitorEventKind event, std::string context = {}) {
+        events.push_back(event);
+        event_contexts.push_back(std::move(context));
+    }
 
     ActiveTurn* latest_turn_for_file(const std::filesystem::path& path) noexcept {
         ActiveTurn* result = nullptr;
@@ -716,7 +721,7 @@ struct CodexSessionMonitor::Impl {
                 added = true;
             }
             touch_turn(it->second, event_at);
-            if (added && !suppress_notifications) emit(MonitorEventKind::TaskStarted);
+            if (added && !suppress_notifications) emit(MonitorEventKind::TaskStarted, it->second.project_name);
         } else if (event_type == "task_complete") {
             const auto it = active_turns.find(turn_id);
             if (it != active_turns.end()) {
@@ -726,11 +731,11 @@ struct CodexSessionMonitor::Impl {
                     if (is_abnormal_completion(*payload)) {
                         last_aborted_title = completed.title.empty() ? "发生异常的任务" : completed.title;
                         last_aborted_project_name = completed.project_name;
-                        emit(MonitorEventKind::TaskAborted);
+                        emit(MonitorEventKind::TaskAborted, completed.project_name);
                     } else {
                         last_completed_title = completed.title.empty() ? "已完成的任务" : completed.title;
                         last_completed_project_name = completed.project_name;
-                        emit(MonitorEventKind::TaskCompleted);
+                        emit(MonitorEventKind::TaskCompleted, completed.project_name);
                     }
                 }
             } else if (!suppress_notifications && is_abnormal_completion(*payload)) {
@@ -746,7 +751,7 @@ struct CodexSessionMonitor::Impl {
                 if (!suppress_notifications) {
                     last_interrupted_title = aborted.title.empty() ? "未知任务" : aborted.title;
                     last_interrupted_project_name = aborted.project_name;
-                    emit(MonitorEventKind::TaskInterrupted);
+                    emit(MonitorEventKind::TaskInterrupted, aborted.project_name);
                 }
             } else if (!suppress_notifications) {
                 last_interrupted_title = "未知任务";
@@ -761,7 +766,7 @@ struct CodexSessionMonitor::Impl {
                 if (!suppress_notifications) {
                     last_aborted_title = aborted.title.empty() ? "发生异常的任务" : aborted.title;
                     last_aborted_project_name = aborted.project_name;
-                    emit(MonitorEventKind::TaskAborted);
+                    emit(MonitorEventKind::TaskAborted, aborted.project_name);
                 }
             }
         } else {
@@ -934,6 +939,7 @@ struct CodexSessionMonitor::Impl {
         result.last_interrupted_project_name = last_interrupted_project_name;
         result.last_event_type = last_event_type;
         result.latest_event_active_title_index = active_title_index(last_event_file);
+        result.event_contexts = last_taken_event_contexts;
         result.latest_plan_update_active_title_index = active_turn_index(last_plan_update_turn_id, turns);
         if (include_diagnostics) result.diagnostics_text = make_diagnostics();
         return result;
@@ -999,6 +1005,8 @@ MonitorSnapshot CodexSessionMonitor::snapshot(bool include_diagnostics) const {
 std::vector<MonitorEventKind> CodexSessionMonitor::take_events() {
     auto result = std::move(impl_->events);
     impl_->events.clear();
+    impl_->last_taken_event_contexts = std::move(impl_->event_contexts);
+    impl_->event_contexts.clear();
     return result;
 }
 int CodexSessionMonitor::active_count() const { return static_cast<int>(impl_->active_turns.size()); }

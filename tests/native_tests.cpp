@@ -633,9 +633,11 @@ void test_monitor_update_queue_and_policy() {
     MonitorUpdateQueue queue;
     MonitorSnapshot first_snapshot;
     first_snapshot.active_count = 1;
+    first_snapshot.event_contexts = {"first"};
     CHECK(queue.push(PendingMonitorUpdate{1, {MonitorEventKind::TaskStarted}, first_snapshot}));
     MonitorSnapshot second_snapshot;
     second_snapshot.active_count = 2;
+    second_snapshot.event_contexts = {"", "second"};
     CHECK(queue.push(PendingMonitorUpdate{1,
         {MonitorEventKind::PlanUpdated, MonitorEventKind::TaskCompleted}, second_snapshot}));
     CHECK(!queue.push(PendingMonitorUpdate{0, {MonitorEventKind::TaskAborted}, {}}));
@@ -644,6 +646,9 @@ void test_monitor_update_queue_and_policy() {
     CHECK_EQ(2, updates.front().snapshot.active_count);
     CHECK_EQ(std::size_t(3), updates.front().events.size());
     CHECK_EQ(MonitorEventKind::TaskCompleted, updates.front().events.back());
+    CHECK_EQ(std::size_t(3), updates.front().snapshot.event_contexts.size());
+    CHECK_EQ(std::string("first"), updates.front().snapshot.event_contexts[0]);
+    CHECK_EQ(std::string("second"), updates.front().snapshot.event_contexts[2]);
 
     CHECK(queue.push(PendingMonitorUpdate{2, {MonitorEventKind::TaskStarted}, {}}));
     updates = queue.take();
@@ -670,12 +675,53 @@ void test_monitor_update_queue_and_policy() {
     CHECK_EQ(SoundCue::Completed, *effects[1].sound);
     CHECK_EQ(std::string("alpha"), effects[1].xiaoai_context);
     CHECK_EQ(ReminderState::Completed, coordinator.select(snapshot.active_count, Clock::now()));
+
+    snapshot.event_contexts = {"alpha", "beta"};
+    const auto started_effects = apply_monitor_event_policy(
+        coordinator, snapshot, {MonitorEventKind::TaskStarted, MonitorEventKind::TaskStarted}, settings,
+        Clock::now());
+    CHECK_EQ(std::size_t(2), started_effects.size());
+    CHECK_EQ(std::string("alpha"), started_effects[0].xiaoai_context);
+    CHECK_EQ(std::string("beta"), started_effects[1].xiaoai_context);
 }
 
 void test_xiaoai_authorization_compaction() {
     CHECK_EQ(std::string("userId=u; serviceToken=s; deviceId=d"),
              compact_xiaoai_authorization("foo=x; userId=u; serviceToken=s; deviceId=d; bar=y"));
     CHECK(compact_xiaoai_authorization("userId=u").empty());
+}
+
+void test_xiaoai_start_context_tracks_each_task() {
+    TempDirectory root("CodeXPetsXiaoAiContexts_");
+    const auto alpha = create_session(root.path, "alpha.jsonl", "");
+    const auto beta = create_session(root.path, "beta.jsonl", "");
+    CodexSessionMonitor monitor(root.path);
+    (void)monitor.take_events();
+
+    append(alpha,
+        "{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"cwd\":\"D:\\\\Projects\\\\alpha\"}}\n"
+        "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"A\"}}\n");
+    append(beta,
+        "{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"cwd\":\"D:\\\\Projects\\\\beta\"}}\n"
+        "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"B\"}}\n");
+    monitor.poll();
+    const auto events = monitor.take_events();
+    const auto snapshot = monitor.snapshot(false);
+    CHECK_EQ(events.size(), snapshot.event_contexts.size());
+
+    AppSettings settings;
+    VisualStateCoordinator coordinator;
+    const auto effects = apply_monitor_event_policy(coordinator, snapshot, events, settings, Clock::now());
+    std::vector<std::string> labels;
+    for (const auto& effect : effects) {
+        if (effect.xiaoai_event && *effect.xiaoai_event == XiaoAiEvent::Started) {
+            labels.push_back(effect.xiaoai_context);
+        }
+    }
+    std::sort(labels.begin(), labels.end());
+    CHECK_EQ(std::size_t(2), labels.size());
+    CHECK_EQ(std::string("alpha"), labels[0]);
+    CHECK_EQ(std::string("beta"), labels[1]);
 }
 
 void test_session_monitor_lifecycle() {
@@ -1028,6 +1074,7 @@ int main() {
         {"xiaoai_protocol", test_xiaoai_protocol},
         {"xiaoai_authorization_compaction", test_xiaoai_authorization_compaction},
         {"monitor_update_queue_and_policy", test_monitor_update_queue_and_policy},
+        {"xiaoai_start_context_tracks_each_task", test_xiaoai_start_context_tracks_each_task},
         {"session_monitor_lifecycle", test_session_monitor_lifecycle},
         {"session_monitor_success_and_order", test_session_monitor_success_and_order},
         {"plan_update_focus_survives_later_event", test_plan_update_focus_survives_later_event},

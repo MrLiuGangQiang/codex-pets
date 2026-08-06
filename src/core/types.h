@@ -65,6 +65,9 @@ struct MonitorSnapshot {
     std::string last_interrupted_project_name;
     std::string last_event_type;
     int latest_event_active_title_index{-1};
+    // Labels captured when events are emitted, aligned with the event vector passed
+    // alongside this snapshot. This avoids using a later task's label for an earlier event.
+    std::vector<std::string> event_contexts;
     std::string diagnostics_text;
     int latest_plan_update_active_title_index{-1};
 };
