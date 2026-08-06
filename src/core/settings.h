@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 namespace codexpets {
 
@@ -12,7 +13,11 @@ struct XiaoAiSettings {
     bool enabled{};
     // Saved in the OS credential store, never in settings.json.
     std::string auth_cookies;
+    // The legacy single target is kept for backward-compatible settings migration.
     std::string device_id;
+    std::vector<std::string> device_ids;
+    // Maximum number of selected speakers receiving one announcement at once.
+    int max_parallel_requests{3};
     bool notify_started{true};
     bool notify_completed{true};
     bool notify_error{true};

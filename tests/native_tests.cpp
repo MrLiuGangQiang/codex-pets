@@ -10,12 +10,14 @@
 #include "settings.h"
 #include "xiaomi_speaker.h"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -405,6 +407,8 @@ void test_paths_and_settings() {
     settings.xiaoai.enabled = true;
     settings.xiaoai.auth_cookies = "serviceToken=test-token";
     settings.xiaoai.device_id = "speaker-device";
+    settings.xiaoai.device_ids = {"speaker-device", "speaker-kitchen", "speaker-device"};
+    settings.xiaoai.max_parallel_requests = 5;
     settings.xiaoai.notify_interrupted = false;
     settings.sessions_root = root.path / "sessions";
     settings.pet_position = PetPositionState{DockEdge::Right, "Display A|0,0,1920,1080", 1, 0.42};
@@ -420,6 +424,10 @@ void test_paths_and_settings() {
     CHECK(loaded.xiaoai.enabled);
     CHECK(loaded.xiaoai.auth_cookies.empty());
     CHECK_EQ(settings.xiaoai.device_id, loaded.xiaoai.device_id);
+    CHECK_EQ(2, static_cast<int>(loaded.xiaoai.device_ids.size()));
+    CHECK_EQ(std::string("speaker-device"), loaded.xiaoai.device_ids[0]);
+    CHECK_EQ(std::string("speaker-kitchen"), loaded.xiaoai.device_ids[1]);
+    CHECK_EQ(5, loaded.xiaoai.max_parallel_requests);
     CHECK(!loaded.xiaoai.notify_interrupted);
     CHECK_EQ(std::filesystem::absolute(settings.sessions_root).lexically_normal(), loaded.sessions_root);
     CHECK(loaded.pet_position == settings.pet_position);
@@ -479,6 +487,49 @@ void test_xiaoai_protocol() {
     CHECK(ubus_cookie->second.find("sn=speaker-serial") != std::string::npos);
     CHECK(ubus_cookie->second.find("hardware=l09a") != std::string::npos);
     CHECK(ubus_cookie->second.find("deviceId=speaker-device") != std::string::npos);
+
+    std::vector<XiaoAiHttpRequest> multi_requests;
+    std::mutex multi_mutex;
+    std::atomic_int active_requests{};
+    std::atomic_int peak_requests{};
+    XiaoAiHttpTransport multi_transport = [&](const XiaoAiHttpRequest& request) {
+        {
+            std::lock_guard lock(multi_mutex);
+            multi_requests.push_back(request);
+        }
+        if (request.url.find("/admin/v2/device_list?") != std::string::npos) {
+            return XiaoAiHttpResponse{200,
+                R"({"code":0,"data":[{"deviceID":"speaker-1","hardware":"l09a"},{"deviceID":"speaker-2","hardware":"l09a"},{"deviceID":"speaker-3","hardware":"l09a"},{"deviceID":"speaker-4","hardware":"l09a"},{"deviceID":"speaker-5","hardware":"l09a"}]})", {}};
+        }
+        const auto active = active_requests.fetch_add(1) + 1;
+        auto observed = peak_requests.load();
+        while (active > observed && !peak_requests.compare_exchange_weak(observed, active)) {}
+        std::this_thread::sleep_for(std::chrono::milliseconds(35));
+        active_requests.fetch_sub(1);
+        return XiaoAiHttpResponse{200, R"({"code":0})", {}};
+    };
+    XiaoAiSettings multi_settings = settings;
+    multi_settings.device_ids = {"speaker-1", "speaker-2", "speaker-3", "speaker-4", "speaker-5"};
+    multi_settings.device_id = multi_settings.device_ids.front();
+    multi_settings.max_parallel_requests = 3;
+    XiaoAiNotifier multi_notifier(std::move(multi_transport));
+    CHECK(multi_notifier.test(multi_settings, &error));
+    CHECK(error.empty());
+    CHECK_EQ(6, static_cast<int>(multi_requests.size()));
+    CHECK_EQ(3, peak_requests.load());
+    std::vector<std::string> bodies;
+    {
+        std::lock_guard lock(multi_mutex);
+        for (const auto& request : multi_requests) {
+            if (!request.body.empty()) bodies.push_back(request.body);
+        }
+    }
+    CHECK_EQ(5, static_cast<int>(bodies.size()));
+    for (int index = 1; index <= 5; ++index) {
+        CHECK(std::any_of(bodies.begin(), bodies.end(), [index](const std::string& body) {
+            return body.find("deviceId=speaker-" + std::to_string(index)) != std::string::npos;
+        }));
+    }
 
     std::vector<XiaoAiHttpRequest> passport_requests;
     XiaoAiHttpTransport passport_transport = [&](const XiaoAiHttpRequest& request) {

@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <unordered_set>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -35,6 +36,17 @@ std::string read_string(const JsonValue& object, std::string_view name,
                         std::string fallback = {}) {
     const auto* value = property(object, name);
     return value && value->is_string() ? value->string() : std::move(fallback);
+}
+
+std::vector<std::string> read_string_array(const JsonValue& object, std::string_view name) {
+    const auto* value = property(object, name);
+    if (!value || !value->is_array()) return {};
+    std::vector<std::string> result;
+    result.reserve(value->array().size());
+    for (const auto& item : value->array()) {
+        if (item.is_string()) result.push_back(item.string());
+    }
+    return result;
 }
 
 std::optional<DockEdge> parse_dock_edge(const JsonValue* value) noexcept {
@@ -81,6 +93,13 @@ std::string serialize_settings(const AppSettings& settings) {
            << "  \"XiaoAi\": {\n"
            << "    \"Enabled\": " << (xiaoai.enabled ? "true" : "false") << ",\n"
            << "    \"DeviceId\": \"" << json_escape(xiaoai.device_id) << "\",\n"
+           << "    \"DeviceIds\": [";
+    for (std::size_t index = 0; index < xiaoai.device_ids.size(); ++index) {
+        if (index != 0) stream << ", ";
+        stream << "\"" << json_escape(xiaoai.device_ids[index]) << "\"";
+    }
+    stream << "],\n"
+           << "    \"MaxParallelRequests\": " << xiaoai.max_parallel_requests << ",\n"
            << "    \"NotifyStarted\": " << (xiaoai.notify_started ? "true" : "false") << ",\n"
            << "    \"NotifyCompleted\": " << (xiaoai.notify_completed ? "true" : "false") << ",\n"
            << "    \"NotifyError\": " << (xiaoai.notify_error ? "true" : "false") << ",\n"
@@ -131,6 +150,17 @@ void AppSettings::normalize() {
     dock_reveal_seconds = std::clamp(dock_reveal_seconds, 1, 60);
     dock_notification_seconds = std::clamp(dock_notification_seconds, 1, 120);
     sessions_root = paths::normalize_sessions_root(path_to_utf8(sessions_root));
+    std::vector<std::string> normalized_devices;
+    normalized_devices.reserve(xiaoai.device_ids.size() + (xiaoai.device_id.empty() ? 0 : 1));
+    std::unordered_set<std::string> seen;
+    const auto append_device = [&](const std::string& value) {
+        if (!value.empty() && seen.insert(value).second) normalized_devices.push_back(value);
+    };
+    for (const auto& value : xiaoai.device_ids) append_device(value);
+    if (normalized_devices.empty()) append_device(xiaoai.device_id);
+    xiaoai.device_ids = std::move(normalized_devices);
+    xiaoai.device_id = xiaoai.device_ids.empty() ? std::string{} : xiaoai.device_ids.front();
+    xiaoai.max_parallel_requests = std::clamp(xiaoai.max_parallel_requests, 1, 8);
     if (pet_position) pet_position->normalize();
 }
 
@@ -157,6 +187,9 @@ AppSettings JsonSettingsStore::load() const noexcept {
         if (const auto* xiaoai = property(root, "XiaoAi"); xiaoai && xiaoai->is_object()) {
             result.xiaoai.enabled = read_bool(*xiaoai, "Enabled", result.xiaoai.enabled);
             result.xiaoai.device_id = read_string(*xiaoai, "DeviceId");
+            result.xiaoai.device_ids = read_string_array(*xiaoai, "DeviceIds");
+            result.xiaoai.max_parallel_requests = read_int(
+                *xiaoai, "MaxParallelRequests", result.xiaoai.max_parallel_requests);
             result.xiaoai.notify_started = read_bool(*xiaoai, "NotifyStarted", result.xiaoai.notify_started);
             result.xiaoai.notify_completed = read_bool(*xiaoai, "NotifyCompleted", result.xiaoai.notify_completed);
             result.xiaoai.notify_error = read_bool(*xiaoai, "NotifyError", result.xiaoai.notify_error);

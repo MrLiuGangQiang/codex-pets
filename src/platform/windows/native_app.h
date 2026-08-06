@@ -78,6 +78,7 @@ private:
     void open_xiaomi_login();
     void scan_xiaoai_devices();
     void populate_xiaoai_device_selector(HWND hwnd);
+    [[nodiscard]] std::vector<std::string> selected_xiaoai_device_ids(HWND hwnd) const;
     void test_xiaoai();
     bool is_autostart_enabled() const;
     void set_autostart_enabled(bool enabled);

@@ -25,6 +25,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <unordered_set>
 
 
 namespace codexpets::windows {
@@ -61,6 +62,8 @@ constexpr UINT kSettingsXiaoAiDevice = 4113;
 constexpr UINT kSettingsXiaoAiTest = 4114;
 constexpr UINT kSettingsXiaoAiLogin = 4115;
 constexpr UINT kSettingsXiaoAiScan = 4116;
+constexpr UINT kSettingsXiaoAiSelectAll = 4117;
+constexpr UINT kSettingsXiaoAiParallel = 4118;
 
 int read_edit_int(HWND parent, int control, int fallback) {
     wchar_t buffer[64]{};
@@ -1044,55 +1047,63 @@ void NativeApp::open_xiaomi_login() {
             xiaoai_devices_ = std::move(found);
             if (settings_window_ && IsWindow(settings_window_)) populate_xiaoai_device_selector(settings_window_);
         }
-        MessageBoxW(owner, L"小米账号授权已验证。已扫描音箱，请从下拉框选择目标后测试播报。", L"小米账号登录", MB_OK);
+        MessageBoxW(owner, L"小米账号授权已验证。已扫描音箱，请勾选目标音箱后测试播报。", L"小米账号登录", MB_OK);
     });
 }
 
 void NativeApp::populate_xiaoai_device_selector(HWND hwnd) {
     auto* selector = GetDlgItem(hwnd, kSettingsXiaoAiDevice);
     if (!selector) return;
-    wchar_t current[1024]{};
-    GetWindowTextW(selector, current, ARRAYSIZE(current));
-    const auto wanted = to_utf8(current);
-    SendMessageW(selector, CB_RESETCONTENT, 0, 0);
-    int selected = CB_ERR;
+    SendMessageW(selector, LB_RESETCONTENT, 0, 0);
+    std::unordered_set<std::string> selected(settings_.xiaoai.device_ids.begin(),
+                                             settings_.xiaoai.device_ids.end());
+    if (selected.empty() && !settings_.xiaoai.device_id.empty()) {
+        selected.insert(settings_.xiaoai.device_id);
+    }
     for (std::size_t i = 0; i < xiaoai_devices_.size(); ++i) {
         const auto& device = xiaoai_devices_[i];
-        const auto label = !device.alias.empty() ? device.alias : !device.name.empty() ? device.name : device.hardware;
+        const auto label = !device.alias.empty() ? device.alias :
+            !device.name.empty() ? device.name : device.hardware;
         if (label.empty()) continue;
-        const auto index = static_cast<int>(SendMessageW(selector, CB_ADDSTRING, 0,
+        const auto index = static_cast<int>(SendMessageW(selector, LB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(to_wide(label).c_str())));
-        if (index == CB_ERR || index == CB_ERRSPACE) continue;
-        SendMessageW(selector, CB_SETITEMDATA, static_cast<WPARAM>(index), static_cast<LPARAM>(i));
-        if (wanted == device.id || wanted == device.name || wanted == device.alias ||
-            settings_.xiaoai.device_id == device.id || settings_.xiaoai.device_id == device.name ||
-            settings_.xiaoai.device_id == device.alias) selected = index;
+        if (index == LB_ERR || index == LB_ERRSPACE) continue;
+        SendMessageW(selector, LB_SETITEMDATA, static_cast<WPARAM>(index), static_cast<LPARAM>(i));
+        if (selected.contains(device.id)) {
+            SendMessageW(selector, LB_SETSEL, TRUE, static_cast<LPARAM>(index));
+        }
     }
-    if (selected != CB_ERR) SendMessageW(selector, CB_SETCURSEL, static_cast<WPARAM>(selected), 0);
-    else if (!wanted.empty()) SetWindowTextW(selector, current);
-    else if (!settings_.xiaoai.device_id.empty()) SetWindowTextW(selector, to_wide(settings_.xiaoai.device_id).c_str());
+}
+
+std::vector<std::string> NativeApp::selected_xiaoai_device_ids(HWND hwnd) const {
+    std::vector<std::string> result;
+    const auto selector = GetDlgItem(hwnd, kSettingsXiaoAiDevice);
+    if (!selector) return result;
+    const auto selected_count = static_cast<int>(SendMessageW(selector, LB_GETSELCOUNT, 0, 0));
+    if (selected_count <= 0) return result;
+    std::vector<int> indices(static_cast<std::size_t>(selected_count));
+    const auto copied = static_cast<int>(SendMessageW(selector, LB_GETSELITEMS,
+        static_cast<WPARAM>(indices.size()), reinterpret_cast<LPARAM>(indices.data())));
+    for (int index = 0; index < copied; ++index) {
+        const auto data = static_cast<std::size_t>(SendMessageW(selector, LB_GETITEMDATA,
+            static_cast<WPARAM>(indices[static_cast<std::size_t>(index)]), 0));
+        if (data < xiaoai_devices_.size()) result.push_back(xiaoai_devices_[data].id);
+    }
+    return result;
 }
 
 void NativeApp::scan_xiaoai_devices() {
     if (!xiaoai_notifier_) return;
-    XiaoAiSettings candidate = settings_.xiaoai;
-    if (settings_window_ && IsWindow(settings_window_)) {
-        const auto selected = static_cast<int>(SendDlgItemMessageW(settings_window_, kSettingsXiaoAiDevice, CB_GETCURSEL, 0, 0));
-        if (selected != CB_ERR) {
-            const auto data = static_cast<std::size_t>(SendDlgItemMessageW(settings_window_, kSettingsXiaoAiDevice, CB_GETITEMDATA, selected, 0));
-            if (data < xiaoai_devices_.size()) candidate.device_id = xiaoai_devices_[data].id;
-        }
-    }
     std::vector<XiaoAiDeviceInfo> found;
     std::string error;
-    if (!xiaoai_notifier_->discover_devices(candidate, &found, &error)) {
+    if (!xiaoai_notifier_->discover_devices(settings_.xiaoai, &found, &error)) {
         show_error(L"小爱音箱", to_wide(error));
         return;
     }
     xiaoai_devices_ = std::move(found);
     if (settings_window_ && IsWindow(settings_window_)) populate_xiaoai_device_selector(settings_window_);
     MessageBoxW(settings_window_ ? settings_window_ : pet_window_,
-                (L"已扫描到 " + std::to_wstring(xiaoai_devices_.size()) + L" 台在线小爱音箱，请在下拉框中直接选择。").c_str(),
+                (L"已扫描到 " + std::to_wstring(xiaoai_devices_.size()) + L" 台在线小爱音箱，可多选或点击全选。").c_str(),
                 L"小爱音箱", MB_OK);
 }
 
@@ -1100,15 +1111,8 @@ void NativeApp::test_xiaoai() {
     if (!xiaoai_notifier_) return;
     auto candidate = settings_.xiaoai;
     if (settings_window_ && IsWindow(settings_window_)) {
-        const auto selected = static_cast<int>(SendDlgItemMessageW(settings_window_, kSettingsXiaoAiDevice, CB_GETCURSEL, 0, 0));
-        if (selected != CB_ERR) {
-            const auto data = static_cast<std::size_t>(SendDlgItemMessageW(settings_window_, kSettingsXiaoAiDevice, CB_GETITEMDATA, selected, 0));
-            if (data < xiaoai_devices_.size()) candidate.device_id = xiaoai_devices_[data].id;
-        } else {
-            wchar_t buffer[1024]{};
-            GetDlgItemTextW(settings_window_, kSettingsXiaoAiDevice, buffer, ARRAYSIZE(buffer));
-            candidate.device_id = to_utf8(buffer);
-        }
+        candidate.device_ids = selected_xiaoai_device_ids(settings_window_);
+        candidate.device_id = candidate.device_ids.empty() ? std::string{} : candidate.device_ids.front();
     }
     std::string error;
     if (!xiaoai_notifier_->test(candidate, &error)) {
@@ -1148,7 +1152,7 @@ void NativeApp::show_settings() {
     settings_window_ = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
                                        kSettingsClassName, L"CodeXPets 设置",
                                        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                       CW_USEDEFAULT, CW_USEDEFAULT, 560, 650,
+                                       CW_USEDEFAULT, CW_USEDEFAULT, 560, 715,
                                        pet_window_, nullptr, instance_, this);
     if (!settings_window_) return;
     ShowWindow(settings_window_, SW_SHOWNORMAL);
@@ -1220,35 +1224,46 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiEnabled)), instance_, nullptr);
             set_control_font(xiaoai);
             SendMessageW(xiaoai, BM_SETCHECK, settings_.xiaoai.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
-            auto* target_label = CreateWindowExW(0, L"STATIC", L"目标音箱",
-                WS_CHILD | WS_VISIBLE, 24, 362, 130, 24, hwnd, nullptr, instance_, nullptr);
+            auto* parallel_label = CreateWindowExW(0, L"STATIC", L"并发播报数（1-8）",
+                WS_CHILD | WS_VISIBLE, 270, 332, 155, 24, hwnd, nullptr, instance_, nullptr);
+            set_control_font(parallel_label);
+            auto* parallel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL, 440, 327, 80, 26, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiParallel)), instance_, nullptr);
+            set_control_font(parallel);
+            set_edit_int(hwnd, kSettingsXiaoAiParallel, settings_.xiaoai.max_parallel_requests);
+            auto* target_label = CreateWindowExW(0, L"STATIC", L"目标音箱（可多选）",
+                WS_CHILD | WS_VISIBLE, 24, 362, 160, 24, hwnd, nullptr, instance_, nullptr);
             set_control_font(target_label);
-            auto* target = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWN | CBS_AUTOHSCROLL,
-                160, 359, 365, 180, hwnd,
+            auto* target = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT,
+                160, 359, 365, 94, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiDevice)), instance_, nullptr);
             set_control_font(target);
-            SetWindowTextW(target, to_wide(settings_.xiaoai.device_id).c_str());
             populate_xiaoai_device_selector(hwnd);
-            auto* xiaoai_events = CreateWindowExW(0, L"STATIC",
-                L"播报事件：开始、完成、错误、中断（保存后生效）",
-                WS_CHILD | WS_VISIBLE, 24, 398, 430, 24, hwnd, nullptr, instance_, nullptr);
-            set_control_font(xiaoai_events);
+            auto* select_all = CreateWindowExW(0, L"BUTTON", L"全选",
+                WS_CHILD | WS_VISIBLE, 160, 461, 72, 28, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiSelectAll)), instance_, nullptr);
+            set_control_font(select_all);
             auto* scan = CreateWindowExW(0, L"BUTTON", L"扫描音箱",
-                WS_CHILD | WS_VISIBLE, 235, 426, 100, 28, hwnd,
+                WS_CHILD | WS_VISIBLE, 240, 461, 100, 28, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiScan)), instance_, nullptr);
             set_control_font(scan);
             auto* login = CreateWindowExW(0, L"BUTTON", L"浏览器登录",
-                WS_CHILD | WS_VISIBLE, 340, 426, 105, 28, hwnd,
+                WS_CHILD | WS_VISIBLE, 345, 461, 105, 28, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiLogin)), instance_, nullptr);
             set_control_font(login);
             auto* test = CreateWindowExW(0, L"BUTTON", L"测试播报",
-                WS_CHILD | WS_VISIBLE, 450, 426, 100, 28, hwnd,
+                WS_CHILD | WS_VISIBLE, 455, 461, 90, 28, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiTest)), instance_, nullptr);
             set_control_font(test);
+            auto* xiaoai_events = CreateWindowExW(0, L"STATIC",
+                L"播报事件：开始、完成、错误、中断（保存后生效）",
+                WS_CHILD | WS_VISIBLE, 24, 500, 430, 24, hwnd, nullptr, instance_, nullptr);
+            set_control_font(xiaoai_events);
             auto* hint = CreateWindowExW(0, L"STATIC",
-                L"有多台音箱时，请在“目标音箱”填写米家中显示的音箱名称；授权信息仅保存在 Windows 凭据管理器中。",
-                WS_CHILD | WS_VISIBLE, 24, 468, 510, 34, hwnd,
+                L"扫描后可多选目标音箱，点击“全选”可对全部在线设备播报；授权信息仅保存在 Windows 凭据管理器中。",
+                WS_CHILD | WS_VISIBLE, 24, 530, 510, 34, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsHint)), instance_, nullptr);
             set_control_font(hint);
             auto* defaults = CreateWindowExW(0, L"BUTTON", L"恢复默认", WS_CHILD | WS_VISIBLE,
@@ -1271,7 +1286,8 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 SetDlgItemTextW(hwnd, kSettingsRoot, defaults.sessions_root.c_str());
                 SendDlgItemMessageW(hwnd, kSettingsSound, BM_SETCHECK, BST_CHECKED, 0);
                 SendDlgItemMessageW(hwnd, kSettingsXiaoAiEnabled, BM_SETCHECK, BST_UNCHECKED, 0);
-                SetDlgItemTextW(hwnd, kSettingsXiaoAiDevice, L"");
+                set_edit_int(hwnd, kSettingsXiaoAiParallel, defaults.xiaoai.max_parallel_requests);
+                SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, LB_SETSEL, FALSE, -1);
                 return 0;
             }
             if (id == kSettingsBrowse) {
@@ -1283,6 +1299,10 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                     if (SHGetPathFromIDListW(item, path)) SetDlgItemTextW(hwnd, kSettingsRoot, path);
                     CoTaskMemFree(item);
                 }
+                return 0;
+            }
+            if (id == kSettingsXiaoAiSelectAll) {
+                SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, LB_SETSEL, TRUE, -1);
                 return 0;
             }
             if (id == kSettingsXiaoAiScan) { scan_xiaoai_devices(); return 0; }
@@ -1299,15 +1319,11 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 next.sessions_root = std::filesystem::path(root);
                 next.sound_enabled = SendDlgItemMessageW(hwnd, kSettingsSound, BM_GETCHECK, 0, 0) == BST_CHECKED;
                 next.xiaoai.enabled = SendDlgItemMessageW(hwnd, kSettingsXiaoAiEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                wchar_t xiaoai_buffer[1024]{};
-                const auto selected_device = static_cast<int>(SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, CB_GETCURSEL, 0, 0));
-                if (selected_device != CB_ERR) {
-                    const auto data = static_cast<std::size_t>(SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, CB_GETITEMDATA, selected_device, 0));
-                    if (data < xiaoai_devices_.size()) next.xiaoai.device_id = xiaoai_devices_[data].id;
-                } else {
-                    GetDlgItemTextW(hwnd, kSettingsXiaoAiDevice, xiaoai_buffer, ARRAYSIZE(xiaoai_buffer));
-                    next.xiaoai.device_id = to_utf8(xiaoai_buffer);
-                }
+                next.xiaoai.max_parallel_requests = read_edit_int(
+                    hwnd, kSettingsXiaoAiParallel, next.xiaoai.max_parallel_requests);
+                next.xiaoai.device_ids = selected_xiaoai_device_ids(hwnd);
+                next.xiaoai.device_id = next.xiaoai.device_ids.empty()
+                    ? std::string{} : next.xiaoai.device_ids.front();
                 next.normalize();
                 const auto root_changed = next.sessions_root != settings_.sessions_root;
                 settings_ = next;

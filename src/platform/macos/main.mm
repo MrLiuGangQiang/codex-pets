@@ -29,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <unordered_set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -691,7 +692,9 @@ using PendingMacUpdate = PendingMonitorUpdate;
     NSTextField* _settingsRootField;
     NSButton* _settingsSoundButton;
     NSButton* _settingsXiaoAiEnabledButton;
-    NSComboBox* _settingsXiaoAiDeviceField;
+    NSTextField* _settingsXiaoAiParallelField;
+    NSButton* _settingsXiaoAiSelectAllButton;
+    NSStackView* _settingsXiaoAiDevicesStack;
     std::unique_ptr<JsonSettingsStore> _settingsStore;
     AppSettings _settings;
     VisualStateCoordinator _visualCoordinator;
@@ -742,6 +745,8 @@ using PendingMacUpdate = PendingMonitorUpdate;
 - (void)scanXiaoAiDevices:(id)sender;
 - (void)testXiaoAi:(id)sender;
 - (void)populateXiaoAiDevices;
+- (void)toggleXiaoAiAllDevices:(id)sender;
+- (std::vector<std::string>)selectedXiaoAiDeviceIds;
 - (NSMenuItem*)menuItem:(NSString*)title action:(SEL)action;
 - (void)updateMenu:(NSMenu*)menu;
 - (void)togglePet:(id)sender;
@@ -1122,28 +1127,61 @@ using PendingMacUpdate = PendingMonitorUpdate;
                 [alert runModal];
                 return;
             }
+            strongSelf->_settings.xiaoai.enabled = true;
             strongSelf->_settings.xiaoai.auth_cookies = candidate.auth_cookies;
             strongSelf->_xiaoaiNotifier->configure(strongSelf->_settings.xiaoai);
+            strongSelf->_settingsXiaoAiEnabledButton.state = NSControlStateValueOn;
             [strongSelf saveSettings];
             [strongSelf scanXiaoAiDevices:nil];
         });
 }
 
 - (void)populateXiaoAiDevices {
-    if (!_settingsXiaoAiDeviceField) return;
-    [_settingsXiaoAiDeviceField removeAllItems];
-    NSInteger selected = NSNotFound;
+    if (!_settingsXiaoAiDevicesStack) return;
+    for (NSView* view in [_settingsXiaoAiDevicesStack.arrangedSubviews copy]) {
+        [_settingsXiaoAiDevicesStack removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+    std::unordered_set<std::string> selected(_settings.xiaoai.device_ids.begin(),
+                                             _settings.xiaoai.device_ids.end());
+    if (selected.empty() && !_settings.xiaoai.device_id.empty()) {
+        selected.insert(_settings.xiaoai.device_id);
+    }
     for (std::size_t index = 0; index < _xiaoaiDevices.size(); ++index) {
         const auto& device = _xiaoaiDevices[index];
-        std::string label = device.name.empty() ? device.id : device.name;
-        if (!device.alias.empty() && device.alias != device.name) {
-            label += " (" + device.alias + ")";
-        }
-        [_settingsXiaoAiDeviceField addItemWithObjectValue:Ns(label)];
-        if (device.id == _settings.xiaoai.device_id) selected = static_cast<NSInteger>(index);
+        std::string label = device.alias.empty() ? device.name : device.alias;
+        if (label.empty()) label = device.id;
+        NSButton* button = [NSButton checkboxWithTitle:Ns(label) target:nil action:nil];
+        button.tag = static_cast<NSInteger>(index);
+        button.state = selected.contains(device.id) ? NSControlStateValueOn : NSControlStateValueOff;
+        [_settingsXiaoAiDevicesStack addArrangedSubview:button];
     }
-    if (selected != NSNotFound) [_settingsXiaoAiDeviceField selectItemAtIndex:selected];
-    else _settingsXiaoAiDeviceField.stringValue = Ns(_settings.xiaoai.device_id);
+    const CGFloat height = std::max<CGFloat>(94, static_cast<CGFloat>(_xiaoaiDevices.size()) * 24);
+    _settingsXiaoAiDevicesStack.frame = NSMakeRect(0, 0, 300, height);
+    _settingsXiaoAiSelectAllButton.state = !_xiaoaiDevices.empty() &&
+        selected.size() == _xiaoaiDevices.size() ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (std::vector<std::string>)selectedXiaoAiDeviceIds {
+    std::vector<std::string> result;
+    for (NSView* view in _settingsXiaoAiDevicesStack.arrangedSubviews) {
+        if (![view isKindOfClass:NSButton.class]) continue;
+        NSButton* button = static_cast<NSButton*>(view);
+        if (button.state != NSControlStateValueOn) continue;
+        const auto index = static_cast<std::size_t>(button.tag);
+        if (index < _xiaoaiDevices.size()) result.push_back(_xiaoaiDevices[index].id);
+    }
+    return result;
+}
+
+- (void)toggleXiaoAiAllDevices:(id)sender {
+    const BOOL selected = [sender state] == NSControlStateValueOn;
+    for (NSView* view in _settingsXiaoAiDevicesStack.arrangedSubviews) {
+        if ([view isKindOfClass:NSButton.class]) {
+            static_cast<NSButton*>(view).state = selected
+                ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    }
 }
 
 - (void)scanXiaoAiDevices:(id)sender {
@@ -1166,13 +1204,8 @@ using PendingMacUpdate = PendingMonitorUpdate;
     (void)sender;
     if (!_xiaoaiNotifier) return;
     XiaoAiSettings candidate = _settings.xiaoai;
-    const NSInteger selectedDevice = _settingsXiaoAiDeviceField.indexOfSelectedItem;
-    if (selectedDevice >= 0 &&
-        selectedDevice < static_cast<NSInteger>(_xiaoaiDevices.size())) {
-        candidate.device_id = _xiaoaiDevices[static_cast<std::size_t>(selectedDevice)].id;
-    } else if (_settingsXiaoAiDeviceField) {
-        candidate.device_id = Utf8(_settingsXiaoAiDeviceField.stringValue);
-    }
+    candidate.device_ids = [self selectedXiaoAiDeviceIds];
+    candidate.device_id = candidate.device_ids.empty() ? std::string{} : candidate.device_ids.front();
     std::string error;
     if (!_xiaoaiNotifier->test(candidate, &error)) {
         NSAlert* alert = [[NSAlert alloc] init];
@@ -1780,23 +1813,34 @@ using PendingMacUpdate = PendingMonitorUpdate;
                                                               target:nil action:nil];
         _settingsXiaoAiEnabledButton.frame = NSMakeRect(22, 278, 300, 28);
         [content addSubview:_settingsXiaoAiEnabledButton];
-        [content addSubview:MakeLabel(@"目标音箱（可填写设备 ID 或名称）",
-                                      NSMakeRect(22, 238, 240, 24))];
-        _settingsXiaoAiDeviceField = [[NSComboBox alloc] initWithFrame:NSMakeRect(270, 234, 328, 28)];
-        _settingsXiaoAiDeviceField.editable = YES;
-        _settingsXiaoAiDeviceField.usesDataSource = NO;
-        [content addSubview:_settingsXiaoAiDeviceField];
+        [content addSubview:MakeLabel(@"并发播报数（1-8）", NSMakeRect(360, 280, 140, 24))];
+        _settingsXiaoAiParallelField = MakeTextField(@"", NSMakeRect(510, 276, 88, 28));
+        [content addSubview:_settingsXiaoAiParallelField];
+        [content addSubview:MakeLabel(@"目标音箱（可多选）", NSMakeRect(22, 238, 220, 24))];
+        _settingsXiaoAiSelectAllButton = [NSButton checkboxWithTitle:@"全选" target:self
+                                                               action:@selector(toggleXiaoAiAllDevices:)];
+        _settingsXiaoAiSelectAllButton.frame = NSMakeRect(270, 234, 100, 28);
+        [content addSubview:_settingsXiaoAiSelectAllButton];
+        NSScrollView* devicesScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(270, 132, 328, 94)];
+        devicesScroll.hasVerticalScroller = YES;
+        devicesScroll.borderType = NSBezelBorder;
+        _settingsXiaoAiDevicesStack = [[NSStackView alloc] initWithFrame:NSMakeRect(0, 0, 300, 94)];
+        _settingsXiaoAiDevicesStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+        _settingsXiaoAiDevicesStack.alignment = NSLayoutAttributeLeading;
+        _settingsXiaoAiDevicesStack.spacing = 2;
+        devicesScroll.documentView = _settingsXiaoAiDevicesStack;
+        [content addSubview:devicesScroll];
         [content addSubview:MakeButton(@"浏览器登录", self, @selector(openXiaoAiLogin:),
-                                       NSMakeRect(22, 194, 108, 30))];
+                                       NSMakeRect(22, 92, 108, 30))];
         [content addSubview:MakeButton(@"扫描设备", self, @selector(scanXiaoAiDevices:),
-                                       NSMakeRect(142, 194, 108, 30))];
+                                       NSMakeRect(142, 92, 108, 30))];
         [content addSubview:MakeButton(@"测试播报", self, @selector(testXiaoAi:),
-                                       NSMakeRect(262, 194, 108, 30))];
+                                       NSMakeRect(262, 92, 108, 30))];
 
         NSTextField* hint = MakeLabel(
-            @"CodeXPets 仅增量读取该目录中的 JSONL 会话文件；使用轻量轮询，"
-             @"不会启动额外服务，也不会修改 Codex 文件。小米授权只保存在系统钥匙串中。",
-            NSMakeRect(22, 122, 576, 48));
+            @"扫描后可多选目标音箱，或使用“全选”对全部在线设备播报。CodeXPets 仅增量读取 JSONL 会话文件；"
+             @"小米授权只保存在系统钥匙串中。",
+            NSMakeRect(22, 50, 576, 36));
         hint.textColor = NSColor.secondaryLabelColor;
         hint.lineBreakMode = NSLineBreakByWordWrapping;
         hint.maximumNumberOfLines = 2;
@@ -1820,6 +1864,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
     _settingsSoundButton.state = _settings.sound_enabled ? NSControlStateValueOn : NSControlStateValueOff;
     _settingsXiaoAiEnabledButton.state = _settings.xiaoai.enabled
         ? NSControlStateValueOn : NSControlStateValueOff;
+    _settingsXiaoAiParallelField.integerValue = _settings.xiaoai.max_parallel_requests;
     [self populateXiaoAiDevices];
     [_settingsWindow makeKeyAndOrderFront:nil];
 }
@@ -1849,8 +1894,9 @@ using PendingMacUpdate = PendingMonitorUpdate;
     _settingsRootField.stringValue = Ns(path_to_utf8(defaults.sessions_root));
     _settingsSoundButton.state = defaults.sound_enabled ? NSControlStateValueOn : NSControlStateValueOff;
     _settingsXiaoAiEnabledButton.state = NSControlStateValueOff;
-    _settingsXiaoAiDeviceField.stringValue = @"";
-    [_settingsXiaoAiDeviceField removeAllItems];
+    _settingsXiaoAiParallelField.integerValue = defaults.xiaoai.max_parallel_requests;
+    _settingsXiaoAiSelectAllButton.state = NSControlStateValueOff;
+    [self toggleXiaoAiAllDevices:_settingsXiaoAiSelectAllButton];
 }
 
 - (void)cancelSettings:(id)sender {
@@ -1868,14 +1914,10 @@ using PendingMacUpdate = PendingMonitorUpdate;
     next.sessions_root = path_from_utf8(Utf8(_settingsRootField.stringValue));
     next.sound_enabled = _settingsSoundButton.state == NSControlStateValueOn;
     next.xiaoai.enabled = _settingsXiaoAiEnabledButton.state == NSControlStateValueOn;
+    next.xiaoai.max_parallel_requests = static_cast<int>(_settingsXiaoAiParallelField.integerValue);
     next.xiaoai.auth_cookies = _settings.xiaoai.auth_cookies;
-    const NSInteger selectedDevice = _settingsXiaoAiDeviceField.indexOfSelectedItem;
-    if (selectedDevice >= 0 &&
-        selectedDevice < static_cast<NSInteger>(_xiaoaiDevices.size())) {
-        next.xiaoai.device_id = _xiaoaiDevices[static_cast<std::size_t>(selectedDevice)].id;
-    } else {
-        next.xiaoai.device_id = Utf8(_settingsXiaoAiDeviceField.stringValue);
-    }
+    next.xiaoai.device_ids = [self selectedXiaoAiDeviceIds];
+    next.xiaoai.device_id = next.xiaoai.device_ids.empty() ? std::string{} : next.xiaoai.device_ids.front();
     next.normalize();
     const bool rootChanged = next.sessions_root != _settings.sessions_root;
     _settings = std::move(next);

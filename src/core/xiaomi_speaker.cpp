@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <ctime>
+#include <future>
 #include <cctype>
 #include <cstdint>
 #include <iomanip>
@@ -422,46 +423,63 @@ std::vector<Device> list_devices(const XiaoAiHttpTransport& transport,
     return devices;
 }
 
-Device choose_device(const std::vector<Device>& devices,
-                     const XiaoAiSettings& settings) {
-    const auto target = lower(settings.device_id);
-    auto matches = [&](const Device& device) {
-        if (target.empty()) return false;
-        return lower(device.id) == target || lower(device.name) == target ||
-               lower(device.alias) == target;
-    };
+std::vector<Device> choose_devices(const std::vector<Device>& devices,
+                                   const XiaoAiSettings& settings) {
+    std::vector<std::string> targets = settings.device_ids;
+    if (targets.empty() && !settings.device_id.empty()) targets.push_back(settings.device_id);
+    if (targets.empty()) {
+        if (devices.size() == 1) return {devices.front()};
+        std::string available;
+        for (const auto& device : devices) {
+            const auto& name = device.alias.empty() ? device.name : device.alias;
+            if (name.empty()) continue;
+            if (!available.empty()) available += "、";
+            available += name;
+        }
+        const auto suffix = available.empty() ? std::string{} : "。可选名称：" + available;
+        throw std::runtime_error(
+            "检测到多个在线小爱音箱，请在设置中选择要播报的音箱" + suffix);
+    }
 
-    std::vector<Device> matched;
-    for (const auto& device : devices) {
-        if (matches(device)) matched.push_back(device);
+    std::vector<Device> selected;
+    selected.reserve(targets.size());
+    for (const auto& target_text : targets) {
+        const auto target = lower(target_text);
+        std::vector<const Device*> matches;
+        for (const auto& device : devices) {
+            if (lower(device.id) == target || lower(device.name) == target ||
+                lower(device.alias) == target) matches.push_back(&device);
+        }
+        if (matches.empty()) {
+            throw std::runtime_error("未找到已选择的小爱音箱：" + target_text);
+        }
+        if (matches.size() > 1) {
+            throw std::runtime_error("选择的小爱音箱名称不唯一，请改用设备ID：" + target_text);
+        }
+        selected.push_back(*matches.front());
     }
-    if (matched.size() == 1) return matched.front();
-    if (matched.size() > 1) {
-        throw std::runtime_error("匹配到多个小爱音箱，请填写更精确的目标音箱名称或设备ID");
-    }
-    if (devices.size() == 1) return devices.front();
-
-    std::string available;
-    for (const auto& device : devices) {
-        const auto& name = device.alias.empty() ? device.name : device.alias;
-        if (name.empty()) continue;
-        if (!available.empty()) available += "、";
-        available += name;
-    }
-    const auto suffix = available.empty() ? std::string{} : "。可选名称：" + available;
-    throw std::runtime_error(
-        "检测到多个在线小爱音箱，请在设置的“目标音箱”中填写要播报的音箱名称（与米家显示名称一致）或设备ID" +
-        suffix);
+    return selected;
 }
 
 struct Session {
     std::string key;
     std::string cookies;
-    Device device;
+    std::vector<Device> devices;
 };
 
 std::string session_key(const XiaoAiSettings& settings) {
-    return settings.auth_cookies + "\x1f" + settings.device_id;
+    std::string result = settings.auth_cookies;
+    result += "\x1f";
+    if (settings.device_ids.empty()) {
+        result += settings.device_id;
+        result.push_back('\x1e');
+    } else {
+        for (const auto& target : settings.device_ids) {
+            result += target;
+            result.push_back('\x1e');
+        }
+    }
+    return result;
 }
 
 bool validate_authorization(const XiaoAiHttpTransport& transport, XiaoAiSettings& settings,
@@ -494,7 +512,7 @@ bool authenticate(const XiaoAiHttpTransport& transport, const XiaoAiSettings& se
             if (error) *error = "小米账号下没有发现小爱音箱";
             return false;
         }
-        session.device = choose_device(devices, settings);
+        session.devices = choose_devices(devices, settings);
         session.key = session_key(settings);
         session.cookies = std::move(cookies);
         return true;
@@ -517,29 +535,62 @@ bool send_once(const XiaoAiHttpTransport& transport, const XiaoAiSettings& setti
         event == XiaoAiEvent::Error ? "执行出错" : "任务被中断";
     const auto spoken = context_label.empty() ? text : std::string(context_label) + "，" + text;
     const std::string message = "{\"text\":\"" + json_escape(spoken) + "\",\"save\":0}";
-    const std::string body = "deviceId=" + url_encode(active.device.id) +
-        "&path=mibrain&method=text_to_speech&message=" + url_encode(message);
-    // MiNA returns code 0 even when an UBus command lacks the selected speaker's
-    // context. Supply the same device-bound cookies used by the Android client.
-    std::string device_cookies = active.cookies;
-    merge_cookie(device_cookies, "sn", active.device.serial);
-    merge_cookie(device_cookies, "hardware", active.device.hardware);
-    merge_cookie(device_cookies, "deviceId", active.device.id);
-    merge_cookie(device_cookies, "deviceSNProfile", active.device.sn_profile);
-    auto response = request(transport, "POST", std::string(kMinaBase) + "/remote/ubus",
-                            body, std::move(device_cookies), "application/x-www-form-urlencoded");
-    if (response.status < 200 || response.status >= 300) {
-        if (error) *error = "小米播报请求失败（HTTP " + std::to_string(response.status) + "）";
-        return false;
+    const auto send_to_device = [&](Device device) -> std::string {
+        const std::string body = "deviceId=" + url_encode(device.id) +
+            "&path=mibrain&method=text_to_speech&message=" + url_encode(message);
+        // MiNA returns code 0 even when an UBus command lacks the selected speaker's
+        // context. Supply the same device-bound cookies used by the Android client.
+        std::string device_cookies = active.cookies;
+        merge_cookie(device_cookies, "sn", device.serial);
+        merge_cookie(device_cookies, "hardware", device.hardware);
+        merge_cookie(device_cookies, "deviceId", device.id);
+        merge_cookie(device_cookies, "deviceSNProfile", device.sn_profile);
+        try {
+            auto response = request(transport, "POST", std::string(kMinaBase) + "/remote/ubus",
+                                    body, std::move(device_cookies), "application/x-www-form-urlencoded");
+            if (response.status < 200 || response.status >= 300) {
+                return "HTTP " + std::to_string(response.status);
+            }
+            std::string api_error;
+            const auto root = parse_xiaomi_response(response.body);
+            return api_ok(root, &api_error) ? std::string{} : api_error;
+        } catch (const std::exception& exception) {
+            return exception.what();
+        } catch (...) {
+            return "无法解析小米播报响应";
+        }
+    };
+
+    const auto parallelism = static_cast<std::size_t>(std::clamp(
+        settings.max_parallel_requests, 1, 8));
+    std::vector<std::string> failures;
+    for (std::size_t start = 0; start < active.devices.size(); start += parallelism) {
+        const auto end = std::min(active.devices.size(), start + parallelism);
+        std::vector<std::future<std::string>> requests;
+        requests.reserve(end - start);
+        for (std::size_t index = start; index < end; ++index) {
+            requests.push_back(std::async(std::launch::async, send_to_device,
+                                          active.devices[index]));
+        }
+        for (std::size_t index = 0; index < requests.size(); ++index) {
+            const auto result = requests[index].get();
+            if (result.empty()) continue;
+            const auto& device = active.devices[start + index];
+            const auto& name = device.alias.empty()
+                ? (device.name.empty() ? device.id : device.name) : device.alias;
+            failures.push_back(name + "：" + result);
+        }
     }
-    try {
-        const auto root = parse_xiaomi_response(response.body);
-        if (!api_ok(root, error)) return false;
-    } catch (...) {
-        if (error) *error = "无法解析小米播报响应";
-        return false;
+    if (failures.empty()) return true;
+    if (error) {
+        *error = "小米播报失败（" + std::to_string(failures.size()) + "/" +
+            std::to_string(active.devices.size()) + "）：";
+        for (std::size_t index = 0; index < failures.size(); ++index) {
+            if (index != 0) *error += "；";
+            *error += failures[index];
+        }
     }
-    return true;
+    return false;
 }
 
 } // namespace
@@ -583,6 +634,8 @@ void XiaoAiNotifier::notify(XiaoAiEvent event, std::string_view context_label) {
     }();
     if (!selected) return;
 
+    constexpr std::size_t maximum_pending_jobs = 16;
+    while (jobs_.size() >= maximum_pending_jobs) jobs_.pop();
     jobs_.push(Job{settings_, event, std::string(context_label)});
     condition_.notify_one();
 }
