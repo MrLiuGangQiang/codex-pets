@@ -152,6 +152,13 @@ void test_app_logic() {
     CHECK_EQ(std::string("进行中(1/3)"),
              app_logic::format_busy_header(std::string_view("1/3"), 0, 1));
 
+    CHECK_EQ(std::string("项目 A：进行中（1/3）；项目 B：进行中"),
+             app_logic::format_active_task_statuses(
+                 project_names, active_titles,
+                 {std::optional<std::string>("1/3"), std::nullopt}));
+    CHECK_EQ(std::string("任务 B：进行中"),
+             app_logic::format_active_task_statuses({""}, {"任务 B"}, {}));
+
     const std::vector<std::string> titles{"任务 A", "任务 B", "任务 C"};
     CHECK_EQ(1, app_logic::reconcile_task_selection(ReminderState::Busy, titles, 1, "任务 B", false, -1));
     const std::vector<std::string> reordered{"任务 B", "任务 C", "任务 D"};
@@ -323,9 +330,10 @@ void test_visual_content_contract() {
     snapshot.total_plan_step_count = 5;
     snapshot.completed_plan_step_count = 2;
     snapshot.active_titles = {"编译 Windows", "校验 macOS"};
+    snapshot.active_project_names = {"Windows", "macOS"};
     snapshot.active_plan_progress_labels = {std::optional<std::string>("1/3"), std::nullopt};
     const auto busy = make_visual_content(ReminderState::Busy, snapshot);
-    CHECK_EQ(std::string("进行中(2/5) • 2/2"), busy.status_text);
+    CHECK_EQ(std::string("Windows：进行中（1/3）；macOS：进行中"), busy.status_text);
     CHECK_EQ(std::string("编译 Windows"), busy.thought_text);
     CHECK_EQ(std::size_t(2), busy.task_titles.size());
     CHECK_EQ(std::string("校验 macOS"), busy.task_titles[1]);

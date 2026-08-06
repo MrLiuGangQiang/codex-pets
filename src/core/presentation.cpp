@@ -13,15 +13,8 @@ VisualContent make_visual_content(ReminderState state, const MonitorSnapshot& sn
     } else if (state == ReminderState::Completed) {
         result.status_text = "已完成";
     } else if (state == ReminderState::Busy) {
-        std::string aggregate_progress;
-        std::optional<std::string_view> progress;
-        if (snapshot.total_plan_step_count > 0) {
-            aggregate_progress = std::to_string(snapshot.completed_plan_step_count) + "/" +
-                                 std::to_string(snapshot.total_plan_step_count);
-            progress = aggregate_progress;
-        }
-        result.status_text = app_logic::format_busy_header(
-            progress, snapshot.latest_event_active_title_index, snapshot.active_count);
+        result.status_text = app_logic::format_active_task_statuses(
+            snapshot.active_project_names, snapshot.active_titles, snapshot.active_plan_progress_labels);
     } else {
         result.status_text = "空闲";
     }
