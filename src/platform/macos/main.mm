@@ -285,14 +285,8 @@ NSButton* MakeButton(NSString* title, id target, SEL action, NSRect frame) {
 }
 
 NSFont* CloudFont(CGFloat size, BOOL bold) {
-    // Prefer Apple's rounded Chinese typeface to match Windows YouYuan. The
-    // rounded system design remains a safe fallback when the CJK face is absent.
-    NSArray<NSString*>* names = bold
-        ? @[@"STYuanti-SC-Bold", @"STYuanti-SC-Regular", @"HannotateSC-W7", @"WawatiSC-Regular"]
-        : @[@"STYuanti-SC-Regular", @"HannotateSC-W5", @"WawatiSC-Regular"];
-    for (NSString* name in names) {
-        if (NSFont* font = [NSFont fontWithName:name size:size]) return font;
-    }
+    // Use only the built-in system family. Looking up optional downloadable CJK
+    // faces can block headless macOS packaging while CoreText activates fonts.
     NSFont* system = [NSFont systemFontOfSize:size
                                       weight:bold ? NSFontWeightBold : NSFontWeightRegular];
     NSFontDescriptor* rounded = [system.fontDescriptor
@@ -301,11 +295,8 @@ NSFont* CloudFont(CGFloat size, BOOL bold) {
 }
 
 NSFont* CloudBodyFont(CGFloat size) {
-    // PingFang's semibold CJK strokes stay much clearer than a simulated bold
-    // rounded face at the small size used inside the cloud.
-    for (NSString* name in @[@"PingFangSC-Semibold", @"PingFang SC", @"HiraginoSansGB-W6"]) {
-        if (NSFont* font = [NSFont fontWithName:name size:size]) return font;
-    }
+    // The system semibold CJK fallback (PingFang on Chinese macOS) keeps small
+    // task text clear without triggering optional font activation.
     return [NSFont systemFontOfSize:size weight:NSFontWeightSemibold];
 }
 
