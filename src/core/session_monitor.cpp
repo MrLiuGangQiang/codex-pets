@@ -902,10 +902,16 @@ struct CodexSessionMonitor::Impl {
                 if (it->second < pending_cutoff) it = turn.pending_tool_calls.erase(it);
                 else ++it;
             }
+            // An unfinished tool call is only a reason to keep a stale turn while
+            // the session file is still held by a live writer. Interrupted sessions
+            // can leave a function_call without its function_call_output; without
+            // this liveness check they remain visible for the full six-hour pending
+            // call retention window.
+            const bool live_writer = session_file_may_have_live_writer(turn.source_path);
             if (!CodexSessionMonitor::is_turn_stale(
                     turn.last_activity, safe_last_write(turn.source_path), now,
-                    kStaleTurnGraceSeconds, !turn.pending_tool_calls.empty())) continue;
-            if (!session_file_may_have_live_writer(turn.source_path)) stale.push_back(id);
+                    kStaleTurnGraceSeconds, !turn.pending_tool_calls.empty() && live_writer)) continue;
+            if (!live_writer) stale.push_back(id);
         }
         if (stale.empty()) return;
         for (const auto& id : stale) active_turns.erase(id);

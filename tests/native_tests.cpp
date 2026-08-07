@@ -1018,7 +1018,7 @@ void test_session_monitor_v2_aliases_and_non_fatal_error() {
     CHECK(std::find(nonfatal_events.begin(), nonfatal_events.end(), MonitorEventKind::TaskCompleted) != nonfatal_events.end());
 }
 
-void test_pending_tool_call_prevents_false_stale_and_new_turn_supersedes_old() {
+void test_pending_tool_call_liveness_and_new_turn_supersedes_old() {
     TempDirectory root("CodeXPetsPendingTool_");
     const auto pending_timestamp = utc_timestamp(SystemClock::now() - std::chrono::minutes(20));
     const auto file = create_session(root.path, "rollout-pending-tool.jsonl",
@@ -1031,9 +1031,10 @@ void test_pending_tool_call_prevents_false_stale_and_new_turn_supersedes_old() {
 
     CodexSessionMonitor monitor(root.path);
     CHECK_EQ(1, monitor.active_count());
+    // A stale pending call without a live writer is an interrupted session and
+    // must not remain visible as an active task.
     monitor.poll();
-    CHECK_EQ(1, monitor.active_count());
-    CHECK_EQ(std::string("Long running task"), monitor.primary_active_title());
+    CHECK_EQ(0, monitor.active_count());
 
     append(file,
         "{\"timestamp\":\"2026-08-01T00:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call-wait\",\"output\":\"done\"}}\n"
@@ -1042,6 +1043,21 @@ void test_pending_tool_call_prevents_false_stale_and_new_turn_supersedes_old() {
     monitor.poll();
     CHECK_EQ(1, monitor.active_count());
     CHECK_EQ(std::string("Replacement task"), monitor.primary_active_title());
+
+    TempDirectory live_pending_root("CodeXPetsLivePendingTool_");
+    const auto live_pending_file = create_session(live_pending_root.path, "rollout-live-pending.jsonl",
+        std::string("{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"LIVE\"}}\n") +
+        "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Live pending task\"}}\n" +
+        "{\"timestamp\":\"" + utc_timestamp(SystemClock::now() - std::chrono::minutes(20)) +
+        "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"wait_agent\",\"arguments\":\"{}\",\"call_id\":\"call-live\"}}\n");
+    std::filesystem::last_write_time(live_pending_file,
+        std::filesystem::file_time_type::clock::now() - std::chrono::minutes(30));
+    CodexSessionMonitor live_pending_monitor(live_pending_root.path);
+    std::ofstream live_writer(live_pending_file, std::ios::binary | std::ios::app);
+    CHECK(live_writer.good());
+    live_pending_monitor.poll();
+    CHECK_EQ(1, live_pending_monitor.active_count());
+    live_writer.close();
 
     TempDirectory stale_root("CodeXPetsActuallyStale_");
     const auto stale_file = create_session(stale_root.path, "rollout-stale.jsonl",
@@ -1177,7 +1193,7 @@ int main() {
         {"plan_update_focus_survives_later_event", test_plan_update_focus_survives_later_event},
         {"session_monitor_error_object", test_session_monitor_error_object},
         {"session_monitor_v2_aliases_and_non_fatal_error", test_session_monitor_v2_aliases_and_non_fatal_error},
-        {"pending_tool_call_and_superseded_turn", test_pending_tool_call_prevents_false_stale_and_new_turn_supersedes_old},
+        {"pending_tool_call_liveness_and_superseded_turn", test_pending_tool_call_liveness_and_new_turn_supersedes_old},
         {"long_silent_reasoning_writer_liveness", test_long_silent_reasoning_kept_while_session_writer_is_alive},
         {"oversized_json_line_tail_recovery", test_oversized_json_line_does_not_poison_tail},
         {"open_file_activity_and_stale_rule", test_open_file_activity_and_stale_rule},
