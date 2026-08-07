@@ -9,7 +9,7 @@
 ## 其他资源
 
 - `assets/icons/`：菜单栏/通知区域状态图标。
-- `assets/audio/`：开始、完成、异常和中断语音提示。
+- `assets/audio/`：统一卡通音色的开始、完成、异常和中断语音提示；可通过 `scripts/generate_voice_prompts.cjs` 复刻。
 - `assets/app/AppIcon.png`：macOS 构建时由系统 `sips`/`iconutil` 转换为 `AppIcon.icns`；Windows 图标由原生资源脚本编译。
 
 CodeXPets 4.1 的运行时不依赖第三方 UI 或音频库；图片由 Win32 GDI+ 或 AppKit 按需加载，音频由 Windows MCI 或 macOS `NSSound` 播放。Windows 小爱登录使用 Microsoft WebView2 SDK 的 loader（随源代码分发的 `LICENSE.txt` 与 `NOTICE.txt` 适用），并按目标架构嵌入应用资源。
