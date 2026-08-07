@@ -16,7 +16,7 @@
 
 namespace codexpets::windows {
 
-enum class NotificationSound : std::uint8_t { Started, Completed, Error };
+enum class NotificationSound : std::uint8_t { Started, Completed, Error, Interrupted };
 
 struct RenderState {
     ReminderState state{ReminderState::Idle};

@@ -114,7 +114,8 @@ int audio_resource_id(NotificationSound sound) {
     switch (sound) {
         case NotificationSound::Completed: return IDR_AUDIO_VOICE_COMPLETE;
         case NotificationSound::Error: return IDR_AUDIO_VOICE_ERROR;
-        default: return IDR_AUDIO_VOICE_START;
+        case NotificationSound::Interrupted: return IDR_AUDIO_VOICE_INTERRUPTED;
+        case NotificationSound::Started: return IDR_AUDIO_VOICE_START;
     }
 }
 
@@ -497,7 +498,8 @@ bool Renderer::validate(std::string* error) {
             return false;
         }
     }
-    for (const auto sound : {NotificationSound::Started, NotificationSound::Completed, NotificationSound::Error}) {
+    for (const auto sound : {NotificationSound::Started, NotificationSound::Completed,
+                             NotificationSound::Error, NotificationSound::Interrupted}) {
         const auto resource = FindResourceW(instance_, MAKEINTRESOURCEW(audio_resource_id(sound)), RT_RCDATA);
         if (!resource || SizeofResource(instance_, resource) == 0) {
             if (error) *error = "语音资源缺失";

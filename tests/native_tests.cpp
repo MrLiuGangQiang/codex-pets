@@ -760,6 +760,16 @@ void test_monitor_update_queue_and_policy() {
     CHECK_EQ(std::string("alpha"), effects[1].xiaoai_context);
     CHECK_EQ(ReminderState::Completed, coordinator.select(snapshot.active_count, Clock::now()));
 
+    snapshot.last_interrupted_project_name = "gamma";
+    const auto interrupted_effects = apply_monitor_event_policy(
+        coordinator, snapshot, {MonitorEventKind::TaskInterrupted}, settings, Clock::now());
+    CHECK_EQ(std::size_t(1), interrupted_effects.size());
+    CHECK(interrupted_effects[0].reveal_pet);
+    CHECK(interrupted_effects[0].sound.has_value());
+    CHECK_EQ(SoundCue::Interrupted, *interrupted_effects[0].sound);
+    CHECK_EQ(XiaoAiEvent::Interrupted, *interrupted_effects[0].xiaoai_event);
+    CHECK_EQ(std::string("gamma"), interrupted_effects[0].xiaoai_context);
+
     snapshot.event_contexts = {"alpha", "beta"};
     const auto started_effects = apply_monitor_event_policy(
         coordinator, snapshot, {MonitorEventKind::TaskStarted, MonitorEventKind::TaskStarted}, settings,

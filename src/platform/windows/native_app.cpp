@@ -563,6 +563,7 @@ void NativeApp::handle_monitor_update(const PendingMonitorUpdate& update) {
                 case SoundCue::Started: play_sound(NotificationSound::Started); break;
                 case SoundCue::Completed: play_sound(NotificationSound::Completed); break;
                 case SoundCue::Error: play_sound(NotificationSound::Error); break;
+                case SoundCue::Interrupted: play_sound(NotificationSound::Interrupted); break;
             }
         }
         if (effect.xiaoai_event) {
@@ -1024,7 +1025,8 @@ void NativeApp::open_latest_release() {
 
 std::wstring NativeApp::audio_path(NotificationSound sound) {
     std::wstring name = sound == NotificationSound::Started ? L"voice-start.mp3" :
-                        sound == NotificationSound::Completed ? L"voice-complete.mp3" : L"voice-error.mp3";
+                        sound == NotificationSound::Completed ? L"voice-complete.mp3" :
+                        sound == NotificationSound::Error ? L"voice-error.mp3" : L"voice-interrupted.mp3";
     auto directory = settings_store_.settings_file_path().parent_path() / L"audio";
     const auto path = directory / name;
     if (!std::filesystem::exists(path)) {
@@ -1713,8 +1715,11 @@ int NativeApp::run_utility(HINSTANCE instance, const std::vector<std::wstring>& 
     }
     if (has(L"--test-sound")) {
         const auto folder = std::filesystem::temp_directory_path() / L"CodeXPetsNativeAudio";
-        for (const auto sound : {NotificationSound::Started, NotificationSound::Completed, NotificationSound::Error}) {
-            const auto name = sound == NotificationSound::Started ? L"start.mp3" : sound == NotificationSound::Completed ? L"complete.mp3" : L"error.mp3";
+        for (const auto sound : {NotificationSound::Started, NotificationSound::Completed,
+                                 NotificationSound::Error, NotificationSound::Interrupted}) {
+            const auto name = sound == NotificationSound::Started ? L"start.mp3" :
+                              sound == NotificationSound::Completed ? L"complete.mp3" :
+                              sound == NotificationSound::Error ? L"error.mp3" : L"interrupted.mp3";
             const auto path = folder / name;
             if (!renderer.extract_audio(sound, path, &error)) return finish(1);
             const auto command = std::wstring(L"open \"") + path.native() + L"\" type mpegvideo alias codexpets_test";

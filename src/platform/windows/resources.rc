@@ -76,5 +76,6 @@ IDR_ICON_STATUS_BUSY_7 RCDATA "../../../assets/icons/status-busy-7.png"
 IDR_AUDIO_VOICE_START RCDATA "../../../assets/audio/voice-start.mp3"
 IDR_AUDIO_VOICE_COMPLETE RCDATA "../../../assets/audio/voice-complete.mp3"
 IDR_AUDIO_VOICE_ERROR RCDATA "../../../assets/audio/voice-error.mp3"
+IDR_AUDIO_VOICE_INTERRUPTED RCDATA "../../../assets/audio/voice-interrupted.mp3"
 IDR_CLOUD_BUBBLE RCDATA "../../../assets/cloud/cloud-bubble-540.png"
 IDR_WEBVIEW2_LOADER RCDATA CODEXPETS_WEBVIEW2_LOADER_PATH

@@ -468,7 +468,7 @@ std::string ArgumentAt(int argc, const char* const* argv, int index) {
             return NO;
         }
     }
-    for (NSString* name in @[@"voice-start", @"voice-complete", @"voice-error"]) {
+    for (NSString* name in @[@"voice-start", @"voice-complete", @"voice-error", @"voice-interrupted"]) {
         if (!ResourcePath(@"audio", name, @"mp3")) {
             if (error) *error = @"语音资源缺失";
             return NO;
@@ -1357,6 +1357,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
                 case SoundCue::Started: [self playSoundNamed:@"voice-start"]; break;
                 case SoundCue::Completed: [self playSoundNamed:@"voice-complete"]; break;
                 case SoundCue::Error: [self playSoundNamed:@"voice-error"]; break;
+                case SoundCue::Interrupted: [self playSoundNamed:@"voice-interrupted"]; break;
             }
         }
         if (effect.xiaoai_event) {
@@ -2148,7 +2149,7 @@ int RunMacUtility(int argc, const char* const* argv) {
     }
 
     if (HasUtilityArgument(argc, argv, "--test-sound")) {
-        for (NSString* name in @[@"voice-start", @"voice-complete", @"voice-error"]) {
+        for (NSString* name in @[@"voice-start", @"voice-complete", @"voice-error", @"voice-interrupted"]) {
             NSString* path = ResourcePath(@"audio", name, @"mp3");
             NSSound* sound = path ? [[NSSound alloc] initWithContentsOfFile:path byReference:NO] : nil;
             if (!sound || ![sound play]) {

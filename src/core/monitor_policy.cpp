@@ -61,6 +61,7 @@ std::vector<MonitorEventEffect> apply_monitor_event_policy(
                     app_logic::cloud_notification_seconds(
                         ReminderState::Interrupted, settings.dock_notification_seconds)));
                 effect.reveal_pet = true;
+                effect.sound = SoundCue::Interrupted;
                 effect.xiaoai_event = XiaoAiEvent::Interrupted;
                 effect.xiaoai_context = event_context.empty()
                     ? snapshot.last_interrupted_project_name : std::string(event_context);

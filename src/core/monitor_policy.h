@@ -12,7 +12,7 @@
 
 namespace codexpets {
 
-enum class SoundCue : std::uint8_t { Started, Completed, Error };
+enum class SoundCue : std::uint8_t { Started, Completed, Error, Interrupted };
 
 struct MonitorEventEffect {
     bool reveal_pet{};
