@@ -502,7 +502,7 @@ void test_xiaoai_protocol() {
     XiaoAiHttpTransport async_transport = [](const XiaoAiHttpRequest& request) {
         if (request.url.find("/admin/v2/device_list?") != std::string::npos) {
             return XiaoAiHttpResponse{200,
-                R"({"code":0,"data":[{"deviceID":"speaker-device","hardware":"l09a","alias":"Desk"}]})", {}};
+                R"({"code":0,"data":[{"deviceID":"speaker-device","hardware":"l09a","alias":"Desk","miotDID":"12345"}]})", {}};
         }
         return XiaoAiHttpResponse{200, R"({"code":0})", {}};
     };
@@ -533,6 +533,7 @@ void test_xiaoai_protocol() {
     CHECK(discovered.second.empty());
     CHECK_EQ(1, static_cast<int>(discovered.first.size()));
     CHECK_EQ(std::string("speaker-device"), discovered.first.front().id);
+    CHECK_EQ(std::string("12345"), discovered.first.front().miot_did);
 
     std::promise<std::string> test_promise;
     auto test_future = test_promise.get_future();
@@ -585,6 +586,79 @@ void test_xiaoai_protocol() {
             return body.find("deviceId=speaker-" + std::to_string(index)) != std::string::npos;
         }));
     }
+
+    std::vector<XiaoAiHttpRequest> lx04_requests;
+    XiaoAiHttpTransport lx04_transport = [&](const XiaoAiHttpRequest& request) {
+        lx04_requests.push_back(request);
+        if (request.url.find("serviceLogin?sid=micoapi") != std::string::npos) {
+            return XiaoAiHttpResponse{200,
+                R"({"code":0,"ssecurity":"MDEyMzQ1Njc4OWFiY2RlZg==","nonce":"123","location":"https://account.xiaomi.com/sts/mico?sid=micoapi"})", {}};
+        }
+        if (request.url.find("/sts/mico?") != std::string::npos) {
+            return XiaoAiHttpResponse{302, {}, {{"Set-Cookie", "serviceToken=mina-token; Path=/; HttpOnly"}}};
+        }
+        if (request.url.find("/admin/v2/device_list?") != std::string::npos) {
+            return XiaoAiHttpResponse{200,
+                R"({"code":0,"data":[{"deviceID":"speaker-lx04","hardware":"LX04","alias":"Touch"}]})", {}};
+        }
+        if (request.url.find("serviceLogin?sid=xiaomiio") != std::string::npos) {
+            return XiaoAiHttpResponse{200,
+                R"({"code":0,"ssecurity":"MDEyMzQ1Njc4OWFiY2RlZg==","nonce":"456","location":"https://account.xiaomi.com/sts/miot?sid=xiaomiio"})", {}};
+        }
+        if (request.url.find("/sts/miot?") != std::string::npos) {
+            return XiaoAiHttpResponse{302, {}, {{"Set-Cookie", "serviceToken=miot-token; Path=/; HttpOnly"}}};
+        }
+        if (request.url == "https://api.io.mi.com/app/home/device_list") {
+            return XiaoAiHttpResponse{200,
+                R"({"code":0,"result":{"list":[{"did":"123456789","name":"Touch","model":"xiaomi.wifispeaker.lx04"}]}})", {}};
+        }
+        if (request.url == "https://api.io.mi.com/app/miotspec/action") {
+            return XiaoAiHttpResponse{200, R"({"code":0,"result":{"code":0}})", {}};
+        }
+        throw std::runtime_error("Unexpected LX04 request: " + request.url);
+    };
+    XiaoAiSettings lx04_settings;
+    lx04_settings.enabled = true;
+    lx04_settings.auth_cookies =
+        "userId=user; passToken=passport-token; deviceId=browser-device";
+    lx04_settings.device_id = "speaker-lx04";
+    XiaoAiNotifier lx04_notifier(std::move(lx04_transport));
+    if (!lx04_notifier.test(lx04_settings, &error)) {
+        throw std::runtime_error("LX04 test failed: " + error);
+    }
+    CHECK(error.empty());
+    CHECK_EQ(7, static_cast<int>(lx04_requests.size()));
+    CHECK(lx04_requests[4].url.find("/sts/miot?") != std::string::npos);
+    CHECK_EQ(std::string("https://api.io.mi.com/app/home/device_list"), lx04_requests[5].url);
+    CHECK_EQ(std::string("https://api.io.mi.com/app/miotspec/action"), lx04_requests[6].url);
+    CHECK(lx04_requests[6].body.find("data=") != std::string::npos);
+    CHECK(lx04_requests[6].body.find("siid%22%3A5") != std::string::npos);
+    CHECK(lx04_requests[6].body.find("aiid%22%3A1") != std::string::npos);
+    CHECK(lx04_requests[6].body.find("signature=") != std::string::npos);
+    const auto lx04_cookie = std::find_if(lx04_requests[6].headers.begin(), lx04_requests[6].headers.end(),
+        [](const auto& header) { return header.first == "Cookie"; });
+    CHECK(lx04_cookie != lx04_requests[6].headers.end());
+    CHECK(lx04_cookie->second.find("serviceToken=miot-token") != std::string::npos);
+    CHECK(lx04_cookie->second.find("PassportDeviceId=browser-device") != std::string::npos);
+    CHECK(std::none_of(lx04_requests.begin(), lx04_requests.end(), [](const XiaoAiHttpRequest& request) {
+        return request.body.find("text_to_speech") != std::string::npos;
+    }));
+
+    lx04_requests.clear();
+    CHECK(lx04_notifier.validate(lx04_settings, &error));
+    CHECK(error.empty());
+    const auto persisted_lx04_authorization = compact_xiaoai_authorization(lx04_settings.auth_cookies);
+    CHECK(persisted_lx04_authorization.find("passToken=") == std::string::npos);
+    CHECK(persisted_lx04_authorization.find("codexpetsMiotSsecurity=") != std::string::npos);
+    CHECK(persisted_lx04_authorization.find("codexpetsMiotServiceToken=") != std::string::npos);
+    lx04_settings.auth_cookies = persisted_lx04_authorization;
+    lx04_requests.clear();
+    CHECK(lx04_notifier.test(lx04_settings, &error));
+    CHECK(error.empty());
+    CHECK_EQ(3, static_cast<int>(lx04_requests.size()));
+    CHECK(lx04_requests[0].url.find("/admin/v2/device_list?") != std::string::npos);
+    CHECK_EQ(std::string("https://api.io.mi.com/app/home/device_list"), lx04_requests[1].url);
+    CHECK_EQ(std::string("https://api.io.mi.com/app/miotspec/action"), lx04_requests[2].url);
 
     std::vector<XiaoAiHttpRequest> passport_requests;
     XiaoAiHttpTransport passport_transport = [&](const XiaoAiHttpRequest& request) {
@@ -698,6 +772,19 @@ void test_monitor_update_queue_and_policy() {
 void test_xiaoai_authorization_compaction() {
     CHECK_EQ(std::string("userId=u; serviceToken=s; deviceId=d"),
              compact_xiaoai_authorization("foo=x; userId=u; serviceToken=s; deviceId=d; bar=y"));
+    CHECK_EQ(std::string("userId=u; serviceToken=s; deviceId=d"),
+             compact_xiaoai_authorization("userId=u; serviceToken=s; deviceId=d; passToken=p"));
+    CHECK_EQ(std::string("cUserId=c; serviceToken=s"),
+             compact_xiaoai_authorization("cUserId=c; serviceToken=s"));
+    const auto parts = split_xiaoai_authorization(
+        "userId=u; serviceToken=s; deviceId=d; codexpetsMiotSsecurity=sec; "
+        "codexpetsMiotServiceToken=miot");
+    CHECK_EQ(std::string("userId=u; serviceToken=s; deviceId=d"), parts.mina);
+    CHECK_EQ(std::string("sec"), parts.miot_ssecurity);
+    CHECK_EQ(std::string("miot"), parts.miot_service_token);
+    CHECK_EQ(std::string("userId=u; serviceToken=s; deviceId=d; "
+                         "codexpetsMiotSsecurity=sec; codexpetsMiotServiceToken=miot"),
+             combine_xiaoai_authorization(parts));
     CHECK(compact_xiaoai_authorization("userId=u").empty());
 }
 

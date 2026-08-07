@@ -37,10 +37,20 @@ struct XiaoAiDeviceInfo {
     std::string name;
     std::string alias;
     std::string hardware;
+    // MiOT DID used by devices whose text-to-speech is exposed as a MiOT action.
+    std::string miot_did;
 };
 
-// Keeps only the MiNA session cookies that are needed by the notifier.
-// Callers should persist the result in the platform secure credential store.
+struct XiaoAiAuthorizationParts {
+    std::string mina;
+    std::string miot_ssecurity;
+    std::string miot_service_token;
+};
+
+// Splits compact authorization into independently storable MiNA and MiOT values.
+// Callers must persist these values only in the platform secure credential store.
+[[nodiscard]] XiaoAiAuthorizationParts split_xiaoai_authorization(std::string_view cookies);
+[[nodiscard]] std::string combine_xiaoai_authorization(const XiaoAiAuthorizationParts& parts);
 [[nodiscard]] std::string compact_xiaoai_authorization(std::string_view cookies);
 
 class XiaoAiNotifier {

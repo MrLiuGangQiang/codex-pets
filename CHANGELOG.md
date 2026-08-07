@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.1.10] - 2026-08-07
+
+### Changed
+- 小爱音箱播报重构为按硬件能力路由：常规设备继续使用 MiNA UBus TTS；LX04 及其他需专用命令的型号改用签名的 MiOT Action TTS。
+- 设备扫描会保存 MiOT DID；浏览器登录后将 MiNA、MiOT 安全票据和 MiOT 服务票据拆分保存到独立的 Windows Credential Manager / macOS Keychain 条目，不保存可能超过 Windows 单条凭据长度上限的 `passToken`，也不写入 `settings.json`。
+
+### Tests
+- 新增 LX04 的 MiNA 授权、MiOT 授权、签名动作请求与通道路由回归测试，确保不会退回到通用 `text_to_speech` UBus 调用。
+
 ## [4.1.9] - 2026-08-06
 
 ### Added

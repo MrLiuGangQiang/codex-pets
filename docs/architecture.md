@@ -89,7 +89,7 @@ Codex sessions/*.jsonl
 
 ## 小爱音箱与平台适配
 
-`xiaomi_speaker.*` 位于共享核心，负责 MiNA 请求、设备发现、授权校验、TTS 命令和统一错误处理。平台适配只实现传输与凭据存储：Windows 使用 WinHTTP 和 Credential Manager，macOS 使用 `NSURLSession` 和 Keychain；两端设置页面都提供登录、扫描、目标设备选择和测试播报。
+`xiaomi_speaker.*` 位于共享核心，负责设备发现、授权校验、播报路由和统一错误处理。路由按硬件能力选择通道：默认走 MiNA UBus TTS；设备兼容表中的型号（包括 LX04）走签名的 MiOT Action TTS。设备发现同时保留 MiOT DID；浏览器登录期间使用短期 `passToken` 换取紧凑的 MiOT 服务票据，后者保存于平台安全凭据库，绝不写入 `settings.json`，失效后要求重新登录。平台适配只实现传输与凭据存储：Windows 使用 WinHTTP 和 Credential Manager，macOS 使用 `NSURLSession` 和 Keychain；两端设置页面都提供登录、扫描、目标设备选择和测试播报。
 
 Windows 登录使用嵌入式 WebView2 loader 和一次性临时 profile，完成或取消后异步清理 profile；macOS 使用 `WKWebsiteDataStore` 的非持久化会话。两端只保存经过校验并压缩后的授权信息，不保存账号密码或网页缓存。
 ## 设置和迁移
