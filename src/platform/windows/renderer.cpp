@@ -117,6 +117,7 @@ int audio_resource_id(NotificationSound sound) {
         case NotificationSound::Interrupted: return IDR_AUDIO_VOICE_INTERRUPTED;
         case NotificationSound::Started: return IDR_AUDIO_VOICE_START;
     }
+    return IDR_AUDIO_VOICE_START;
 }
 
 void fill_octagon(Graphics& graphics, const RectF& rect, float notch, Color color) {
