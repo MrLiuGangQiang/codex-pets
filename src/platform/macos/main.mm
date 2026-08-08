@@ -16,6 +16,9 @@
 #include "render_layout.h"
 #include "session_monitor.h"
 #include "settings.h"
+#include "telegram_notifier.h"
+#include "telegram_credentials.h"
+#include "telegram_transport.h"
 #include "visual_state.h"
 #include "xiaomi_browser_login.h"
 #include "xiaomi_credentials.h"
@@ -704,12 +707,15 @@ using PendingMacUpdate = PendingMonitorUpdate;
     MacRenderer* _renderer;
     NSSound* _currentSound;
     NSWindow* _settingsWindow;
+    NSWindow* _telegramSettingsWindow;
     NSTextField* _settingsHoverField;
     NSTextField* _settingsIdleField;
     NSTextField* _settingsRevealField;
     NSTextField* _settingsNotificationField;
     NSTextField* _settingsRootField;
     NSButton* _settingsSoundButton;
+    NSButton* _settingsTelegramEnabledButton;
+    NSButton* _settingsTelegramConfigureButton;
     NSButton* _settingsXiaoAiEnabledButton;
     NSTextField* _settingsXiaoAiParallelField;
     NSButton* _settingsXiaoAiSelectAllButton;
@@ -719,12 +725,23 @@ using PendingMacUpdate = PendingMonitorUpdate;
     NSTextField* _settingsXiaoAiStatusField;
     NSStackView* _settingsXiaoAiDevicesStack;
     BOOL _xiaoaiOperationInFlight;
+    NSButton* _telegramEnabledButton;
+    NSSecureTextField* _telegramTokenField;
+    NSTextField* _telegramChatIdField;
+    NSButton* _telegramNotifyStartedButton;
+    NSButton* _telegramNotifyCompletedButton;
+    NSButton* _telegramNotifyErrorButton;
+    NSButton* _telegramNotifyInterruptedButton;
+    NSButton* _telegramTestButton;
+    NSTextField* _telegramStatusField;
+    BOOL _telegramOperationInFlight;
     std::unique_ptr<JsonSettingsStore> _settingsStore;
     AppSettings _settings;
     VisualStateCoordinator _visualCoordinator;
     MonitorSnapshot _snapshot;
     std::unique_ptr<MonitorWorker> _monitorWorker;
     std::unique_ptr<XiaoAiNotifier> _xiaoaiNotifier;
+    std::unique_ptr<TelegramNotifier> _telegramNotifier;
     std::vector<XiaoAiDeviceInfo> _xiaoaiDevices;
     MacRenderState _renderState;
     DockEdge _dockEdge;
@@ -780,6 +797,12 @@ using PendingMacUpdate = PendingMonitorUpdate;
 - (void)togglePet:(id)sender;
 - (void)toggleSound:(id)sender;
 - (void)toggleXiaoAi:(id)sender;
+- (void)toggleTelegram:(id)sender;
+- (void)showTelegramSettings:(id)sender;
+- (void)testTelegram:(id)sender;
+- (void)saveTelegramSettings:(id)sender;
+- (void)cancelTelegramSettings:(id)sender;
+- (void)setTelegramOperationInFlight:(BOOL)inFlight;
 - (BOOL)autoStartEnabled;
 - (void)toggleStartup:(id)sender;
 - (void)openSessionsFolder:(id)sender;
@@ -905,6 +928,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
     [self removeMouseMonitor];
     if (_monitorWorker) _monitorWorker->stop();
     if (_xiaoaiNotifier) _xiaoaiNotifier->stop();
+    if (_telegramNotifier) _telegramNotifier->stop();
     [self releaseCurrentSound];
     [_renderer trimTransientImages];
     [self savePosition];
@@ -948,6 +972,9 @@ using PendingMacUpdate = PendingMonitorUpdate;
     _settings.xiaoai.auth_cookies = macos::load_xiaoai_authorization();
     _xiaoaiNotifier = std::make_unique<XiaoAiNotifier>(macos::make_xiaoai_http_transport());
     _xiaoaiNotifier->configure(_settings.xiaoai);
+    _settings.telegram.bot_token = macos::load_telegram_bot_token();
+    _telegramNotifier = std::make_unique<TelegramNotifier>(macos::make_telegram_http_transport());
+    _telegramNotifier->configure(_settings.telegram);
 }
 
 - (void)createPetWindow {
@@ -1012,8 +1039,9 @@ using PendingMacUpdate = PendingMonitorUpdate;
     NSMenuItem* pet = [self menuItem:@"显示桌面宠物" action:@selector(togglePet:)]; pet.tag = 101;
     NSMenuItem* sound = [self menuItem:@"播放语音提醒" action:@selector(toggleSound:)]; sound.tag = 102;
     NSMenuItem* xiaoai = [self menuItem:@"推送到小爱音箱" action:@selector(toggleXiaoAi:)]; xiaoai.tag = 104;
+    NSMenuItem* telegram = [self menuItem:@"推送到 Telegram" action:@selector(toggleTelegram:)]; telegram.tag = 105;
     NSMenuItem* startup = [self menuItem:@"登录时自动运行" action:@selector(toggleStartup:)]; startup.tag = 103;
-    [menu addItem:pet]; [menu addItem:sound]; [menu addItem:xiaoai]; [menu addItem:startup];
+    [menu addItem:pet]; [menu addItem:sound]; [menu addItem:xiaoai]; [menu addItem:telegram]; [menu addItem:startup];
     [menu addItem:[self menuItem:@"打开 Codex 会话目录" action:@selector(openSessionsFolder:)]];
     [menu addItem:[self menuItem:@"设置…" action:@selector(showSettings:)]];
     [menu addItem:[self menuItem:@"查看更新…" action:@selector(openUpdate:)]];
@@ -1044,6 +1072,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
     [menu itemWithTag:101].state = _settings.pet_visible ? NSControlStateValueOn : NSControlStateValueOff;
     [menu itemWithTag:102].state = _settings.sound_enabled ? NSControlStateValueOn : NSControlStateValueOff;
     [menu itemWithTag:104].state = _settings.xiaoai.enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu itemWithTag:105].state = _settings.telegram.enabled ? NSControlStateValueOn : NSControlStateValueOff;
     [menu itemWithTag:103].state = [self autoStartEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
@@ -1072,6 +1101,25 @@ using PendingMacUpdate = PendingMonitorUpdate;
     _settings.xiaoai.enabled = !_settings.xiaoai.enabled;
     if (_xiaoaiNotifier) _xiaoaiNotifier->configure(_settings.xiaoai);
     _settingsXiaoAiEnabledButton.state = _settings.xiaoai.enabled
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    [self saveSettings];
+}
+
+- (void)toggleTelegram:(id)sender {
+    (void)sender;
+    if (!_settings.telegram.enabled &&
+        (_settings.telegram.bot_token.empty() || _settings.telegram.chat_id.empty())) {
+        [self showTelegramSettings:nil];
+        _telegramEnabledButton.state = NSControlStateValueOn;
+        _telegramStatusField.stringValue = _settings.telegram.bot_token.empty()
+            ? @"启用通知前请填写 Bot Token" : @"启用通知前请填写用户或 Chat ID";
+        return;
+    }
+    _settings.telegram.enabled = !_settings.telegram.enabled;
+    if (_telegramNotifier) _telegramNotifier->configure(_settings.telegram);
+    _settingsTelegramEnabledButton.state = _settings.telegram.enabled
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    _telegramEnabledButton.state = _settings.telegram.enabled
         ? NSControlStateValueOn : NSControlStateValueOff;
     [self saveSettings];
 }
@@ -1405,6 +1453,9 @@ using PendingMacUpdate = PendingMonitorUpdate;
         }
         if (effect.xiaoai_event) {
             [self notifyXiaoAi:*effect.xiaoai_event context:effect.xiaoai_context];
+        }
+        if (effect.task_notification && _telegramNotifier) {
+            _telegramNotifier->notify(*effect.task_notification);
         }
     }
     if (first || !update.events.empty()) [self refreshVisual:YES];
@@ -1914,6 +1965,164 @@ using PendingMacUpdate = PendingMonitorUpdate;
     [self updateMousePassThrough];
 }
 
+- (void)setTelegramOperationInFlight:(BOOL)inFlight {
+    _telegramOperationInFlight = inFlight;
+    const BOOL enabled = !inFlight;
+    _telegramEnabledButton.enabled = enabled;
+    _telegramTokenField.enabled = enabled;
+    _telegramChatIdField.enabled = enabled;
+    _telegramNotifyStartedButton.enabled = enabled;
+    _telegramNotifyCompletedButton.enabled = enabled;
+    _telegramNotifyErrorButton.enabled = enabled;
+    _telegramNotifyInterruptedButton.enabled = enabled;
+    _telegramTestButton.enabled = enabled;
+}
+
+- (void)showTelegramSettings:(id)sender {
+    (void)sender;
+    if (!_telegramSettingsWindow) {
+        _telegramSettingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 480)
+            styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+            backing:NSBackingStoreBuffered defer:NO];
+        _telegramSettingsWindow.title = @"Telegram 任务通知";
+        _telegramSettingsWindow.releasedWhenClosed = NO;
+        _telegramSettingsWindow.collectionBehavior = NSWindowCollectionBehaviorMoveToActiveSpace;
+        NSView* content = _telegramSettingsWindow.contentView;
+
+        NSTextField* heading = MakeLabel(@"Telegram 任务通知", NSMakeRect(22, 430, 420, 28));
+        heading.font = [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold];
+        [content addSubview:heading];
+        NSTextField* hint = MakeLabel(
+            @"Token 仅保存在系统钥匙串中；项目、任务、步骤和摘要会发送到指定聊天。",
+            NSMakeRect(22, 392, 516, 34));
+        hint.textColor = NSColor.secondaryLabelColor;
+        hint.lineBreakMode = NSLineBreakByWordWrapping;
+        hint.maximumNumberOfLines = 2;
+        [content addSubview:hint];
+
+        _telegramEnabledButton = [NSButton checkboxWithTitle:@"启用 Telegram 任务通知"
+                                                      target:nil action:nil];
+        _telegramEnabledButton.frame = NSMakeRect(22, 352, 320, 28);
+        [content addSubview:_telegramEnabledButton];
+        [content addSubview:MakeLabel(@"Bot Token", NSMakeRect(22, 316, 180, 24))];
+        _telegramTokenField = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(22, 284, 516, 28)];
+        _telegramTokenField.bezelStyle = NSTextFieldRoundedBezel;
+        [content addSubview:_telegramTokenField];
+        [content addSubview:MakeLabel(@"用户或 Chat ID", NSMakeRect(22, 246, 200, 24))];
+        _telegramChatIdField = MakeTextField(@"", NSMakeRect(22, 214, 516, 28));
+        [content addSubview:_telegramChatIdField];
+        [content addSubview:MakeLabel(@"推送事件", NSMakeRect(22, 176, 180, 24))];
+
+        _telegramNotifyStartedButton = [NSButton checkboxWithTitle:@"开始" target:nil action:nil];
+        _telegramNotifyCompletedButton = [NSButton checkboxWithTitle:@"完成" target:nil action:nil];
+        _telegramNotifyErrorButton = [NSButton checkboxWithTitle:@"异常" target:nil action:nil];
+        _telegramNotifyInterruptedButton = [NSButton checkboxWithTitle:@"中断" target:nil action:nil];
+        NSArray<NSButton*>* eventButtons = @[_telegramNotifyStartedButton,
+            _telegramNotifyCompletedButton, _telegramNotifyErrorButton,
+            _telegramNotifyInterruptedButton];
+        for (NSUInteger index = 0; index < eventButtons.count; ++index) {
+            NSButton* button = eventButtons[index];
+            button.frame = NSMakeRect(22 + index * 116, 144, 100, 28);
+            [content addSubview:button];
+        }
+        _telegramStatusField = MakeLabel(@"", NSMakeRect(22, 92, 516, 42));
+        _telegramStatusField.textColor = NSColor.secondaryLabelColor;
+        _telegramStatusField.lineBreakMode = NSLineBreakByWordWrapping;
+        _telegramStatusField.maximumNumberOfLines = 2;
+        [content addSubview:_telegramStatusField];
+        _telegramTestButton = MakeButton(@"发送测试卡片", self, @selector(testTelegram:),
+                                         NSMakeRect(22, 46, 132, 32));
+        [content addSubview:_telegramTestButton];
+        [content addSubview:MakeButton(@"取消", self, @selector(cancelTelegramSettings:),
+                                       NSMakeRect(364, 20, 82, 32))];
+        NSButton* save = MakeButton(@"保存", self, @selector(saveTelegramSettings:),
+                                    NSMakeRect(456, 20, 82, 32));
+        save.keyEquivalent = @"\r";
+        [content addSubview:save];
+        [_telegramSettingsWindow center];
+    }
+
+    _telegramEnabledButton.state = _settings.telegram.enabled
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    _telegramTokenField.stringValue = Ns(_settings.telegram.bot_token);
+    _telegramChatIdField.stringValue = Ns(_settings.telegram.chat_id);
+    _telegramNotifyStartedButton.state = _settings.telegram.notify_started
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    _telegramNotifyCompletedButton.state = _settings.telegram.notify_completed
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    _telegramNotifyErrorButton.state = _settings.telegram.notify_error
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    _telegramNotifyInterruptedButton.state = _settings.telegram.notify_interrupted
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    _telegramStatusField.stringValue = _settings.telegram.bot_token.empty()
+        ? @"填写配置后可发送测试卡片" : @"配置已加载";
+    [self setTelegramOperationInFlight:_telegramOperationInFlight];
+    [_telegramSettingsWindow makeKeyAndOrderFront:nil];
+}
+
+- (void)testTelegram:(id)sender {
+    (void)sender;
+    if (_telegramOperationInFlight || !_telegramNotifier) return;
+    TelegramSettings candidate = _settings.telegram;
+    candidate.enabled = true;
+    candidate.bot_token = trim_ascii(Utf8(_telegramTokenField.stringValue));
+    candidate.chat_id = trim_ascii(Utf8(_telegramChatIdField.stringValue));
+    candidate.notify_started = _telegramNotifyStartedButton.state == NSControlStateValueOn;
+    candidate.notify_completed = _telegramNotifyCompletedButton.state == NSControlStateValueOn;
+    candidate.notify_error = _telegramNotifyErrorButton.state == NSControlStateValueOn;
+    candidate.notify_interrupted = _telegramNotifyInterruptedButton.state == NSControlStateValueOn;
+    if (candidate.bot_token.empty() || candidate.chat_id.empty()) {
+        _telegramStatusField.stringValue = candidate.bot_token.empty()
+            ? @"请填写 Bot Token" : @"请填写用户或 Chat ID";
+        return;
+    }
+    _telegramStatusField.stringValue = @"正在发送测试卡片…";
+    [self setTelegramOperationInFlight:YES];
+    __weak AppDelegate* weakSelf = self;
+    _telegramNotifier->test_async(std::move(candidate), [weakSelf](std::string error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate* strongSelf = weakSelf;
+            if (!strongSelf || strongSelf->_terminating.load(std::memory_order_acquire)) return;
+            [strongSelf setTelegramOperationInFlight:NO];
+            strongSelf->_telegramStatusField.stringValue = error.empty()
+                ? @"测试卡片已发送" : Ns(error);
+        });
+    });
+}
+
+- (void)saveTelegramSettings:(id)sender {
+    (void)sender;
+    TelegramSettings next = _settings.telegram;
+    next.enabled = _telegramEnabledButton.state == NSControlStateValueOn;
+    next.bot_token = trim_ascii(Utf8(_telegramTokenField.stringValue));
+    next.chat_id = trim_ascii(Utf8(_telegramChatIdField.stringValue));
+    next.notify_started = _telegramNotifyStartedButton.state == NSControlStateValueOn;
+    next.notify_completed = _telegramNotifyCompletedButton.state == NSControlStateValueOn;
+    next.notify_error = _telegramNotifyErrorButton.state == NSControlStateValueOn;
+    next.notify_interrupted = _telegramNotifyInterruptedButton.state == NSControlStateValueOn;
+    if (next.enabled && (next.bot_token.empty() || next.chat_id.empty())) {
+        _telegramStatusField.stringValue = next.bot_token.empty()
+            ? @"启用通知前请填写 Bot Token" : @"启用通知前请填写用户或 Chat ID";
+        return;
+    }
+    std::string error;
+    if (!macos::save_telegram_bot_token(next.bot_token, &error)) {
+        _telegramStatusField.stringValue = Ns(error);
+        return;
+    }
+    _settings.telegram = std::move(next);
+    if (_telegramNotifier) _telegramNotifier->configure(_settings.telegram);
+    _settingsTelegramEnabledButton.state = _settings.telegram.enabled
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    [self saveSettings];
+    [_telegramSettingsWindow orderOut:nil];
+}
+
+- (void)cancelTelegramSettings:(id)sender {
+    (void)sender;
+    [_telegramSettingsWindow orderOut:nil];
+}
+
 - (void)showSettings:(id)sender {
     (void)sender;
     if (!_settingsWindow) {
@@ -1946,10 +2155,18 @@ using PendingMacUpdate = PendingMonitorUpdate;
                                     _settingsRootField]) [content addSubview:field];
         [content addSubview:MakeButton(@"浏览…", self, @selector(browseSessionsRoot:),
                                        NSMakeRect(520, 358, 78, 30))];
-        _settingsSoundButton = [NSButton checkboxWithTitle:@"播放开始、完成和异常语音提醒"
+        _settingsSoundButton = [NSButton checkboxWithTitle:@"播放语音提醒"
                                                     target:nil action:nil];
-        _settingsSoundButton.frame = NSMakeRect(22, 320, 390, 28);
+        _settingsSoundButton.frame = NSMakeRect(22, 320, 190, 28);
         [content addSubview:_settingsSoundButton];
+
+        _settingsTelegramEnabledButton = [NSButton checkboxWithTitle:@"启用 Telegram 任务通知"
+                                                                 target:nil action:nil];
+        _settingsTelegramEnabledButton.frame = NSMakeRect(220, 320, 270, 28);
+        [content addSubview:_settingsTelegramEnabledButton];
+        _settingsTelegramConfigureButton = MakeButton(@"配置…", self, @selector(showTelegramSettings:),
+                                                       NSMakeRect(510, 318, 88, 30));
+        [content addSubview:_settingsTelegramConfigureButton];
 
         _settingsXiaoAiEnabledButton = [NSButton checkboxWithTitle:@"启用小爱音箱主动播报"
                                                               target:nil action:nil];
@@ -2010,6 +2227,8 @@ using PendingMacUpdate = PendingMonitorUpdate;
     _settingsNotificationField.integerValue = _settings.dock_notification_seconds;
     _settingsRootField.stringValue = Ns(path_to_utf8(_settings.sessions_root));
     _settingsSoundButton.state = _settings.sound_enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    _settingsTelegramEnabledButton.state = _settings.telegram.enabled
+        ? NSControlStateValueOn : NSControlStateValueOff;
     _settingsXiaoAiEnabledButton.state = _settings.xiaoai.enabled
         ? NSControlStateValueOn : NSControlStateValueOff;
     _settingsXiaoAiParallelField.integerValue = _settings.xiaoai.max_parallel_requests;
@@ -2048,6 +2267,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
     _settingsNotificationField.integerValue = defaults.dock_notification_seconds;
     _settingsRootField.stringValue = Ns(path_to_utf8(defaults.sessions_root));
     _settingsSoundButton.state = defaults.sound_enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    _settingsTelegramEnabledButton.state = NSControlStateValueOff;
     _settingsXiaoAiEnabledButton.state = NSControlStateValueOff;
     _settingsXiaoAiParallelField.integerValue = defaults.xiaoai.max_parallel_requests;
     _settingsXiaoAiSelectAllButton.state = NSControlStateValueOff;
@@ -2068,6 +2288,15 @@ using PendingMacUpdate = PendingMonitorUpdate;
     next.dock_notification_seconds = static_cast<int>(_settingsNotificationField.integerValue);
     next.sessions_root = path_from_utf8(Utf8(_settingsRootField.stringValue));
     next.sound_enabled = _settingsSoundButton.state == NSControlStateValueOn;
+    next.telegram.enabled = _settingsTelegramEnabledButton.state == NSControlStateValueOn;
+    if (next.telegram.enabled &&
+        (next.telegram.bot_token.empty() || next.telegram.chat_id.empty())) {
+        [self showTelegramSettings:nil];
+        _telegramEnabledButton.state = NSControlStateValueOn;
+        _telegramStatusField.stringValue = next.telegram.bot_token.empty()
+            ? @"启用通知前请填写 Bot Token" : @"启用通知前请填写用户或 Chat ID";
+        return;
+    }
     next.xiaoai.enabled = _settingsXiaoAiEnabledButton.state == NSControlStateValueOn;
     next.xiaoai.max_parallel_requests = static_cast<int>(_settingsXiaoAiParallelField.integerValue);
     next.xiaoai.auth_cookies = _settings.xiaoai.auth_cookies;
@@ -2077,6 +2306,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
     const bool rootChanged = next.sessions_root != _settings.sessions_root;
     _settings = std::move(next);
     if (_xiaoaiNotifier) _xiaoaiNotifier->configure(_settings.xiaoai);
+    if (_telegramNotifier) _telegramNotifier->configure(_settings.telegram);
     [self saveSettings];
     if (rootChanged) {
         if (_monitorWorker) _monitorWorker->stop();

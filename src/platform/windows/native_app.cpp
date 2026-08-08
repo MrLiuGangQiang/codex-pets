@@ -1,7 +1,9 @@
-﻿#include "native_app.h"
+#include "native_app.h"
 #include "xiaomi_transport.h"
 #include "xiaomi_browser_login.h"
 #include "xiaomi_credentials.h"
+#include "telegram_transport.h"
+#include "telegram_credentials.h"
 
 #include "../../../src/core/app_logic.h"
 #include "../../../src/core/monitor_policy.h"
@@ -26,6 +28,7 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <tuple>
 #include <unordered_set>
 
 
@@ -34,12 +37,14 @@ namespace {
 constexpr wchar_t kPetClassName[] = L"CodeXPets.NativePet";
 constexpr wchar_t kMessageClassName[] = L"CodeXPets.NativeMessage";
 constexpr wchar_t kSettingsClassName[] = L"CodeXPets.NativeSettings";
+constexpr wchar_t kTelegramSettingsClassName[] = L"CodeXPets.NativeTelegramSettings";
 constexpr wchar_t kMutexName[] = L"Local\\CodeXPets.Native.SingleInstance";
 constexpr wchar_t kReleaseUrl[] = L"https://github.com/MrLiuGangQiang/codex-pets/releases/latest";
 constexpr wchar_t kAudioCacheVersionMarker[] = L".voice-version";
 constexpr UINT kMonitorMessage = WM_APP + 20;
 constexpr UINT kTrayCallback = WM_APP + 21;
 constexpr UINT kXiaoAiResultMessage = WM_APP + 22;
+constexpr UINT kTelegramResultMessage = WM_APP + 23;
 constexpr UINT kSettingsApply = 3001;
 constexpr UINT kSettingsCancel = 3002;
 constexpr UINT kSettingsDefaults = 3003;
@@ -54,6 +59,7 @@ constexpr UINT kMenuVersion = 4006;
 constexpr UINT kMenuUpdate = 4007;
 constexpr UINT kMenuExit = 4008;
 constexpr UINT kMenuXiaoAi = 4009;
+constexpr UINT kMenuTelegram = 4010;
 constexpr UINT kSettingsHover = 4101;
 constexpr UINT kSettingsIdle = 4102;
 constexpr UINT kSettingsReveal = 4103;
@@ -70,6 +76,19 @@ constexpr UINT kSettingsXiaoAiScan = 4116;
 constexpr UINT kSettingsXiaoAiSelectAll = 4117;
 constexpr UINT kSettingsXiaoAiParallel = 4118;
 constexpr UINT kSettingsXiaoAiSummary = 4119;
+constexpr UINT kSettingsTelegramEnabled = 4120;
+constexpr UINT kSettingsTelegramConfigure = 4121;
+constexpr UINT kTelegramEnabled = 4201;
+constexpr UINT kTelegramToken = 4202;
+constexpr UINT kTelegramChatId = 4203;
+constexpr UINT kTelegramNotifyStarted = 4204;
+constexpr UINT kTelegramNotifyCompleted = 4205;
+constexpr UINT kTelegramNotifyError = 4206;
+constexpr UINT kTelegramNotifyInterrupted = 4207;
+constexpr UINT kTelegramTest = 4208;
+constexpr UINT kTelegramStatus = 4209;
+constexpr UINT kTelegramSave = 4210;
+constexpr UINT kTelegramCancel = 4211;
 
 enum class XiaoAiUiOperation : unsigned char { ValidateLogin, ScanDevices, TestNotification };
 
@@ -88,6 +107,28 @@ void post_xiaoai_ui_result(HWND message_window, XiaoAiUiResult result) {
                                         reinterpret_cast<LPARAM>(payload))) {
         delete payload;
     }
+}
+
+struct TelegramUiResult {
+    HWND owner{};
+    std::string error;
+};
+
+void post_telegram_ui_result(HWND message_window, TelegramUiResult result) {
+    auto* payload = new TelegramUiResult(std::move(result));
+    if (!message_window || !PostMessageW(message_window, kTelegramResultMessage, 0,
+                                         reinterpret_cast<LPARAM>(payload))) {
+        delete payload;
+    }
+}
+
+std::wstring read_edit_text(HWND parent, int control) {
+    const auto length = GetWindowTextLengthW(GetDlgItem(parent, control));
+    if (length <= 0) return {};
+    std::wstring value(static_cast<std::size_t>(length) + 1, L'\0');
+    GetDlgItemTextW(parent, control, value.data(), length + 1);
+    value.resize(static_cast<std::size_t>(length));
+    return value;
 }
 
 int read_edit_int(HWND parent, int control, int fallback) {
@@ -266,6 +307,9 @@ bool NativeApp::initialize(std::string* error) {
     settings_.xiaoai.auth_cookies = load_xiaoai_authorization();
     xiaoai_notifier_ = std::make_unique<XiaoAiNotifier>(make_xiaoai_http_transport());
     xiaoai_notifier_->configure(settings_.xiaoai);
+    settings_.telegram.bot_token = load_telegram_bot_token();
+    telegram_notifier_ = std::make_unique<TelegramNotifier>(make_telegram_http_transport());
+    telegram_notifier_->configure(settings_.telegram);
 
     if (!renderer_.initialize(instance_, error)) return false;
     if (!renderer_.validate(error)) return false;
@@ -371,14 +415,19 @@ void NativeApp::shutdown() noexcept {
     if (pet_window_) KillTimer(pet_window_, timer_id_);
     if (monitor_worker_) monitor_worker_->stop();
     if (xiaoai_notifier_) xiaoai_notifier_->stop();
+    if (telegram_notifier_) telegram_notifier_->stop();
     if (message_window_) {
         MSG queued{};
         while (PeekMessageW(&queued, message_window_, kXiaoAiResultMessage, kXiaoAiResultMessage, PM_REMOVE)) {
             delete reinterpret_cast<XiaoAiUiResult*>(queued.lParam);
         }
+        while (PeekMessageW(&queued, message_window_, kTelegramResultMessage, kTelegramResultMessage, PM_REMOVE)) {
+            delete reinterpret_cast<TelegramUiResult*>(queued.lParam);
+        }
     }
     save_position();
     remove_tray_icon();
+    if (telegram_settings_window_) DestroyWindow(telegram_settings_window_);
     if (settings_window_) DestroyWindow(settings_window_);
     if (pet_window_) DestroyWindow(pet_window_);
     if (message_window_) DestroyWindow(message_window_);
@@ -572,6 +621,9 @@ void NativeApp::handle_monitor_update(const PendingMonitorUpdate& update) {
         }
         if (effect.xiaoai_event) {
             notify_xiaoai(*effect.xiaoai_event, effect.xiaoai_context);
+        }
+        if (effect.task_notification && telegram_notifier_) {
+            telegram_notifier_->notify(*effect.task_notification);
         }
     }
     if (first || !update.events.empty()) refresh_visual(true);
@@ -999,6 +1051,33 @@ void NativeApp::toggle_xiaoai() {
     save_settings();
 }
 
+void NativeApp::toggle_telegram() {
+    if (!settings_.telegram.enabled &&
+        (settings_.telegram.bot_token.empty() || settings_.telegram.chat_id.empty())) {
+        show_telegram_settings();
+        if (telegram_settings_window_ && IsWindow(telegram_settings_window_)) {
+            SendDlgItemMessageW(telegram_settings_window_, kTelegramEnabled,
+                                BM_SETCHECK, BST_CHECKED, 0);
+            SetDlgItemTextW(telegram_settings_window_, kTelegramStatus,
+                settings_.telegram.bot_token.empty()
+                    ? L"启用通知前请填写 Bot Token"
+                    : L"启用通知前请填写用户或 Chat ID");
+        }
+        return;
+    }
+    settings_.telegram.enabled = !settings_.telegram.enabled;
+    if (telegram_notifier_) telegram_notifier_->configure(settings_.telegram);
+    if (settings_window_ && IsWindow(settings_window_)) {
+        SendDlgItemMessageW(settings_window_, kSettingsTelegramEnabled, BM_SETCHECK,
+                            settings_.telegram.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    if (telegram_settings_window_ && IsWindow(telegram_settings_window_)) {
+        SendDlgItemMessageW(telegram_settings_window_, kTelegramEnabled, BM_SETCHECK,
+                            settings_.telegram.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    save_settings();
+}
+
 bool NativeApp::is_autostart_enabled() const {
     HKEY key{};
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
@@ -1210,6 +1289,192 @@ void NativeApp::test_xiaoai() {
     });
 }
 
+void NativeApp::set_telegram_controls_enabled(bool enabled) {
+    if (!telegram_settings_window_ || !IsWindow(telegram_settings_window_)) return;
+    for (const auto control : {kTelegramEnabled, kTelegramToken, kTelegramChatId,
+                               kTelegramNotifyStarted, kTelegramNotifyCompleted,
+                               kTelegramNotifyError, kTelegramNotifyInterrupted,
+                               kTelegramTest, kTelegramSave}) {
+        EnableWindow(GetDlgItem(telegram_settings_window_, control), enabled ? TRUE : FALSE);
+    }
+}
+
+void NativeApp::test_telegram() {
+    if (telegram_operation_in_flight_ || !telegram_notifier_ ||
+        !telegram_settings_window_ || !IsWindow(telegram_settings_window_)) return;
+    TelegramSettings candidate = settings_.telegram;
+    candidate.bot_token = trim_ascii(to_utf8(read_edit_text(telegram_settings_window_, kTelegramToken)));
+    candidate.chat_id = to_utf8(read_edit_text(telegram_settings_window_, kTelegramChatId));
+    candidate.enabled = true;
+    candidate.notify_started = SendDlgItemMessageW(
+        telegram_settings_window_, kTelegramNotifyStarted, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.notify_completed = SendDlgItemMessageW(
+        telegram_settings_window_, kTelegramNotifyCompleted, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.notify_error = SendDlgItemMessageW(
+        telegram_settings_window_, kTelegramNotifyError, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.notify_interrupted = SendDlgItemMessageW(
+        telegram_settings_window_, kTelegramNotifyInterrupted, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.chat_id = trim_ascii(candidate.chat_id);
+    if (candidate.bot_token.empty() || candidate.chat_id.empty()) {
+        SetDlgItemTextW(telegram_settings_window_, kTelegramStatus,
+            candidate.bot_token.empty() ? L"请填写 Bot Token" : L"请填写用户或 Chat ID");
+        return;
+    }
+    telegram_operation_in_flight_ = true;
+    SetDlgItemTextW(telegram_settings_window_, kTelegramStatus, L"正在发送测试卡片…");
+    set_telegram_controls_enabled(false);
+    const auto owner = telegram_settings_window_;
+    telegram_notifier_->test_async(std::move(candidate),
+        [message_window = message_window_, owner](std::string error) {
+            post_telegram_ui_result(message_window, {owner, std::move(error)});
+        });
+}
+
+bool NativeApp::save_telegram_settings_from_window() {
+    if (!telegram_settings_window_ || !IsWindow(telegram_settings_window_)) return false;
+    TelegramSettings next = settings_.telegram;
+    next.enabled = SendDlgItemMessageW(
+        telegram_settings_window_, kTelegramEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    next.bot_token = trim_ascii(to_utf8(read_edit_text(telegram_settings_window_, kTelegramToken)));
+    next.chat_id = trim_ascii(to_utf8(read_edit_text(telegram_settings_window_, kTelegramChatId)));
+    next.notify_started = SendDlgItemMessageW(
+        telegram_settings_window_, kTelegramNotifyStarted, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    next.notify_completed = SendDlgItemMessageW(
+        telegram_settings_window_, kTelegramNotifyCompleted, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    next.notify_error = SendDlgItemMessageW(
+        telegram_settings_window_, kTelegramNotifyError, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    next.notify_interrupted = SendDlgItemMessageW(
+        telegram_settings_window_, kTelegramNotifyInterrupted, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (next.enabled && (next.bot_token.empty() || next.chat_id.empty())) {
+        SetDlgItemTextW(telegram_settings_window_, kTelegramStatus,
+            next.bot_token.empty() ? L"启用通知前请填写 Bot Token" : L"启用通知前请填写用户或 Chat ID");
+        return false;
+    }
+    std::string error;
+    if (!save_telegram_bot_token(next.bot_token, &error)) {
+        SetDlgItemTextW(telegram_settings_window_, kTelegramStatus, to_wide(error).c_str());
+        return false;
+    }
+    settings_.telegram = std::move(next);
+    if (telegram_notifier_) telegram_notifier_->configure(settings_.telegram);
+    if (settings_window_ && IsWindow(settings_window_)) {
+        SendDlgItemMessageW(settings_window_, kSettingsTelegramEnabled, BM_SETCHECK,
+                            settings_.telegram.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    save_settings();
+    return true;
+}
+
+void NativeApp::show_telegram_settings() {
+    if (telegram_settings_window_ && IsWindow(telegram_settings_window_)) {
+        ShowWindow(telegram_settings_window_, SW_SHOWNORMAL);
+        SetForegroundWindow(telegram_settings_window_);
+        return;
+    }
+    WNDCLASSEXW wc{sizeof(wc)};
+    wc.lpfnWndProc = telegram_settings_window_proc;
+    wc.hInstance = instance_;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = kTelegramSettingsClassName;
+    RegisterClassExW(&wc);
+    const auto owner = settings_window_ && IsWindow(settings_window_) ? settings_window_ : pet_window_;
+    telegram_settings_window_ = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
+        kTelegramSettingsClassName, L"Telegram 任务通知",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 540, 500, owner, nullptr, instance_, this);
+    if (!telegram_settings_window_) return;
+    ShowWindow(telegram_settings_window_, SW_SHOWNORMAL);
+    UpdateWindow(telegram_settings_window_);
+}
+
+LRESULT NativeApp::telegram_settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+        case WM_CREATE: {
+            auto* heading = CreateWindowExW(0, L"STATIC", L"Telegram 任务通知",
+                WS_CHILD | WS_VISIBLE, 22, 18, 480, 28, hwnd, nullptr, instance_, nullptr);
+            set_control_font(heading);
+            auto* hint = CreateWindowExW(0, L"STATIC",
+                L"Token 仅保存在 Windows 凭据管理器中；项目、任务、步骤和摘要会发送到指定聊天。",
+                WS_CHILD | WS_VISIBLE, 22, 50, 490, 38, hwnd, nullptr, instance_, nullptr);
+            set_control_font(hint);
+            auto* enabled = CreateWindowExW(0, L"BUTTON", L"启用 Telegram 任务通知",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 22, 92, 280, 26, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTelegramEnabled)), instance_, nullptr);
+            set_control_font(enabled);
+            SendMessageW(enabled, BM_SETCHECK, settings_.telegram.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+
+            auto* token_label = CreateWindowExW(0, L"STATIC", L"Bot Token",
+                WS_CHILD | WS_VISIBLE, 22, 130, 160, 22, hwnd, nullptr, instance_, nullptr);
+            set_control_font(token_label);
+            auto* token = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", to_wide(settings_.telegram.bot_token).c_str(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD,
+                22, 154, 490, 28, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTelegramToken)), instance_, nullptr);
+            set_control_font(token);
+
+            auto* chat_label = CreateWindowExW(0, L"STATIC", L"用户或 Chat ID",
+                WS_CHILD | WS_VISIBLE, 22, 194, 180, 22, hwnd, nullptr, instance_, nullptr);
+            set_control_font(chat_label);
+            auto* chat = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", to_wide(settings_.telegram.chat_id).c_str(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                22, 218, 490, 28, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTelegramChatId)), instance_, nullptr);
+            set_control_font(chat);
+
+            auto* events = CreateWindowExW(0, L"STATIC", L"推送事件",
+                WS_CHILD | WS_VISIBLE, 22, 262, 160, 22, hwnd, nullptr, instance_, nullptr);
+            set_control_font(events);
+            const std::array<std::tuple<int, const wchar_t*, bool, int>, 4> choices{{
+                {kTelegramNotifyStarted, L"开始", settings_.telegram.notify_started, 22},
+                {kTelegramNotifyCompleted, L"完成", settings_.telegram.notify_completed, 132},
+                {kTelegramNotifyError, L"异常", settings_.telegram.notify_error, 242},
+                {kTelegramNotifyInterrupted, L"中断", settings_.telegram.notify_interrupted, 352},
+            }};
+            for (const auto& [id, text, checked, x] : choices) {
+                auto* choice = CreateWindowExW(0, L"BUTTON", text,
+                    WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, x, 286, 100, 26, hwnd,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
+                set_control_font(choice);
+                SendMessageW(choice, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
+            }
+            auto* status = CreateWindowExW(0, L"STATIC",
+                settings_.telegram.bot_token.empty() ? L"填写配置后可发送测试卡片" : L"配置已加载",
+                WS_CHILD | WS_VISIBLE, 22, 326, 490, 42, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTelegramStatus)), instance_, nullptr);
+            set_control_font(status);
+            auto* test = CreateWindowExW(0, L"BUTTON", L"发送测试卡片",
+                WS_CHILD | WS_VISIBLE, 22, 378, 130, 30, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTelegramTest)), instance_, nullptr);
+            auto* cancel = CreateWindowExW(0, L"BUTTON", L"取消",
+                WS_CHILD | WS_VISIBLE, 344, 414, 75, 30, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTelegramCancel)), instance_, nullptr);
+            auto* save = CreateWindowExW(0, L"BUTTON", L"保存",
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 429, 414, 83, 30, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTelegramSave)), instance_, nullptr);
+            set_control_font(test); set_control_font(cancel); set_control_font(save);
+            set_telegram_controls_enabled(!telegram_operation_in_flight_);
+            return 0;
+        }
+        case WM_COMMAND:
+            switch (LOWORD(wparam)) {
+                case kTelegramTest: test_telegram(); return 0;
+                case kTelegramSave:
+                    if (save_telegram_settings_from_window()) DestroyWindow(hwnd);
+                    return 0;
+                case kTelegramCancel: DestroyWindow(hwnd); return 0;
+                default: break;
+            }
+            break;
+        case WM_CLOSE: DestroyWindow(hwnd); return 0;
+        case WM_DESTROY:
+            telegram_settings_window_ = nullptr;
+            telegram_operation_in_flight_ = false;
+            return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
 void NativeApp::play_sound(NotificationSound sound) {
     const auto path = audio_path(sound);
     mciSendStringW(L"close codexpets_voice", nullptr, 0, nullptr);
@@ -1261,6 +1526,7 @@ HMENU NativeApp::build_menu(bool /*context_menu*/) {
     add_menu_item(menu, kMenuPet, L"显示桌面宠物");
     add_menu_item(menu, kMenuSound, L"播放语音提醒");
     add_menu_item(menu, kMenuXiaoAi, L"推送到小爱音箱");
+    add_menu_item(menu, kMenuTelegram, L"推送到 Telegram");
     add_menu_item(menu, kMenuStartup, L"开机自动运行");
     add_menu_item(menu, kMenuFolder, L"打开 Codex 会话目录");
     add_menu_item(menu, kMenuSettings, L"设置…");
@@ -1277,6 +1543,7 @@ void NativeApp::update_menu_checks(HMENU menu) {
     CheckMenuItem(menu, kMenuPet, MF_BYCOMMAND | (settings_.pet_visible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, kMenuSound, MF_BYCOMMAND | (settings_.sound_enabled ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, kMenuXiaoAi, MF_BYCOMMAND | (settings_.xiaoai.enabled ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu, kMenuTelegram, MF_BYCOMMAND | (settings_.telegram.enabled ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, kMenuStartup, MF_BYCOMMAND | (is_autostart_enabled() ? MF_CHECKED : MF_UNCHECKED));
 }
 
@@ -1314,9 +1581,19 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 462, 249, 70, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsBrowse)), instance_, nullptr);
             set_control_font(browse);
             auto* sound = CreateWindowExW(0, L"BUTTON", L"播放语音提醒", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                24, 292, 180, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsSound)), instance_, nullptr);
+                24, 292, 170, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsSound)), instance_, nullptr);
             set_control_font(sound);
             SendMessageW(sound, BM_SETCHECK, settings_.sound_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+
+            auto* telegram = CreateWindowExW(0, L"BUTTON", L"Telegram 任务通知",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 205, 292, 220, 24, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsTelegramEnabled)), instance_, nullptr);
+            set_control_font(telegram);
+            SendMessageW(telegram, BM_SETCHECK, settings_.telegram.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+            auto* telegram_configure = CreateWindowExW(0, L"BUTTON", L"配置…",
+                WS_CHILD | WS_VISIBLE, 445, 289, 75, 28, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsTelegramConfigure)), instance_, nullptr);
+            set_control_font(telegram_configure);
 
             auto* xiaoai = CreateWindowExW(0, L"BUTTON", L"启用小爱音箱主动播报",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 330, 230, 24, hwnd,
@@ -1388,6 +1665,7 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 SetDlgItemTextW(hwnd, kSettingsRoot, defaults.sessions_root.c_str());
                 SendDlgItemMessageW(hwnd, kSettingsSound, BM_SETCHECK, BST_CHECKED, 0);
                 SendDlgItemMessageW(hwnd, kSettingsXiaoAiEnabled, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendDlgItemMessageW(hwnd, kSettingsTelegramEnabled, BM_SETCHECK, BST_UNCHECKED, 0);
                 set_edit_int(hwnd, kSettingsXiaoAiParallel, defaults.xiaoai.max_parallel_requests);
                 SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, LB_SETSEL, FALSE, -1);
                 update_xiaoai_device_summary(hwnd);
@@ -1415,6 +1693,7 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 update_xiaoai_device_summary(hwnd);
                 return 0;
             }
+            if (id == kSettingsTelegramConfigure) { show_telegram_settings(); return 0; }
             if (id == kSettingsXiaoAiScan) { scan_xiaoai_devices(false); return 0; }
             if (id == kSettingsXiaoAiLogin) { open_xiaomi_login(); return 0; }
             if (id == kSettingsXiaoAiTest) { test_xiaoai(); return 0; }
@@ -1429,6 +1708,20 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 next.sessions_root = std::filesystem::path(root);
                 next.sound_enabled = SendDlgItemMessageW(hwnd, kSettingsSound, BM_GETCHECK, 0, 0) == BST_CHECKED;
                 next.xiaoai.enabled = SendDlgItemMessageW(hwnd, kSettingsXiaoAiEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                next.telegram.enabled = SendDlgItemMessageW(hwnd, kSettingsTelegramEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                if (next.telegram.enabled &&
+                    (next.telegram.bot_token.empty() || next.telegram.chat_id.empty())) {
+                    show_telegram_settings();
+                    if (telegram_settings_window_ && IsWindow(telegram_settings_window_)) {
+                        SendDlgItemMessageW(telegram_settings_window_, kTelegramEnabled,
+                                            BM_SETCHECK, BST_CHECKED, 0);
+                        SetDlgItemTextW(telegram_settings_window_, kTelegramStatus,
+                            next.telegram.bot_token.empty()
+                                ? L"启用通知前请填写 Bot Token"
+                                : L"启用通知前请填写用户或 Chat ID");
+                    }
+                    return 0;
+                }
                 next.xiaoai.max_parallel_requests = read_edit_int(
                     hwnd, kSettingsXiaoAiParallel, next.xiaoai.max_parallel_requests);
                 next.xiaoai.device_ids = selected_xiaoai_device_ids(hwnd);
@@ -1438,6 +1731,7 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 const auto root_changed = next.sessions_root != settings_.sessions_root;
                 settings_ = next;
                 if (xiaoai_notifier_) xiaoai_notifier_->configure(settings_.xiaoai);
+                if (telegram_notifier_) telegram_notifier_->configure(settings_.telegram);
                 save_settings();
                 if (root_changed) {
                     if (monitor_worker_) monitor_worker_->stop();
@@ -1496,6 +1790,18 @@ LRESULT CALLBACK NativeApp::settings_window_proc(HWND hwnd, UINT message, WPARAM
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
     }
     return app ? app->settings_proc(hwnd, message, wparam, lparam) : DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+LRESULT CALLBACK NativeApp::telegram_settings_window_proc(
+    HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    NativeApp* app = reinterpret_cast<NativeApp*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        app = static_cast<NativeApp*>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+    }
+    return app ? app->telegram_settings_proc(hwnd, message, wparam, lparam)
+               : DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 LRESULT NativeApp::pet_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -1569,6 +1875,16 @@ LRESULT NativeApp::pet_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
 }
 
 LRESULT NativeApp::message_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == kTelegramResultMessage) {
+        std::unique_ptr<TelegramUiResult> result(reinterpret_cast<TelegramUiResult*>(lparam));
+        if (!result || result->owner != telegram_settings_window_ ||
+            !telegram_settings_window_ || !IsWindow(telegram_settings_window_)) return 0;
+        telegram_operation_in_flight_ = false;
+        set_telegram_controls_enabled(true);
+        SetDlgItemTextW(telegram_settings_window_, kTelegramStatus,
+            result->error.empty() ? L"测试卡片已发送" : to_wide(result->error).c_str());
+        return 0;
+    }
     if (message == kXiaoAiResultMessage) {
         std::unique_ptr<XiaoAiUiResult> result(reinterpret_cast<XiaoAiUiResult*>(lparam));
         if (!result) return 0;
@@ -1658,6 +1974,7 @@ LRESULT NativeApp::message_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
             case kMenuPet: show_pet(!settings_.pet_visible); break;
             case kMenuSound: toggle_sound(); break;
             case kMenuXiaoAi: toggle_xiaoai(); break;
+            case kMenuTelegram: toggle_telegram(); break;
             case kMenuStartup: toggle_startup(); break;
             case kMenuFolder: open_sessions_folder(); break;
             case kMenuSettings: show_settings(); break;

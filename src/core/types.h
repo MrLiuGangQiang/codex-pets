@@ -10,9 +10,25 @@
 namespace codexpets {
 
 enum class ReminderState : std::uint8_t { Idle, Busy, Completed, Error, Interrupted };
+enum class TaskNotificationState : std::uint8_t { Started, Completed, Error, Interrupted };
+enum class TaskStepState : std::uint8_t { Pending, InProgress, Completed, Error, Interrupted };
 enum class DockEdge : std::uint8_t { None, Left, Right };
 enum class MonitorEventKind : std::uint8_t {
     StateChanged, TaskStarted, TaskCompleted, TaskAborted, TaskInterrupted, PlanUpdated
+};
+
+struct TaskStep {
+    std::string text;
+    TaskStepState state{TaskStepState::Pending};
+    friend bool operator==(const TaskStep&, const TaskStep&) = default;
+};
+
+struct TaskNotification {
+    TaskNotificationState state{TaskNotificationState::Started};
+    std::string project_name;
+    std::string task_title;
+    std::vector<TaskStep> steps;
+    std::string summary;
 };
 
 struct PointD {
@@ -55,6 +71,7 @@ struct MonitorSnapshot {
     std::vector<std::string> active_titles;
     std::vector<std::string> active_project_names;
     std::vector<std::optional<std::string>> active_plan_progress_labels;
+    std::vector<std::vector<TaskStep>> active_plan_steps;
     int total_plan_step_count{};
     int completed_plan_step_count{};
     std::string last_completed_title;
@@ -68,6 +85,7 @@ struct MonitorSnapshot {
     // Labels captured when events are emitted, aligned with the event vector passed
     // alongside this snapshot. This avoids using a later task's label for an earlier event.
     std::vector<std::string> event_contexts;
+    std::vector<std::optional<TaskNotification>> event_notifications;
     std::string diagnostics_text;
     int latest_plan_update_active_title_index{-1};
 };

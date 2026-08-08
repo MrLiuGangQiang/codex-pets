@@ -24,6 +24,17 @@ struct XiaoAiSettings {
     bool notify_interrupted{true};
 };
 
+struct TelegramSettings {
+    bool enabled{};
+    // Saved in the OS credential store, never in settings.json.
+    std::string bot_token;
+    std::string chat_id;
+    bool notify_started{true};
+    bool notify_completed{true};
+    bool notify_error{true};
+    bool notify_interrupted{true};
+};
+
 struct AppSettings {
     int dock_hover_height{240};
     int dock_idle_hide_seconds{10};
@@ -34,6 +45,7 @@ struct AppSettings {
     std::filesystem::path sessions_root;
     std::optional<PetPositionState> pet_position;
     XiaoAiSettings xiaoai;
+    TelegramSettings telegram;
 
     AppSettings();
     void normalize();

@@ -85,6 +85,15 @@ CodeXPets 是一个面向 Codex 的**原生桌面宠物**。它以只读方式�
 - 授权信息只保存在 Windows 凭据管理器或 macOS Keychain，不保存小米账号密码。
 - 功能默认关闭；未启用时不会发起相关网络请求。
 
+### Telegram Bot 通知（可选）
+
+- 可向指定 Telegram 用户或群组推送任务开始、完成、异常和中断卡片。
+- 卡片展示项目、任务、逐行计划步骤和摘要；异常与中断的摘要会显示会话中记录的实际原因。
+- 设置页提供独立的 Telegram 配置窗口，可填写 Bot Token、用户或 Chat ID、选择推送事件并发送测试卡片。
+- Windows 通知区域菜单和 macOS 菜单栏均提供“推送到 Telegram”快捷开关。
+- Bot Token 只保存在 Windows 凭据管理器或 macOS Keychain；`settings.json` 不会写入 Token。
+- 功能默认关闭；未完成配置或关闭开关时不会发起 Telegram 网络请求。
+
 ## 状态说明
 
 | 状态 | 宠物表现 | 含义 |
@@ -97,14 +106,14 @@ CodeXPets 是一个面向 Codex 的**原生桌面宠物**。它以只读方式�
 
 ## 支持平台
 
-当前版本：**4.1.18**
+当前版本：**4.1.19**
 
 | 系统 | 架构 | 构建目标 | 发布文件 |
 |---|---:|---|---|
-| Windows | x64 | `win-x64` | `CodeXPets-v4.1.18-win-x64.exe` / `.zip` |
-| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.1.18-win-arm64.exe` / `.zip` |
-| macOS | Intel | `osx-x64` | `CodeXPets-v4.1.18-macos-x64.zip` / `.dmg` |
-| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.1.18-macos-arm64.zip` / `.dmg` |
+| Windows | x64 | `win-x64` | `CodeXPets-v4.1.19-win-x64.exe` / `.zip` |
+| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.1.19-win-arm64.exe` / `.zip` |
+| macOS | Intel | `osx-x64` | `CodeXPets-v4.1.19-macos-x64.zip` / `.dmg` |
+| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.1.19-macos-arm64.zip` / `.dmg` |
 
 macOS 最低支持 macOS 13。Windows 版本为自包含原生 EXE，macOS 版本为标准 `CodeXPets.app`。
 
@@ -113,14 +122,14 @@ macOS 最低支持 macOS 13。Windows 版本为自包含原生 EXE，macOS 版�
 ### Windows
 
 1. 下载与 CPU 架构匹配的 EXE，直接运行，无需安装。
-2. 右键通知区域图标可显示或隐藏宠物、切换声音、设置登录启动和打开设置。
+2. 右键通知区域图标可显示或隐藏宠物、切换声音和 Telegram/小爱推送、设置登录启动和打开设置。
 3. 拖动猫咪或云朵可调整位置；拖到屏幕左侧或右侧即可吸附。
 
 ### macOS
 
 1. 打开 DMG，将 `CodeXPets.app` 拖入 `Applications`；也可以使用 ZIP 包。
 2. 启动后应用常驻菜单栏，不显示 Dock 图标。
-3. 通过菜单栏图标管理显示、声音、登录启动、设置和退出。
+3. 通过菜单栏图标管理显示、声音、Telegram/小爱推送、登录启动、设置和退出。
 
 ## 会话与设置目录
 

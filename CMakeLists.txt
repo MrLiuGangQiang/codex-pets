@@ -33,6 +33,7 @@ add_library(codexpets_core STATIC
     src/core/render_layout.cpp
     src/core/session_monitor.cpp
     src/core/settings.cpp
+    src/core/telegram_notifier.cpp
     src/core/visual_state.cpp
     src/core/xiaomi_speaker.cpp
 )

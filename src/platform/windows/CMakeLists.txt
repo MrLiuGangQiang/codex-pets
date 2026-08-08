@@ -27,6 +27,8 @@ add_executable(CodeXPets WIN32
     native_app.cpp
     renderer.cpp
     resources.rc
+    telegram_transport.cpp
+    telegram_credentials.cpp
     xiaomi_transport.cpp
     xiaomi_browser_login.cpp
     xiaomi_credentials.cpp

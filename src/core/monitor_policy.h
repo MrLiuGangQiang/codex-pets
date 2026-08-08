@@ -19,6 +19,7 @@ struct MonitorEventEffect {
     std::optional<SoundCue> sound;
     std::optional<XiaoAiEvent> xiaoai_event;
     std::string xiaoai_context;
+    std::optional<TaskNotification> task_notification;
 };
 
 // Applies the platform-independent event policy and returns side effects that

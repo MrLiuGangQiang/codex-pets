@@ -8,6 +8,7 @@
 #include "render_layout.h"
 #include "session_monitor.h"
 #include "settings.h"
+#include "telegram_notifier.h"
 #include "xiaomi_speaker.h"
 
 #include <atomic>
@@ -421,6 +422,10 @@ void test_paths_and_settings() {
     settings.xiaoai.device_ids = {"speaker-device", "speaker-kitchen", "speaker-device"};
     settings.xiaoai.max_parallel_requests = 5;
     settings.xiaoai.notify_interrupted = false;
+    settings.telegram.enabled = true;
+    settings.telegram.bot_token = "secret-bot-token";
+    settings.telegram.chat_id = " 123456789 ";
+    settings.telegram.notify_error = false;
     settings.sessions_root = root.path / "sessions";
     settings.pet_position = PetPositionState{DockEdge::Right, "Display A|0,0,1920,1080", 1, 0.42};
     std::string error;
@@ -440,6 +445,16 @@ void test_paths_and_settings() {
     CHECK_EQ(std::string("speaker-kitchen"), loaded.xiaoai.device_ids[1]);
     CHECK_EQ(5, loaded.xiaoai.max_parallel_requests);
     CHECK(!loaded.xiaoai.notify_interrupted);
+    CHECK(loaded.telegram.enabled);
+    CHECK(loaded.telegram.bot_token.empty());
+    CHECK_EQ(std::string("123456789"), loaded.telegram.chat_id);
+    CHECK(!loaded.telegram.notify_error);
+    {
+        std::ifstream saved(root.path / "settings.json", std::ios::binary);
+        const std::string contents((std::istreambuf_iterator<char>(saved)),
+                                   std::istreambuf_iterator<char>());
+        CHECK(contents.find("secret-bot-token") == std::string::npos);
+    }
     CHECK_EQ(std::filesystem::absolute(settings.sessions_root).lexically_normal(), loaded.sessions_root);
     CHECK(loaded.pet_position == settings.pet_position);
     CHECK(!std::filesystem::exists(root.path / "settings.json.tmp"));
@@ -718,21 +733,36 @@ void test_monitor_update_queue_and_policy() {
     MonitorSnapshot first_snapshot;
     first_snapshot.active_count = 1;
     first_snapshot.event_contexts = {"first"};
+    TaskNotification started_notification;
+    started_notification.state = TaskNotificationState::Started;
+    started_notification.project_name = "first";
+    first_snapshot.event_notifications = {started_notification};
     CHECK(queue.push(PendingMonitorUpdate{1, {MonitorEventKind::TaskStarted}, first_snapshot}));
     MonitorSnapshot second_snapshot;
     second_snapshot.active_count = 2;
     second_snapshot.event_contexts = {"", "second"};
+    TaskNotification error_notification;
+    error_notification.state = TaskNotificationState::Error;
+    error_notification.project_name = "second";
+    error_notification.summary = "compiler exited with code 1";
+    second_snapshot.event_notifications = {std::nullopt, error_notification};
     CHECK(queue.push(PendingMonitorUpdate{1,
-        {MonitorEventKind::PlanUpdated, MonitorEventKind::TaskCompleted}, second_snapshot}));
+        {MonitorEventKind::PlanUpdated, MonitorEventKind::TaskAborted}, second_snapshot}));
     CHECK(!queue.push(PendingMonitorUpdate{0, {MonitorEventKind::TaskAborted}, {}}));
     auto updates = queue.take();
     CHECK_EQ(std::size_t(1), updates.size());
     CHECK_EQ(2, updates.front().snapshot.active_count);
     CHECK_EQ(std::size_t(3), updates.front().events.size());
-    CHECK_EQ(MonitorEventKind::TaskCompleted, updates.front().events.back());
+    CHECK_EQ(MonitorEventKind::TaskAborted, updates.front().events.back());
     CHECK_EQ(std::size_t(3), updates.front().snapshot.event_contexts.size());
     CHECK_EQ(std::string("first"), updates.front().snapshot.event_contexts[0]);
     CHECK_EQ(std::string("second"), updates.front().snapshot.event_contexts[2]);
+    CHECK_EQ(std::size_t(3), updates.front().snapshot.event_notifications.size());
+    CHECK(updates.front().snapshot.event_notifications[0].has_value());
+    CHECK(!updates.front().snapshot.event_notifications[1].has_value());
+    CHECK(updates.front().snapshot.event_notifications[2].has_value());
+    CHECK_EQ(std::string("compiler exited with code 1"),
+             updates.front().snapshot.event_notifications[2]->summary);
 
     CHECK(queue.push(PendingMonitorUpdate{2, {MonitorEventKind::TaskStarted}, {}}));
     updates = queue.take();
@@ -866,6 +896,12 @@ void test_session_monitor_lifecycle() {
     CHECK_EQ(3, monitor.total_plan_step_count());
     CHECK_EQ(1, monitor.completed_plan_step_count());
     CHECK_EQ(std::string("Build feature"), monitor.primary_current_plan_step());
+    const auto plan_snapshot = monitor.snapshot(false);
+    CHECK_EQ(std::size_t(1), plan_snapshot.active_plan_steps.size());
+    CHECK_EQ(std::size_t(3), plan_snapshot.active_plan_steps[0].size());
+    CHECK_EQ(TaskStepState::Completed, plan_snapshot.active_plan_steps[0][0].state);
+    CHECK_EQ(TaskStepState::InProgress, plan_snapshot.active_plan_steps[0][1].state);
+    CHECK_EQ(std::string("Build feature"), plan_snapshot.active_plan_steps[0][1].text);
     const auto labels = monitor.active_plan_progress_labels();
     CHECK_EQ(std::size_t(1), labels.size());
     CHECK(labels[0].has_value() && *labels[0] == "1/3");
@@ -878,17 +914,36 @@ void test_session_monitor_lifecycle() {
     CHECK_EQ(std::string("Hello title test"), monitor.last_completed_title());
     CHECK_EQ(std::string("alpha"), monitor.snapshot(false).last_completed_project_name);
     auto events = monitor.take_events();
-    CHECK(std::find(events.begin(), events.end(), MonitorEventKind::TaskCompleted) != events.end());
+    const auto completed_snapshot = monitor.snapshot(false);
+    const auto completed_it = std::find(events.begin(), events.end(), MonitorEventKind::TaskCompleted);
+    CHECK(completed_it != events.end());
+    const auto completed_index = static_cast<std::size_t>(std::distance(events.begin(), completed_it));
+    CHECK(completed_index < completed_snapshot.event_notifications.size());
+    CHECK(completed_snapshot.event_notifications[completed_index].has_value());
+    const auto& completed_notification = *completed_snapshot.event_notifications[completed_index];
+    CHECK_EQ(TaskNotificationState::Completed, completed_notification.state);
+    CHECK_EQ(std::string("alpha"), completed_notification.project_name);
+    CHECK_EQ(std::string("Hello title test"), completed_notification.task_title);
+    CHECK_EQ(std::string("ok"), completed_notification.summary);
+    CHECK_EQ(std::size_t(3), completed_notification.steps.size());
 
     append(file,
         "{\"timestamp\":\"2026-08-01T00:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"B\"}}\n"
         "{\"timestamp\":\"2026-08-01T00:00:06Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Abort title test\"}}\n"
-        "{\"timestamp\":\"2026-08-01T00:00:07Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\",\"turn_id\":\"B\"}}\n");
+        "{\"timestamp\":\"2026-08-01T00:00:07Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\",\"turn_id\":\"B\",\"reason\":\"interrupted\"}}\n");
     monitor.poll();
     CHECK_EQ(0, monitor.active_count());
     CHECK_EQ(std::string("Abort title test"), monitor.last_interrupted_title());
     events = monitor.take_events();
-    CHECK(std::find(events.begin(), events.end(), MonitorEventKind::TaskInterrupted) != events.end());
+    const auto interrupted_snapshot = monitor.snapshot(false);
+    const auto interrupted_it = std::find(events.begin(), events.end(), MonitorEventKind::TaskInterrupted);
+    CHECK(interrupted_it != events.end());
+    const auto interrupted_index = static_cast<std::size_t>(std::distance(events.begin(), interrupted_it));
+    CHECK(interrupted_snapshot.event_notifications[interrupted_index].has_value());
+    CHECK_EQ(TaskNotificationState::Interrupted,
+             interrupted_snapshot.event_notifications[interrupted_index]->state);
+    CHECK_EQ(std::string("interrupted"),
+             interrupted_snapshot.event_notifications[interrupted_index]->summary);
 }
 
 void test_plan_update_focus_survives_later_event() {
@@ -968,7 +1023,13 @@ void test_session_monitor_error_object() {
     CHECK_EQ(0, monitor.active_count());
     CHECK_EQ(std::string("Error case"), monitor.last_aborted_title());
     const auto events = monitor.take_events();
-    CHECK(std::find(events.begin(), events.end(), MonitorEventKind::TaskAborted) != events.end());
+    const auto error_snapshot = monitor.snapshot(false);
+    const auto error_it = std::find(events.begin(), events.end(), MonitorEventKind::TaskAborted);
+    CHECK(error_it != events.end());
+    const auto error_index = static_cast<std::size_t>(std::distance(events.begin(), error_it));
+    CHECK(error_snapshot.event_notifications[error_index].has_value());
+    CHECK(error_snapshot.event_notifications[error_index]->summary.find(
+        "tool_calls") != std::string::npos);
 
     // Fallback: abnormal completion arrives without a tracked turn (out-of-order / lost turn).
     TempDirectory lost_root("CodeXPetsLostTurn_");
@@ -1176,6 +1237,50 @@ void test_open_file_activity_and_stale_rule() {
                                               now - std::chrono::minutes(20), now, 600, true));
 }
 
+void test_telegram_card_and_transport() {
+    TaskNotification notification;
+    notification.state = TaskNotificationState::Error;
+    notification.project_name = "codex-pets";
+    notification.task_title = "编译 <Windows> & 发布";
+    notification.steps = {
+        {"检查代码", TaskStepState::Completed},
+        {"编译 Windows x64", TaskStepState::Error},
+        {"生成安装包", TaskStepState::Pending},
+    };
+    notification.summary = "编译器返回 <error> & 任务已停止。";
+    const auto card = format_telegram_task_card(notification, SystemClock::from_time_t(0));
+    CHECK(card.find("❌ <b>codex-pets · 出现异常</b>") != std::string::npos);
+    CHECK(card.find("<b>步骤 · 1 / 3</b>") != std::string::npos);
+    CHECK(card.find("✅ 检查代码") != std::string::npos);
+    CHECK(card.find("❌ 编译 Windows x64") != std::string::npos);
+    CHECK(card.find("&lt;Windows&gt; &amp; 发布") != std::string::npos);
+    CHECK(card.find("&lt;error&gt; &amp; 任务已停止") != std::string::npos);
+
+    std::vector<TelegramHttpRequest> requests;
+    TelegramNotifier notifier([&](const TelegramHttpRequest& request) {
+        requests.push_back(request);
+        return TelegramHttpResponse{200, R"({"ok":true,"result":{"message_id":1}})"};
+    });
+    TelegramSettings settings;
+    settings.bot_token = "123456:test-token";
+    settings.chat_id = "123456789";
+    std::string error;
+    CHECK(notifier.test(settings, &error));
+    CHECK(error.empty());
+    CHECK_EQ(std::size_t(1), requests.size());
+    CHECK(requests[0].url.find("/bot123456:test-token/sendMessage") != std::string::npos);
+    CHECK(requests[0].body.find("\"parse_mode\":\"HTML\"") != std::string::npos);
+    CHECK(requests[0].body.find("123456789") != std::string::npos);
+    notifier.stop();
+
+    TelegramNotifier rejected([](const TelegramHttpRequest&) {
+        return TelegramHttpResponse{400, R"({"ok":false,"description":"Bad Request: chat not found"})"};
+    });
+    CHECK(!rejected.test(settings, &error));
+    CHECK_EQ(std::string("Bad Request: chat not found"), error);
+    rejected.stop();
+}
+
 void test_json_parser() {
     const auto value = parse_json(R"({"text":"中文\nline","emoji":"\ud83d\udc31","n":3,"ok":true,"items":[1,2]})");
     CHECK(value.is_object());
@@ -1207,6 +1312,7 @@ int main() {
         {"long_silent_reasoning_writer_liveness", test_long_silent_reasoning_kept_while_session_writer_is_alive},
         {"oversized_json_line_tail_recovery", test_oversized_json_line_does_not_poison_tail},
         {"open_file_activity_and_stale_rule", test_open_file_activity_and_stale_rule},
+        {"telegram_card_and_transport", test_telegram_card_and_transport},
         {"json_parser", test_json_parser},
     };
     int failures{};

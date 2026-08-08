@@ -5,6 +5,7 @@
 #include "monitor_update_queue.h"
 #include "session_monitor.h"
 #include "settings.h"
+#include "telegram_notifier.h"
 #include "visual_state.h"
 #include "xiaomi_speaker.h"
 
@@ -68,10 +69,12 @@ private:
     void show_pet(bool visible);
     void toggle_sound();
     void toggle_xiaoai();
+    void toggle_telegram();
     void toggle_startup();
     void open_sessions_folder();
     void open_latest_release();
     void show_settings();
+    void show_telegram_settings();
     void exit_application();
     void save_settings();
     void play_sound(NotificationSound sound);
@@ -83,6 +86,9 @@ private:
     void update_xiaoai_device_summary(HWND hwnd);
     [[nodiscard]] std::vector<std::string> selected_xiaoai_device_ids(HWND hwnd) const;
     void test_xiaoai();
+    void set_telegram_controls_enabled(bool enabled);
+    void test_telegram();
+    bool save_telegram_settings_from_window();
     bool is_autostart_enabled() const;
     void set_autostart_enabled(bool enabled);
     std::wstring audio_path(NotificationSound sound);
@@ -98,9 +104,11 @@ private:
     static LRESULT CALLBACK pet_window_proc(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK message_window_proc(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK settings_window_proc(HWND, UINT, WPARAM, LPARAM);
+    static LRESULT CALLBACK telegram_settings_window_proc(HWND, UINT, WPARAM, LPARAM);
     LRESULT pet_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     LRESULT message_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     LRESULT settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
+    LRESULT telegram_settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     static std::wstring to_wide(std::string_view value);
     static std::string to_utf8(std::wstring_view value);
     static void write_stdout(std::string_view value);
@@ -110,6 +118,7 @@ private:
     HWND pet_window_{};
     HWND message_window_{};
     HWND settings_window_{};
+    HWND telegram_settings_window_{};
     HANDLE instance_mutex_{};
     UINT timer_id_{1};
     NOTIFYICONDATAW tray_{};
@@ -164,8 +173,10 @@ private:
     bool has_snapshot_{};
     std::unique_ptr<MonitorWorker> monitor_worker_;
     std::unique_ptr<XiaoAiNotifier> xiaoai_notifier_;
+    std::unique_ptr<TelegramNotifier> telegram_notifier_;
     std::vector<XiaoAiDeviceInfo> xiaoai_devices_;
     bool xiaoai_operation_in_flight_{};
+    bool telegram_operation_in_flight_{};
     MonitorUpdateQueue pending_updates_;
     std::uint64_t monitor_generation_{};
     std::atomic_bool monitor_message_posted_{};

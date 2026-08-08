@@ -250,6 +250,7 @@ struct CodexSessionMonitor::Impl {
         int total{};
         int completed{};
         std::string current_step;
+        std::vector<TaskStep> steps;
         friend bool operator==(const Plan&, const Plan&) = default;
     };
 
@@ -317,7 +318,9 @@ struct CodexSessionMonitor::Impl {
     std::unordered_map<std::filesystem::path, Plan, PathHash, PathEqual> plans_by_file;
     std::vector<MonitorEventKind> events;
     std::vector<std::string> event_contexts;
+    std::vector<std::optional<TaskNotification>> event_notifications;
     std::vector<std::string> last_taken_event_contexts;
+    std::vector<std::optional<TaskNotification>> last_taken_event_notifications;
     std::string last_completed_title;
     std::string last_completed_project_name;
     std::string last_aborted_title;
@@ -351,9 +354,91 @@ struct CodexSessionMonitor::Impl {
         return result;
     }
 
-    void emit(MonitorEventKind event, std::string context = {}) {
+    void emit(MonitorEventKind event, std::string context = {},
+              std::optional<TaskNotification> notification = std::nullopt) {
         events.push_back(event);
         event_contexts.push_back(std::move(context));
+        event_notifications.push_back(std::move(notification));
+    }
+
+    static std::string limited_text(std::string value, std::size_t maximum_bytes = 2400) {
+        value = trim_ascii(value);
+        if (value.size() <= maximum_bytes) return value;
+        std::size_t end = maximum_bytes;
+        while (end > 0 && (static_cast<unsigned char>(value[end]) & 0xC0U) == 0x80U) --end;
+        value.resize(end);
+        value += "…";
+        return value;
+    }
+
+    static std::string message_from_value(const JsonValue* value, int depth = 0) {
+        if (!value || value->is_null() || depth > 4) return {};
+        if (value->is_string()) {
+            auto text = trim_ascii(value->string());
+            if (text.empty()) return {};
+            if ((text.front() == '{' && text.back() == '}') ||
+                (text.front() == '[' && text.back() == ']')) {
+                try {
+                    const auto nested = parse_json(text);
+                    if (auto extracted = message_from_value(&nested, depth + 1); !extracted.empty()) {
+                        return extracted;
+                    }
+                } catch (...) {}
+            }
+            return limited_text(std::move(text));
+        }
+        if (value->is_object()) {
+            for (const auto key : {"message", "error", "detail", "reason", "description"}) {
+                if (auto extracted = message_from_value(value->get(key), depth + 1); !extracted.empty()) {
+                    return extracted;
+                }
+            }
+        }
+        return {};
+    }
+
+    static std::string failure_reason(const JsonValue& payload) {
+        if (auto reason = message_from_value(payload.get("error")); !reason.empty()) return reason;
+        if (auto reason = message_from_value(payload.get("message")); !reason.empty()) return reason;
+        if (auto reason = message_from_value(payload.get("reason")); !reason.empty()) return reason;
+        const auto status = trim_ascii(json_string(payload.get("status")));
+        return status.empty() ? std::string{} : "任务状态：" + status;
+    }
+
+    static std::string interruption_reason(const JsonValue& payload) {
+        if (auto reason = message_from_value(payload.get("reason")); !reason.empty()) return reason;
+        if (auto reason = message_from_value(payload.get("message")); !reason.empty()) return reason;
+        return message_from_value(payload.get("error"));
+    }
+
+    static std::vector<TaskStep> terminal_steps(const std::optional<Plan>& plan,
+                                                TaskNotificationState state) {
+        if (!plan) return {};
+        auto result = plan->steps;
+        if (state != TaskNotificationState::Error && state != TaskNotificationState::Interrupted) {
+            return result;
+        }
+        const auto terminal = state == TaskNotificationState::Error
+            ? TaskStepState::Error : TaskStepState::Interrupted;
+        for (auto& step : result) {
+            if (step.state == TaskStepState::InProgress) {
+                step.state = terminal;
+                return result;
+            }
+        }
+        return result;
+    }
+
+    static TaskNotification make_notification(TaskNotificationState state,
+                                              const ActiveTurn& turn,
+                                              std::string summary = {}) {
+        TaskNotification result;
+        result.state = state;
+        result.project_name = turn.project_name;
+        result.task_title = turn.title;
+        result.steps = terminal_steps(turn.plan, state);
+        result.summary = limited_text(std::move(summary));
+        return result;
     }
 
     ActiveTurn* latest_turn_for_file(const std::filesystem::path& path) noexcept {
@@ -731,17 +816,25 @@ struct CodexSessionMonitor::Impl {
                     if (is_abnormal_completion(*payload)) {
                         last_aborted_title = completed.title.empty() ? "发生异常的任务" : completed.title;
                         last_aborted_project_name = completed.project_name;
-                        emit(MonitorEventKind::TaskAborted, completed.project_name);
+                        emit(MonitorEventKind::TaskAborted, completed.project_name,
+                             make_notification(TaskNotificationState::Error, completed,
+                                               failure_reason(*payload)));
                     } else {
                         last_completed_title = completed.title.empty() ? "已完成的任务" : completed.title;
                         last_completed_project_name = completed.project_name;
-                        emit(MonitorEventKind::TaskCompleted, completed.project_name);
+                        emit(MonitorEventKind::TaskCompleted, completed.project_name,
+                             make_notification(TaskNotificationState::Completed, completed,
+                                               json_string(payload->get("last_agent_message"))));
                     }
                 }
             } else if (!suppress_notifications && is_abnormal_completion(*payload)) {
                 last_aborted_title = "发生异常的任务";
                 last_aborted_project_name.clear();
-                emit(MonitorEventKind::TaskAborted);
+                TaskNotification notification;
+                notification.state = TaskNotificationState::Error;
+                notification.task_title = last_aborted_title;
+                notification.summary = limited_text(failure_reason(*payload));
+                emit(MonitorEventKind::TaskAborted, {}, std::move(notification));
             }
         } else if (event_type == "turn_aborted") {
             const auto it = active_turns.find(turn_id);
@@ -751,12 +844,18 @@ struct CodexSessionMonitor::Impl {
                 if (!suppress_notifications) {
                     last_interrupted_title = aborted.title.empty() ? "未知任务" : aborted.title;
                     last_interrupted_project_name = aborted.project_name;
-                    emit(MonitorEventKind::TaskInterrupted, aborted.project_name);
+                    emit(MonitorEventKind::TaskInterrupted, aborted.project_name,
+                         make_notification(TaskNotificationState::Interrupted, aborted,
+                                           interruption_reason(*payload)));
                 }
             } else if (!suppress_notifications) {
                 last_interrupted_title = "未知任务";
                 last_interrupted_project_name.clear();
-                emit(MonitorEventKind::TaskInterrupted);
+                TaskNotification notification;
+                notification.state = TaskNotificationState::Interrupted;
+                notification.task_title = last_interrupted_title;
+                notification.summary = limited_text(interruption_reason(*payload));
+                emit(MonitorEventKind::TaskInterrupted, {}, std::move(notification));
             }
         } else if (is_failure_event_type(event_type)) {
             const auto it = active_turns.find(turn_id);
@@ -766,7 +865,9 @@ struct CodexSessionMonitor::Impl {
                 if (!suppress_notifications) {
                     last_aborted_title = aborted.title.empty() ? "发生异常的任务" : aborted.title;
                     last_aborted_project_name = aborted.project_name;
-                    emit(MonitorEventKind::TaskAborted, aborted.project_name);
+                    emit(MonitorEventKind::TaskAborted, aborted.project_name,
+                         make_notification(TaskNotificationState::Error, aborted,
+                                           failure_reason(*payload)));
                 }
             }
         } else {
@@ -819,9 +920,17 @@ struct CodexSessionMonitor::Impl {
                 if (!item.is_object()) continue;
                 const auto status = json_string(item.get("status"));
                 const auto step = json_string(item.get("step"));
-                if (status == "completed") ++next.completed;
-                else if (status == "in_progress" && next.current_step.empty()) next.current_step = step;
-                else if (status == "pending" && first_pending.empty()) first_pending = step;
+                TaskStepState step_state = TaskStepState::Pending;
+                if (status == "completed") {
+                    ++next.completed;
+                    step_state = TaskStepState::Completed;
+                } else if (status == "in_progress") {
+                    step_state = TaskStepState::InProgress;
+                    if (next.current_step.empty()) next.current_step = step;
+                } else if (status == "pending" && first_pending.empty()) {
+                    first_pending = step;
+                }
+                if (!step.empty()) next.steps.push_back(TaskStep{step, step_state});
             }
             if (next.current_step.empty()) next.current_step = first_pending;
             plans_by_file[source_path] = next;
@@ -926,12 +1035,14 @@ struct CodexSessionMonitor::Impl {
         result.active_titles.reserve(turns.size());
         result.active_project_names.reserve(turns.size());
         result.active_plan_progress_labels.reserve(turns.size());
+        result.active_plan_steps.reserve(turns.size());
         for (const auto* turn : turns) {
             result.active_titles.push_back(turn->title.empty() ? "正在处理任务…" : turn->title);
             result.active_project_names.push_back(turn->project_name);
             if (!turn->plan || turn->plan->total <= 1) result.active_plan_progress_labels.push_back(std::nullopt);
             else result.active_plan_progress_labels.push_back(
                 std::to_string(turn->plan->completed) + "/" + std::to_string(turn->plan->total));
+            result.active_plan_steps.push_back(turn->plan ? turn->plan->steps : std::vector<TaskStep>{});
             if (turn->plan) {
                 result.total_plan_step_count += turn->plan->total;
                 result.completed_plan_step_count += turn->plan->completed;
@@ -946,6 +1057,7 @@ struct CodexSessionMonitor::Impl {
         result.last_event_type = last_event_type;
         result.latest_event_active_title_index = active_title_index(last_event_file);
         result.event_contexts = last_taken_event_contexts;
+        result.event_notifications = last_taken_event_notifications;
         result.latest_plan_update_active_title_index = active_turn_index(last_plan_update_turn_id, turns);
         if (include_diagnostics) result.diagnostics_text = make_diagnostics();
         return result;
@@ -1013,6 +1125,8 @@ std::vector<MonitorEventKind> CodexSessionMonitor::take_events() {
     impl_->events.clear();
     impl_->last_taken_event_contexts = std::move(impl_->event_contexts);
     impl_->event_contexts.clear();
+    impl_->last_taken_event_notifications = std::move(impl_->event_notifications);
+    impl_->event_notifications.clear();
     return result;
 }
 int CodexSessionMonitor::active_count() const { return static_cast<int>(impl_->active_turns.size()); }

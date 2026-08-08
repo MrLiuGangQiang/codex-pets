@@ -83,6 +83,7 @@ std::optional<PetPositionState> parse_position(const JsonValue* value,
 
 std::string serialize_settings(const AppSettings& settings) {
     const auto& xiaoai = settings.xiaoai;
+    const auto& telegram = settings.telegram;
     std::ostringstream stream;
     stream << "{\n"
            << "  \"DockHoverHeight\": " << settings.dock_hover_height << ",\n"
@@ -104,6 +105,14 @@ std::string serialize_settings(const AppSettings& settings) {
            << "    \"NotifyCompleted\": " << (xiaoai.notify_completed ? "true" : "false") << ",\n"
            << "    \"NotifyError\": " << (xiaoai.notify_error ? "true" : "false") << ",\n"
            << "    \"NotifyInterrupted\": " << (xiaoai.notify_interrupted ? "true" : "false") << "\n"
+           << "  },\n"
+           << "  \"Telegram\": {\n"
+           << "    \"Enabled\": " << (telegram.enabled ? "true" : "false") << ",\n"
+           << "    \"ChatId\": \"" << json_escape(telegram.chat_id) << "\",\n"
+           << "    \"NotifyStarted\": " << (telegram.notify_started ? "true" : "false") << ",\n"
+           << "    \"NotifyCompleted\": " << (telegram.notify_completed ? "true" : "false") << ",\n"
+           << "    \"NotifyError\": " << (telegram.notify_error ? "true" : "false") << ",\n"
+           << "    \"NotifyInterrupted\": " << (telegram.notify_interrupted ? "true" : "false") << "\n"
            << "  },\n"
            << "  \"PetVisible\": " << (settings.pet_visible ? "true" : "false") << ",\n"
            << "  \"SessionsRoot\": \"" << json_escape(path_to_utf8(settings.sessions_root)) << "\",\n"
@@ -161,6 +170,7 @@ void AppSettings::normalize() {
     xiaoai.device_ids = std::move(normalized_devices);
     xiaoai.device_id = xiaoai.device_ids.empty() ? std::string{} : xiaoai.device_ids.front();
     xiaoai.max_parallel_requests = std::clamp(xiaoai.max_parallel_requests, 1, 8);
+    telegram.chat_id = trim_ascii(telegram.chat_id);
     if (pet_position) pet_position->normalize();
 }
 
@@ -194,6 +204,18 @@ AppSettings JsonSettingsStore::load() const noexcept {
             result.xiaoai.notify_completed = read_bool(*xiaoai, "NotifyCompleted", result.xiaoai.notify_completed);
             result.xiaoai.notify_error = read_bool(*xiaoai, "NotifyError", result.xiaoai.notify_error);
             result.xiaoai.notify_interrupted = read_bool(*xiaoai, "NotifyInterrupted", result.xiaoai.notify_interrupted);
+        }
+        if (const auto* telegram = property(root, "Telegram"); telegram && telegram->is_object()) {
+            result.telegram.enabled = read_bool(*telegram, "Enabled", result.telegram.enabled);
+            result.telegram.chat_id = read_string(*telegram, "ChatId");
+            result.telegram.notify_started = read_bool(
+                *telegram, "NotifyStarted", result.telegram.notify_started);
+            result.telegram.notify_completed = read_bool(
+                *telegram, "NotifyCompleted", result.telegram.notify_completed);
+            result.telegram.notify_error = read_bool(
+                *telegram, "NotifyError", result.telegram.notify_error);
+            result.telegram.notify_interrupted = read_bool(
+                *telegram, "NotifyInterrupted", result.telegram.notify_interrupted);
         }
         const auto sessions = read_string(root, "SessionsRoot");
         if (!sessions.empty()) result.sessions_root = path_from_utf8(sessions);

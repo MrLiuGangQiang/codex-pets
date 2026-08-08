@@ -1,5 +1,7 @@
 add_executable(CodeXPets MACOSX_BUNDLE
     main.mm
+    telegram_transport.mm
+    telegram_credentials.mm
     xiaomi_browser_login.mm
     xiaomi_credentials.mm
     xiaomi_transport.mm
