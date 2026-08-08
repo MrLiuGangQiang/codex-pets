@@ -97,14 +97,14 @@ CodeXPets 是一个面向 Codex 的**原生桌面宠物**。它以只读方式�
 
 ## 支持平台
 
-当前版本：**4.1.17**
+当前版本：**4.1.18**
 
 | 系统 | 架构 | 构建目标 | 发布文件 |
 |---|---:|---|---|
-| Windows | x64 | `win-x64` | `CodeXPets-v4.1.17-win-x64.exe` / `.zip` |
-| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.1.17-win-arm64.exe` / `.zip` |
-| macOS | Intel | `osx-x64` | `CodeXPets-v4.1.17-macos-x64.zip` / `.dmg` |
-| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.1.17-macos-arm64.zip` / `.dmg` |
+| Windows | x64 | `win-x64` | `CodeXPets-v4.1.18-win-x64.exe` / `.zip` |
+| Windows | ARM64 | `win-arm64` | `CodeXPets-v4.1.18-win-arm64.exe` / `.zip` |
+| macOS | Intel | `osx-x64` | `CodeXPets-v4.1.18-macos-x64.zip` / `.dmg` |
+| macOS | Apple Silicon | `osx-arm64` | `CodeXPets-v4.1.18-macos-arm64.zip` / `.dmg` |
 
 macOS 最低支持 macOS 13。Windows 版本为自包含原生 EXE，macOS 版本为标准 `CodeXPets.app`。
 

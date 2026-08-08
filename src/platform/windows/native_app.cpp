@@ -1332,47 +1332,47 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
             set_control_font(parallel);
             set_edit_int(hwnd, kSettingsXiaoAiParallel, settings_.xiaoai.max_parallel_requests);
             auto* target_label = CreateWindowExW(0, L"STATIC", L"目标音箱（尚未发现设备）",
-                WS_CHILD | WS_VISIBLE, 24, 362, 245, 24, hwnd,
+                WS_CHILD | WS_VISIBLE, 24, 362, 350, 24, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiSummary)), instance_, nullptr);
             set_control_font(target_label);
             auto* select_all = CreateWindowExW(0, L"BUTTON", L"全选",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 392, 110, 24, hwnd,
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 445, 360, 80, 24, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiSelectAll)), instance_, nullptr);
             set_control_font(select_all);
             auto* target = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY |
                     LBS_MULTIPLESEL | LBS_NOINTEGRALHEIGHT,
-                160, 359, 365, 78, hwnd,
+                24, 390, 501, 80, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiDevice)), instance_, nullptr);
             set_control_font(target);
             populate_xiaoai_device_selector(hwnd);
             auto* login = CreateWindowExW(0, L"BUTTON", L"浏览器登录",
-                WS_CHILD | WS_VISIBLE, 24, 450, 105, 28, hwnd,
+                WS_CHILD | WS_VISIBLE, 24, 480, 105, 28, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiLogin)), instance_, nullptr);
             set_control_font(login);
             auto* scan = CreateWindowExW(0, L"BUTTON", L"重新加载",
-                WS_CHILD | WS_VISIBLE, 139, 450, 100, 28, hwnd,
+                WS_CHILD | WS_VISIBLE, 139, 480, 100, 28, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiScan)), instance_, nullptr);
             set_control_font(scan);
             auto* test = CreateWindowExW(0, L"BUTTON", L"测试播报",
-                WS_CHILD | WS_VISIBLE, 249, 450, 90, 28, hwnd,
+                WS_CHILD | WS_VISIBLE, 249, 480, 90, 28, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiTest)), instance_, nullptr);
             set_control_font(test);
             auto* xiaoai_events = CreateWindowExW(0, L"STATIC",
                 L"播报事件：开始、完成、错误、中断（保存后生效）",
-                WS_CHILD | WS_VISIBLE, 24, 490, 430, 24, hwnd, nullptr, instance_, nullptr);
+                WS_CHILD | WS_VISIBLE, 24, 520, 430, 24, hwnd, nullptr, instance_, nullptr);
             set_control_font(xiaoai_events);
             auto* hint = CreateWindowExW(0, L"STATIC",
                 L"打开设置会自动加载音箱；在列表中连续点击即可选择多台。小米授权仅保存在 Windows 凭据管理器中。",
-                WS_CHILD | WS_VISIBLE, 24, 520, 510, 40, hwnd,
+                WS_CHILD | WS_VISIBLE, 24, 548, 510, 40, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsHint)), instance_, nullptr);
             set_control_font(hint);
             auto* defaults = CreateWindowExW(0, L"BUTTON", L"恢复默认", WS_CHILD | WS_VISIBLE,
-                24, 590, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsDefaults)), instance_, nullptr);
+                24, 610, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsDefaults)), instance_, nullptr);
             auto* cancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE,
-                370, 590, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsCancel)), instance_, nullptr);
+                370, 610, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsCancel)), instance_, nullptr);
             auto* apply = CreateWindowExW(0, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                455, 590, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsApply)), instance_, nullptr);
+                455, 610, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsApply)), instance_, nullptr);
             set_control_font(defaults); set_control_font(cancel); set_control_font(apply);
             set_xiaoai_controls_enabled(!xiaoai_operation_in_flight_);
             return 0;
