@@ -24,10 +24,11 @@ const prompts = [
   ['voice-interrupted.mp3', '任务已中断。'],
 ];
 
-// Yunxia is Microsoft Edge's Chinese cartoon neural voice. Keep every event on
-// one voice and one prosody profile so the pet has a single consistent timbre.
+// Yunxia is Microsoft Edge's Chinese cartoon boy neural voice. Keep every event
+// on one voice and one prosody profile so the pet has a single consistent
+// timbre.
 const voice = 'zh-CN-YunxiaNeural';
-const prosody = { rate: '+8%', pitch: '+12Hz' };
+const prosody = { rate: '0%', pitch: '+12Hz' };
 
 (async () => {
   const temporaryDirectory = path.join(repositoryRoot, '.tools', 'generated-audio');
