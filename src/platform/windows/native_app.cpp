@@ -1,4 +1,4 @@
-#include "native_app.h"
+﻿#include "native_app.h"
 #include "xiaomi_transport.h"
 #include "xiaomi_browser_login.h"
 #include "xiaomi_credentials.h"
@@ -25,6 +25,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <unordered_set>
 
 
@@ -35,6 +36,7 @@ constexpr wchar_t kMessageClassName[] = L"CodeXPets.NativeMessage";
 constexpr wchar_t kSettingsClassName[] = L"CodeXPets.NativeSettings";
 constexpr wchar_t kMutexName[] = L"Local\\CodeXPets.Native.SingleInstance";
 constexpr wchar_t kReleaseUrl[] = L"https://github.com/MrLiuGangQiang/codex-pets/releases/latest";
+constexpr wchar_t kAudioCacheVersionMarker[] = L".voice-version";
 constexpr UINT kMonitorMessage = WM_APP + 20;
 constexpr UINT kTrayCallback = WM_APP + 21;
 constexpr UINT kXiaoAiResultMessage = WM_APP + 22;
@@ -1023,17 +1025,40 @@ void NativeApp::open_latest_release() {
     ShellExecuteW(pet_window_, L"open", kReleaseUrl, nullptr, nullptr, SW_SHOWNORMAL);
 }
 
-std::wstring NativeApp::audio_path(NotificationSound sound) {
-    std::wstring name = sound == NotificationSound::Started ? L"voice-start.mp3" :
-                        sound == NotificationSound::Completed ? L"voice-complete.mp3" :
-                        sound == NotificationSound::Error ? L"voice-error.mp3" : L"voice-interrupted.mp3";
-    auto directory = settings_store_.settings_file_path().parent_path() / L"audio";
-    const auto path = directory / name;
-    if (!std::filesystem::exists(path)) {
-        std::string ignored;
-        renderer_.extract_audio(sound, path, &ignored);
+void NativeApp::refresh_audio_cache(const std::filesystem::path& directory) {
+    // 缓存以版本标记区分：版本变化时重新从内置资源提取，
+    // 避免旧版本遗留的 audio 缓存让新提示音永远不生效。
+    const auto marker = directory / kAudioCacheVersionMarker;
+    std::string cached_version;
+    if (std::filesystem::exists(marker)) {
+        std::ifstream stream(marker);
+        std::getline(stream, cached_version);
     }
-    return path.native();
+    if (cached_version == CODEXPETS_VERSION) return;
+
+    const NotificationSound sounds[] = {NotificationSound::Started, NotificationSound::Completed,
+                                        NotificationSound::Error, NotificationSound::Interrupted};
+    std::string error;
+    for (const auto sound : sounds) {
+        const auto name = sound == NotificationSound::Started ? L"voice-start.mp3" :
+                          sound == NotificationSound::Completed ? L"voice-complete.mp3" :
+                          sound == NotificationSound::Error ? L"voice-error.mp3" : L"voice-interrupted.mp3";
+        if (!renderer_.extract_audio(sound, directory / name, &error)) {
+            // 提取失败时保留旧缓存并在下次播放时重试，不写入版本标记。
+            return;
+        }
+    }
+    std::ofstream stream(marker, std::ios::trunc);
+    stream << CODEXPETS_VERSION;
+}
+
+std::wstring NativeApp::audio_path(NotificationSound sound) {
+    const auto name = sound == NotificationSound::Started ? L"voice-start.mp3" :
+                      sound == NotificationSound::Completed ? L"voice-complete.mp3" :
+                      sound == NotificationSound::Error ? L"voice-error.mp3" : L"voice-interrupted.mp3";
+    auto directory = settings_store_.settings_file_path().parent_path() / L"audio";
+    refresh_audio_cache(directory);
+    return (directory / name).native();
 }
 
 void NativeApp::notify_xiaoai(XiaoAiEvent event, std::string_view title) {

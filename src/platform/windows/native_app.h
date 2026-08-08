@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "renderer.h"
 
@@ -86,6 +86,7 @@ private:
     bool is_autostart_enabled() const;
     void set_autostart_enabled(bool enabled);
     std::wstring audio_path(NotificationSound sound);
+    void refresh_audio_cache(const std::filesystem::path& directory);
     ScreenInfo screen_from_point(POINT point) const;
     ScreenInfo screen_for_identifier(std::wstring_view identifier) const;
     [[nodiscard]] ScreenInfo dock_screen() const;
