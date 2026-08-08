@@ -67,6 +67,7 @@ private:
     void finish_drag(POINT cursor);
     void show_pet(bool visible);
     void toggle_sound();
+    void toggle_xiaoai();
     void toggle_startup();
     void open_sessions_folder();
     void open_latest_release();
@@ -77,9 +78,8 @@ private:
     void notify_xiaoai(XiaoAiEvent event, std::string_view title = {});
     void open_xiaomi_login();
     void set_xiaoai_controls_enabled(bool enabled);
-    void scan_xiaoai_devices();
+    void scan_xiaoai_devices(bool suppress_errors);
     void populate_xiaoai_device_selector(HWND hwnd);
-    void show_xiaoai_device_menu(HWND hwnd);
     void update_xiaoai_device_summary(HWND hwnd);
     [[nodiscard]] std::vector<std::string> selected_xiaoai_device_ids(HWND hwnd) const;
     void test_xiaoai();

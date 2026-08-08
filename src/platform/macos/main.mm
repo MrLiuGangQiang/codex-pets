@@ -716,6 +716,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
     NSButton* _settingsXiaoAiLoginButton;
     NSButton* _settingsXiaoAiScanButton;
     NSButton* _settingsXiaoAiTestButton;
+    NSTextField* _settingsXiaoAiStatusField;
     NSStackView* _settingsXiaoAiDevicesStack;
     BOOL _xiaoaiOperationInFlight;
     std::unique_ptr<JsonSettingsStore> _settingsStore;
@@ -767,14 +768,18 @@ using PendingMacUpdate = PendingMonitorUpdate;
 - (void)openXiaoAiLogin:(id)sender;
 - (void)setXiaoAiOperationInFlight:(BOOL)inFlight;
 - (void)scanXiaoAiDevices:(id)sender;
+- (void)loadXiaoAiDevicesShowingErrors:(BOOL)showErrors;
 - (void)testXiaoAi:(id)sender;
 - (void)populateXiaoAiDevices;
 - (void)toggleXiaoAiAllDevices:(id)sender;
+- (void)xiaoAiDeviceSelectionChanged:(id)sender;
+- (void)updateXiaoAiSelectionSummary;
 - (std::vector<std::string>)selectedXiaoAiDeviceIds;
 - (NSMenuItem*)menuItem:(NSString*)title action:(SEL)action;
 - (void)updateMenu:(NSMenu*)menu;
 - (void)togglePet:(id)sender;
 - (void)toggleSound:(id)sender;
+- (void)toggleXiaoAi:(id)sender;
 - (BOOL)autoStartEnabled;
 - (void)toggleStartup:(id)sender;
 - (void)openSessionsFolder:(id)sender;
@@ -1006,8 +1011,9 @@ using PendingMacUpdate = PendingMonitorUpdate;
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem* pet = [self menuItem:@"显示桌面宠物" action:@selector(togglePet:)]; pet.tag = 101;
     NSMenuItem* sound = [self menuItem:@"播放语音提醒" action:@selector(toggleSound:)]; sound.tag = 102;
+    NSMenuItem* xiaoai = [self menuItem:@"推送到小爱音箱" action:@selector(toggleXiaoAi:)]; xiaoai.tag = 104;
     NSMenuItem* startup = [self menuItem:@"登录时自动运行" action:@selector(toggleStartup:)]; startup.tag = 103;
-    [menu addItem:pet]; [menu addItem:sound]; [menu addItem:startup];
+    [menu addItem:pet]; [menu addItem:sound]; [menu addItem:xiaoai]; [menu addItem:startup];
     [menu addItem:[self menuItem:@"打开 Codex 会话目录" action:@selector(openSessionsFolder:)]];
     [menu addItem:[self menuItem:@"设置…" action:@selector(showSettings:)]];
     [menu addItem:[self menuItem:@"查看更新…" action:@selector(openUpdate:)]];
@@ -1037,6 +1043,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
     else for (const auto& line : _renderState.status_lines) add_status(line);
     [menu itemWithTag:101].state = _settings.pet_visible ? NSControlStateValueOn : NSControlStateValueOff;
     [menu itemWithTag:102].state = _settings.sound_enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu itemWithTag:104].state = _settings.xiaoai.enabled ? NSControlStateValueOn : NSControlStateValueOff;
     [menu itemWithTag:103].state = [self autoStartEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
@@ -1057,6 +1064,15 @@ using PendingMacUpdate = PendingMonitorUpdate;
     (void)sender;
     _settings.sound_enabled = !_settings.sound_enabled;
     if (!_settings.sound_enabled) [self releaseCurrentSound];
+    [self saveSettings];
+}
+
+- (void)toggleXiaoAi:(id)sender {
+    (void)sender;
+    _settings.xiaoai.enabled = !_settings.xiaoai.enabled;
+    if (_xiaoaiNotifier) _xiaoaiNotifier->configure(_settings.xiaoai);
+    _settingsXiaoAiEnabledButton.state = _settings.xiaoai.enabled
+        ? NSControlStateValueOn : NSControlStateValueOff;
     [self saveSettings];
 }
 
@@ -1190,6 +1206,7 @@ using PendingMacUpdate = PendingMonitorUpdate;
                             resultSelf->_settings.xiaoai.auth_cookies = authorization;
                             resultSelf->_xiaoaiNotifier->configure(resultSelf->_settings.xiaoai);
                             resultSelf->_settingsXiaoAiEnabledButton.state = NSControlStateValueOn;
+                            resultSelf->_settingsXiaoAiStatusField.stringValue = @"登录成功，正在加载音箱列表…";
                             [resultSelf saveSettings];
                             resultSelf->_xiaoaiNotifier->discover_devices_async(resultSelf->_settings.xiaoai,
                                 [weakSelf](std::vector<XiaoAiDeviceInfo> devices, std::string scanError) {
@@ -1198,18 +1215,15 @@ using PendingMacUpdate = PendingMonitorUpdate;
                                         if (!scanSelf || scanSelf->_terminating.load(std::memory_order_acquire)) return;
                                         [scanSelf setXiaoAiOperationInFlight:NO];
                                         if (!scanError.empty()) {
-                                            NSAlert* alert = [[NSAlert alloc] init];
-                                            alert.messageText = @"扫描小爱音箱失败";
-                                            alert.informativeText = Ns(scanError);
-                                            [alert runModal];
+                                            scanSelf->_settingsXiaoAiStatusField.stringValue =
+                                                @"登录成功，但音箱列表加载失败；请点击重新加载。";
                                             return;
                                         }
                                         scanSelf->_xiaoaiDevices = std::move(devices);
                                         [scanSelf populateXiaoAiDevices];
-                                        NSAlert* alert = [[NSAlert alloc] init];
-                                        alert.messageText = @"小米账号授权已验证";
-                                        alert.informativeText = @"已扫描音箱，请勾选目标音箱后测试播报。";
-                                        [alert runModal];
+                                        scanSelf->_settingsXiaoAiStatusField.stringValue = [NSString stringWithFormat:
+                                            @"已加载 %lu 台音箱",
+                                            static_cast<unsigned long>(scanSelf->_xiaoaiDevices.size())];
                                     });
                                 });
                         });
@@ -1233,15 +1247,15 @@ using PendingMacUpdate = PendingMonitorUpdate;
         const auto& device = _xiaoaiDevices[index];
         std::string label = device.alias.empty() ? device.name : device.alias;
         if (label.empty()) label = device.id;
-        NSButton* button = [NSButton checkboxWithTitle:Ns(label) target:nil action:nil];
+        NSButton* button = [NSButton checkboxWithTitle:Ns(label) target:self
+                                                        action:@selector(xiaoAiDeviceSelectionChanged:)];
         button.tag = static_cast<NSInteger>(index);
         button.state = selected.contains(device.id) ? NSControlStateValueOn : NSControlStateValueOff;
         [_settingsXiaoAiDevicesStack addArrangedSubview:button];
     }
     const CGFloat height = std::max<CGFloat>(94, static_cast<CGFloat>(_xiaoaiDevices.size()) * 24);
     _settingsXiaoAiDevicesStack.frame = NSMakeRect(0, 0, 300, height);
-    _settingsXiaoAiSelectAllButton.state = !_xiaoaiDevices.empty() &&
-        selected.size() == _xiaoaiDevices.size() ? NSControlStateValueOn : NSControlStateValueOff;
+    [self updateXiaoAiSelectionSummary];
 }
 
 - (std::vector<std::string>)selectedXiaoAiDeviceIds {
@@ -1264,29 +1278,58 @@ using PendingMacUpdate = PendingMonitorUpdate;
                 ? NSControlStateValueOn : NSControlStateValueOff;
         }
     }
+    [self updateXiaoAiSelectionSummary];
+}
+
+- (void)xiaoAiDeviceSelectionChanged:(id)sender {
+    (void)sender;
+    [self updateXiaoAiSelectionSummary];
+}
+
+- (void)updateXiaoAiSelectionSummary {
+    std::size_t selected = 0;
+    std::size_t total = 0;
+    for (NSView* view in _settingsXiaoAiDevicesStack.arrangedSubviews) {
+        if (![view isKindOfClass:NSButton.class]) continue;
+        ++total;
+        if (static_cast<NSButton*>(view).state == NSControlStateValueOn) ++selected;
+    }
+    _settingsXiaoAiSelectAllButton.state = total > 0 && selected == total
+        ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 - (void)scanXiaoAiDevices:(id)sender {
     (void)sender;
+    [self loadXiaoAiDevicesShowingErrors:YES];
+}
+
+- (void)loadXiaoAiDevicesShowingErrors:(BOOL)showErrors {
     if (_xiaoaiOperationInFlight || !_xiaoaiNotifier) return;
     [self setXiaoAiOperationInFlight:YES];
+    _settingsXiaoAiStatusField.stringValue = @"正在加载音箱列表…";
     const XiaoAiSettings candidate = _settings.xiaoai;
     __weak AppDelegate* weakSelf = self;
     _xiaoaiNotifier->discover_devices_async(candidate,
-        [weakSelf](std::vector<XiaoAiDeviceInfo> devices, std::string error) {
+        [weakSelf, showErrors](std::vector<XiaoAiDeviceInfo> devices, std::string error) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 AppDelegate* strongSelf = weakSelf;
                 if (!strongSelf || strongSelf->_terminating.load(std::memory_order_acquire)) return;
                 [strongSelf setXiaoAiOperationInFlight:NO];
                 if (!error.empty()) {
-                    NSAlert* alert = [[NSAlert alloc] init];
-                    alert.messageText = @"扫描小爱音箱失败";
-                    alert.informativeText = Ns(error);
-                    [alert runModal];
+                    strongSelf->_settingsXiaoAiStatusField.stringValue =
+                        @"音箱列表加载失败，请点击重新加载。";
+                    if (showErrors) {
+                        NSAlert* alert = [[NSAlert alloc] init];
+                        alert.messageText = @"扫描小爱音箱失败";
+                        alert.informativeText = Ns(error);
+                        [alert runModal];
+                    }
                     return;
                 }
                 strongSelf->_xiaoaiDevices = std::move(devices);
                 [strongSelf populateXiaoAiDevices];
+                strongSelf->_settingsXiaoAiStatusField.stringValue = [NSString stringWithFormat:
+                    @"已加载 %lu 台音箱", static_cast<unsigned long>(strongSelf->_xiaoaiDevices.size())];
             });
         });
 }
@@ -1304,14 +1347,14 @@ using PendingMacUpdate = PendingMonitorUpdate;
             AppDelegate* strongSelf = weakSelf;
             if (!strongSelf || strongSelf->_terminating.load(std::memory_order_acquire)) return;
             [strongSelf setXiaoAiOperationInFlight:NO];
-            NSAlert* alert = [[NSAlert alloc] init];
             if (!error.empty()) {
+                NSAlert* alert = [[NSAlert alloc] init];
                 alert.messageText = @"小米测试播报失败";
                 alert.informativeText = Ns(error);
+                [alert runModal];
             } else {
-                alert.messageText = @"测试播报已发送";
+                strongSelf->_settingsXiaoAiStatusField.stringValue = @"测试播报已发送";
             }
-            [alert runModal];
         });
     });
 }
@@ -1938,9 +1981,12 @@ using PendingMacUpdate = PendingMonitorUpdate;
         _settingsXiaoAiTestButton = MakeButton(@"测试播报", self, @selector(testXiaoAi:),
                                                 NSMakeRect(262, 92, 108, 30));
         [content addSubview:_settingsXiaoAiTestButton];
+        _settingsXiaoAiStatusField = MakeLabel(@"", NSMakeRect(382, 94, 216, 28));
+        _settingsXiaoAiStatusField.textColor = NSColor.secondaryLabelColor;
+        [content addSubview:_settingsXiaoAiStatusField];
 
         NSTextField* hint = MakeLabel(
-            @"扫描后可多选目标音箱，或使用“全选”对全部在线设备播报。CodeXPets 仅增量读取 JSONL 会话文件；"
+            @"打开设置会自动加载音箱；列表中的复选框可连续选择多台。CodeXPets 仅增量读取 JSONL 会话文件；"
              @"小米授权只保存在系统钥匙串中。",
             NSMakeRect(22, 50, 576, 36));
         hint.textColor = NSColor.secondaryLabelColor;
@@ -1968,8 +2014,14 @@ using PendingMacUpdate = PendingMonitorUpdate;
         ? NSControlStateValueOn : NSControlStateValueOff;
     _settingsXiaoAiParallelField.integerValue = _settings.xiaoai.max_parallel_requests;
     [self populateXiaoAiDevices];
+    if (_settings.xiaoai.auth_cookies.empty()) {
+        _settingsXiaoAiStatusField.stringValue = @"登录小米账号后自动加载音箱";
+    } else if (!_xiaoaiOperationInFlight) {
+        _settingsXiaoAiStatusField.stringValue = @"准备加载音箱列表…";
+    }
     [self setXiaoAiOperationInFlight:_xiaoaiOperationInFlight];
     [_settingsWindow makeKeyAndOrderFront:nil];
+    if (!_settings.xiaoai.auth_cookies.empty()) [self loadXiaoAiDevicesShowingErrors:NO];
 }
 
 - (void)browseSessionsRoot:(id)sender {

@@ -53,6 +53,7 @@ constexpr UINT kMenuSettings = 4005;
 constexpr UINT kMenuVersion = 4006;
 constexpr UINT kMenuUpdate = 4007;
 constexpr UINT kMenuExit = 4008;
+constexpr UINT kMenuXiaoAi = 4009;
 constexpr UINT kSettingsHover = 4101;
 constexpr UINT kSettingsIdle = 4102;
 constexpr UINT kSettingsReveal = 4103;
@@ -68,6 +69,7 @@ constexpr UINT kSettingsXiaoAiLogin = 4115;
 constexpr UINT kSettingsXiaoAiScan = 4116;
 constexpr UINT kSettingsXiaoAiSelectAll = 4117;
 constexpr UINT kSettingsXiaoAiParallel = 4118;
+constexpr UINT kSettingsXiaoAiSummary = 4119;
 
 enum class XiaoAiUiOperation : unsigned char { ValidateLogin, ScanDevices, TestNotification };
 
@@ -77,7 +79,7 @@ struct XiaoAiUiResult {
     XiaoAiSettings settings;
     std::vector<XiaoAiDeviceInfo> devices;
     std::string error;
-    bool login_follow_up{};
+    bool suppress_errors{};
 };
 
 void post_xiaoai_ui_result(HWND message_window, XiaoAiUiResult result) {
@@ -987,6 +989,16 @@ void NativeApp::toggle_sound() {
     save_settings();
 }
 
+void NativeApp::toggle_xiaoai() {
+    settings_.xiaoai.enabled = !settings_.xiaoai.enabled;
+    if (xiaoai_notifier_) xiaoai_notifier_->configure(settings_.xiaoai);
+    if (settings_window_ && IsWindow(settings_window_)) {
+        SendDlgItemMessageW(settings_window_, kSettingsXiaoAiEnabled, BM_SETCHECK,
+                            settings_.xiaoai.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    save_settings();
+}
+
 bool NativeApp::is_autostart_enabled() const {
     HKEY key{};
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
@@ -1105,16 +1117,23 @@ void NativeApp::open_xiaomi_login() {
 void NativeApp::populate_xiaoai_device_selector(HWND hwnd) {
     auto* selector = GetDlgItem(hwnd, kSettingsXiaoAiDevice);
     if (!selector) return;
+    const bool had_items = SendMessageW(selector, LB_GETCOUNT, 0, 0) > 0;
+    const auto current_selection = had_items ? selected_xiaoai_device_ids(hwnd) : std::vector<std::string>{};
     SendMessageW(selector, LB_RESETCONTENT, 0, 0);
-    std::unordered_set<std::string> selected(settings_.xiaoai.device_ids.begin(),
-                                             settings_.xiaoai.device_ids.end());
-    if (selected.empty() && !settings_.xiaoai.device_id.empty()) {
-        selected.insert(settings_.xiaoai.device_id);
+    std::unordered_set<std::string> selected;
+    if (had_items) {
+        selected.insert(current_selection.begin(), current_selection.end());
+    } else {
+        selected.insert(settings_.xiaoai.device_ids.begin(), settings_.xiaoai.device_ids.end());
+        if (selected.empty() && !settings_.xiaoai.device_id.empty()) {
+            selected.insert(settings_.xiaoai.device_id);
+        }
     }
     for (std::size_t i = 0; i < xiaoai_devices_.size(); ++i) {
         const auto& device = xiaoai_devices_[i];
         const auto label = !device.alias.empty() ? device.alias :
-            !device.name.empty() ? device.name : device.hardware;
+            !device.name.empty() ? device.name :
+            !device.hardware.empty() ? device.hardware : device.id;
         if (label.empty()) continue;
         const auto index = static_cast<int>(SendMessageW(selector, LB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(to_wide(label).c_str())));
@@ -1146,50 +1165,34 @@ std::vector<std::string> NativeApp::selected_xiaoai_device_ids(HWND hwnd) const 
 
 
 void NativeApp::update_xiaoai_device_summary(HWND hwnd) {
-    const auto selected = selected_xiaoai_device_ids(hwnd);
-    std::wstring text;
-    if (selected.empty()) text = L"请选择音箱  ▼";
-    else if (selected.size() == xiaoai_devices_.size()) text = L"已选择全部音箱  ▼";
-    else text = L"已选择 " + std::to_wstring(selected.size()) + L" 台音箱  ▼";
-    SetDlgItemTextW(hwnd, kSettingsXiaoAiSelectAll, text.c_str());
+    const auto selector = GetDlgItem(hwnd, kSettingsXiaoAiDevice);
+    if (!selector) return;
+    const auto item_count = std::max<LRESULT>(0, SendMessageW(selector, LB_GETCOUNT, 0, 0));
+    const auto selected_count = std::max<LRESULT>(0, SendMessageW(selector, LB_GETSELCOUNT, 0, 0));
+    std::wstring text = L"目标音箱（尚未发现设备）";
+    if (item_count > 0) {
+        text = L"目标音箱（已选 " + std::to_wstring(selected_count) + L"/" +
+            std::to_wstring(item_count) + L"）";
+    }
+    SetDlgItemTextW(hwnd, kSettingsXiaoAiSummary, text.c_str());
+    SendDlgItemMessageW(hwnd, kSettingsXiaoAiSelectAll, BM_SETCHECK,
+        item_count > 0 && selected_count == item_count ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
-void NativeApp::show_xiaoai_device_menu(HWND hwnd) {
-    const auto button = GetDlgItem(hwnd, kSettingsXiaoAiSelectAll);
-    if (!button) return;
-    HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, 1, L"全选");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    const auto selected = selected_xiaoai_device_ids(hwnd);
-    for (std::size_t index = 0; index < xiaoai_devices_.size(); ++index) {
-        const auto& device = xiaoai_devices_[index];
-        const auto label = !device.alias.empty() ? device.alias : !device.name.empty() ? device.name : device.id;
-        const bool checked = std::find(selected.begin(), selected.end(), device.id) != selected.end();
-        AppendMenuW(menu, MF_STRING | (checked ? MF_CHECKED : MF_UNCHECKED), 5000 + static_cast<UINT>(index), to_wide(label).c_str());
-    }
-    RECT rect{}; GetWindowRect(button, &rect);
-    const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
-                                        rect.left, rect.bottom, 0, hwnd, nullptr);
-    if (command == 1) SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, LB_SETSEL, TRUE, -1);
-    else if (command >= 5000 && command < 5000 + static_cast<int>(xiaoai_devices_.size())) {
-        const auto item = static_cast<int>(command - 5000);
-        const auto is_selected = SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, LB_GETSEL, item, 0) > 0;
-        SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, LB_SETSEL, is_selected ? FALSE : TRUE, item);
-    }
-    DestroyMenu(menu);
-    update_xiaoai_device_summary(hwnd);
-}
-
-void NativeApp::scan_xiaoai_devices() {
+void NativeApp::scan_xiaoai_devices(bool suppress_errors) {
     if (xiaoai_operation_in_flight_ || !xiaoai_notifier_) return;
     const auto owner = settings_window_ && IsWindow(settings_window_) ? settings_window_ : pet_window_;
     xiaoai_operation_in_flight_ = true;
+    if (settings_window_ && IsWindow(settings_window_)) {
+        SetDlgItemTextW(settings_window_, kSettingsXiaoAiSummary, L"正在加载音箱列表…");
+    }
     set_xiaoai_controls_enabled(false);
-    xiaoai_notifier_->discover_devices_async(settings_.xiaoai, [message_window = message_window_, owner](
-                                                        std::vector<XiaoAiDeviceInfo> devices, std::string error) {
-        post_xiaoai_ui_result(message_window, {XiaoAiUiOperation::ScanDevices, owner, {}, std::move(devices),
-            std::move(error)});
-    });
+    xiaoai_notifier_->discover_devices_async(settings_.xiaoai,
+        [message_window = message_window_, owner, suppress_errors](
+            std::vector<XiaoAiDeviceInfo> devices, std::string error) {
+            post_xiaoai_ui_result(message_window, {XiaoAiUiOperation::ScanDevices, owner, {},
+                std::move(devices), std::move(error), suppress_errors});
+        });
 }
 
 void NativeApp::test_xiaoai() {
@@ -1224,6 +1227,7 @@ void NativeApp::show_settings() {
     if (settings_window_ && IsWindow(settings_window_)) {
         ShowWindow(settings_window_, SW_SHOWNORMAL);
         SetForegroundWindow(settings_window_);
+        if (!settings_.xiaoai.auth_cookies.empty()) scan_xiaoai_devices(true);
         return;
     }
     WNDCLASSEXW wc{sizeof(wc)};
@@ -1236,11 +1240,12 @@ void NativeApp::show_settings() {
     settings_window_ = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
                                        kSettingsClassName, L"CodeXPets 设置",
                                        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                       CW_USEDEFAULT, CW_USEDEFAULT, 560, 650,
+                                       CW_USEDEFAULT, CW_USEDEFAULT, 560, 710,
                                        pet_window_, nullptr, instance_, this);
     if (!settings_window_) return;
     ShowWindow(settings_window_, SW_SHOWNORMAL);
     UpdateWindow(settings_window_);
+    if (!settings_.xiaoai.auth_cookies.empty()) scan_xiaoai_devices(true);
 }
 
 HMENU NativeApp::build_menu(bool /*context_menu*/) {
@@ -1255,6 +1260,7 @@ HMENU NativeApp::build_menu(bool /*context_menu*/) {
     add_menu_separator(menu);
     add_menu_item(menu, kMenuPet, L"显示桌面宠物");
     add_menu_item(menu, kMenuSound, L"播放语音提醒");
+    add_menu_item(menu, kMenuXiaoAi, L"推送到小爱音箱");
     add_menu_item(menu, kMenuStartup, L"开机自动运行");
     add_menu_item(menu, kMenuFolder, L"打开 Codex 会话目录");
     add_menu_item(menu, kMenuSettings, L"设置…");
@@ -1270,6 +1276,7 @@ HMENU NativeApp::build_menu(bool /*context_menu*/) {
 void NativeApp::update_menu_checks(HMENU menu) {
     CheckMenuItem(menu, kMenuPet, MF_BYCOMMAND | (settings_.pet_visible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, kMenuSound, MF_BYCOMMAND | (settings_.sound_enabled ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu, kMenuXiaoAi, MF_BYCOMMAND | (settings_.xiaoai.enabled ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, kMenuStartup, MF_BYCOMMAND | (is_autostart_enabled() ? MF_CHECKED : MF_UNCHECKED));
 }
 
@@ -1324,46 +1331,48 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiParallel)), instance_, nullptr);
             set_control_font(parallel);
             set_edit_int(hwnd, kSettingsXiaoAiParallel, settings_.xiaoai.max_parallel_requests);
-            auto* target_label = CreateWindowExW(0, L"STATIC", L"目标音箱（可多选）",
-                WS_CHILD | WS_VISIBLE, 24, 362, 160, 24, hwnd, nullptr, instance_, nullptr);
+            auto* target_label = CreateWindowExW(0, L"STATIC", L"目标音箱（尚未发现设备）",
+                WS_CHILD | WS_VISIBLE, 24, 362, 245, 24, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiSummary)), instance_, nullptr);
             set_control_font(target_label);
-            auto* target = CreateWindowExW(0, L"LISTBOX", L"",
-                WS_CHILD | LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT,
-                0, 0, 1, 1, hwnd,
+            auto* select_all = CreateWindowExW(0, L"BUTTON", L"全选",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 392, 110, 24, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiSelectAll)), instance_, nullptr);
+            set_control_font(select_all);
+            auto* target = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY |
+                    LBS_MULTIPLESEL | LBS_NOINTEGRALHEIGHT,
+                160, 359, 365, 78, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiDevice)), instance_, nullptr);
             set_control_font(target);
             populate_xiaoai_device_selector(hwnd);
-            auto* select = CreateWindowExW(WS_EX_CLIENTEDGE, L"BUTTON", L"请选择音箱  ▼",
-                WS_CHILD | WS_VISIBLE, 160, 359, 365, 28, hwnd,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiSelectAll)), instance_, nullptr);
-            set_control_font(select);
-            auto* scan = CreateWindowExW(0, L"BUTTON", L"扫描音箱",
-                WS_CHILD | WS_VISIBLE, 240, 402, 100, 28, hwnd,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiScan)), instance_, nullptr);
-            set_control_font(scan);
             auto* login = CreateWindowExW(0, L"BUTTON", L"浏览器登录",
-                WS_CHILD | WS_VISIBLE, 345, 402, 105, 28, hwnd,
+                WS_CHILD | WS_VISIBLE, 24, 450, 105, 28, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiLogin)), instance_, nullptr);
             set_control_font(login);
+            auto* scan = CreateWindowExW(0, L"BUTTON", L"重新加载",
+                WS_CHILD | WS_VISIBLE, 139, 450, 100, 28, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiScan)), instance_, nullptr);
+            set_control_font(scan);
             auto* test = CreateWindowExW(0, L"BUTTON", L"测试播报",
-                WS_CHILD | WS_VISIBLE, 455, 402, 90, 28, hwnd,
+                WS_CHILD | WS_VISIBLE, 249, 450, 90, 28, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsXiaoAiTest)), instance_, nullptr);
             set_control_font(test);
             auto* xiaoai_events = CreateWindowExW(0, L"STATIC",
                 L"播报事件：开始、完成、错误、中断（保存后生效）",
-                WS_CHILD | WS_VISIBLE, 24, 442, 430, 24, hwnd, nullptr, instance_, nullptr);
+                WS_CHILD | WS_VISIBLE, 24, 490, 430, 24, hwnd, nullptr, instance_, nullptr);
             set_control_font(xiaoai_events);
             auto* hint = CreateWindowExW(0, L"STATIC",
-                L"扫描后可多选目标音箱，点击“全选”可对全部在线设备播报；授权信息仅保存在 Windows 凭据管理器中。",
-                WS_CHILD | WS_VISIBLE, 24, 472, 510, 34, hwnd,
+                L"打开设置会自动加载音箱；在列表中连续点击即可选择多台。小米授权仅保存在 Windows 凭据管理器中。",
+                WS_CHILD | WS_VISIBLE, 24, 520, 510, 40, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsHint)), instance_, nullptr);
             set_control_font(hint);
             auto* defaults = CreateWindowExW(0, L"BUTTON", L"恢复默认", WS_CHILD | WS_VISIBLE,
-                24, 535, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsDefaults)), instance_, nullptr);
+                24, 590, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsDefaults)), instance_, nullptr);
             auto* cancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE,
-                370, 535, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsCancel)), instance_, nullptr);
+                370, 590, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsCancel)), instance_, nullptr);
             auto* apply = CreateWindowExW(0, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                455, 535, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsApply)), instance_, nullptr);
+                455, 590, 75, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsApply)), instance_, nullptr);
             set_control_font(defaults); set_control_font(cancel); set_control_font(apply);
             set_xiaoai_controls_enabled(!xiaoai_operation_in_flight_);
             return 0;
@@ -1395,8 +1404,18 @@ LRESULT NativeApp::settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 }
                 return 0;
             }
-            if (id == kSettingsXiaoAiSelectAll) { show_xiaoai_device_menu(hwnd); return 0; }
-            if (id == kSettingsXiaoAiScan) { scan_xiaoai_devices(); return 0; }
+            if (id == kSettingsXiaoAiSelectAll && HIWORD(wparam) == BN_CLICKED) {
+                const bool select_all = SendDlgItemMessageW(
+                    hwnd, kSettingsXiaoAiSelectAll, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                SendDlgItemMessageW(hwnd, kSettingsXiaoAiDevice, LB_SETSEL, select_all ? TRUE : FALSE, -1);
+                update_xiaoai_device_summary(hwnd);
+                return 0;
+            }
+            if (id == kSettingsXiaoAiDevice && HIWORD(wparam) == LBN_SELCHANGE) {
+                update_xiaoai_device_summary(hwnd);
+                return 0;
+            }
+            if (id == kSettingsXiaoAiScan) { scan_xiaoai_devices(false); return 0; }
             if (id == kSettingsXiaoAiLogin) { open_xiaomi_login(); return 0; }
             if (id == kSettingsXiaoAiTest) { test_xiaoai(); return 0; }
             if (id == kSettingsCancel) { DestroyWindow(hwnd); return 0; }
@@ -1594,23 +1613,29 @@ LRESULT NativeApp::message_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
             case XiaoAiUiOperation::ScanDevices: {
                 complete();
                 if (!result->error.empty()) {
-                    MessageBoxW(owner, to_wide(result->error).c_str(), L"小爱音箱", MB_ICONERROR | MB_OK);
+                    if (settings_window_ && IsWindow(settings_window_)) {
+                        if (result->suppress_errors) {
+                            SetDlgItemTextW(settings_window_, kSettingsXiaoAiSummary,
+                                L"音箱列表加载失败，请点击重新加载");
+                        } else {
+                            update_xiaoai_device_summary(settings_window_);
+                        }
+                    }
+                    if (!result->suppress_errors) {
+                        MessageBoxW(owner, to_wide(result->error).c_str(), L"小爱音箱", MB_ICONERROR | MB_OK);
+                    }
                     return 0;
                 }
                 xiaoai_devices_ = std::move(result->devices);
                 if (settings_window_ && IsWindow(settings_window_)) populate_xiaoai_device_selector(settings_window_);
-                const std::wstring text = result->login_follow_up
-                    ? std::wstring(L"小米账号授权已验证。已扫描音箱，请勾选目标音箱后测试播报。")
-                    : L"已扫描到 " + std::to_wstring(xiaoai_devices_.size()) + L" 台在线小爱音箱，可多选或点击全选。";
-                MessageBoxW(owner, text.c_str(), L"小爱音箱", MB_OK);
                 return 0;
             }
             case XiaoAiUiOperation::TestNotification:
                 complete();
                 if (!result->error.empty()) {
                     MessageBoxW(owner, to_wide(result->error).c_str(), L"小爱音箱", MB_ICONERROR | MB_OK);
-                } else {
-                    MessageBoxW(owner, L"测试播报已发送。", L"小爱音箱", MB_OK);
+                } else if (settings_window_ && IsWindow(settings_window_)) {
+                    SetDlgItemTextW(settings_window_, kSettingsXiaoAiSummary, L"测试播报已发送");
                 }
                 return 0;
         }
@@ -1632,6 +1657,7 @@ LRESULT NativeApp::message_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
         switch (LOWORD(wparam)) {
             case kMenuPet: show_pet(!settings_.pet_visible); break;
             case kMenuSound: toggle_sound(); break;
+            case kMenuXiaoAi: toggle_xiaoai(); break;
             case kMenuStartup: toggle_startup(); break;
             case kMenuFolder: open_sessions_folder(); break;
             case kMenuSettings: show_settings(); break;
