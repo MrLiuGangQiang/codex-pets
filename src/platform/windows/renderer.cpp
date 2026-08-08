@@ -1,4 +1,4 @@
-#include "renderer.h"
+﻿#include "renderer.h"
 
 #include "../../../src/core/app_logic.h"
 #include "../../../src/core/render_layout.h"
@@ -41,9 +41,10 @@ Color header_color(ReminderState state) {
 
 std::unique_ptr<FontFamily> make_cloud_font_family() {
     return [] {
-        // YouYuan (幼圆) gives Chinese cloud text a softer, playful shape. Keep
-        // dependable CJK/system fallbacks for Windows editions without it.
-        for (const auto* name : {L"YouYuan", L"Microsoft YaHei UI", L"Segoe UI"}) {
+        // Match the body face: Microsoft YaHei keeps the cloud title clear and
+        // consistent with the task text. Keep CJK/system fallbacks for
+        // Windows editions without it.
+        for (const auto* name : {L"Microsoft YaHei UI", L"Microsoft YaHei", L"Segoe UI"}) {
             auto candidate = std::make_unique<FontFamily>(name);
             if (candidate->GetLastStatus() == Ok) return candidate;
         }
