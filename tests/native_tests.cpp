@@ -95,6 +95,16 @@ void append(const std::filesystem::path& path, std::string_view content) {
     stream.flush();
 }
 
+std::string user_task_record(std::string_view timestamp, std::string_view turn_id,
+                             std::string_view text) {
+    return "{\"timestamp\":\"" + std::string(timestamp) +
+        "\",\"type\":\"response_item\",\"payload\":{" +
+        "\"type\":\"message\",\"role\":\"user\",\"content\":[{" +
+        "\"type\":\"input_text\",\"text\":\"" + json_escape(text) +
+        "\"}],\"internal_chat_message_metadata_passthrough\":{" +
+        "\"turn_id\":\"" + json_escape(turn_id) + "\"}}}\n";
+}
+
 std::string utc_timestamp(SystemClock::time_point value) {
     const auto raw = SystemClock::to_time_t(value);
     std::tm utc{};
@@ -836,11 +846,13 @@ void test_xiaoai_start_context_tracks_each_task() {
     (void)monitor.take_events();
 
     append(alpha,
-        "{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"cwd\":\"D:\\\\Projects\\\\alpha\"}}\n"
-        "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"A\"}}\n");
+        std::string("{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"cwd\":\"D:\\\\Projects\\\\alpha\"}}\n"
+                    "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"A\"}}\n") +
+        user_task_record("2026-08-01T00:00:01.1Z", "A", "修复 Alpha 项目的登录问题"));
     append(beta,
-        "{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"cwd\":\"D:\\\\Projects\\\\beta\"}}\n"
-        "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"B\"}}\n");
+        std::string("{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"cwd\":\"D:\\\\Projects\\\\beta\"}}\n"
+                    "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"B\"}}\n") +
+        user_task_record("2026-08-01T00:00:01.1Z", "B", "发布 Beta 项目的新版本"));
     monitor.poll();
     const auto events = monitor.take_events();
     const auto snapshot = monitor.snapshot(false);
@@ -849,24 +861,29 @@ void test_xiaoai_start_context_tracks_each_task() {
     AppSettings settings;
     VisualStateCoordinator coordinator;
     const auto effects = apply_monitor_event_policy(coordinator, snapshot, events, settings, Clock::now());
-    std::vector<std::string> labels;
+    std::vector<std::pair<std::string, std::string>> started_cards;
     for (const auto& effect : effects) {
-        if (effect.xiaoai_event && *effect.xiaoai_event == XiaoAiEvent::Started) {
-            labels.push_back(effect.xiaoai_context);
+        if (effect.xiaoai_event && *effect.xiaoai_event == XiaoAiEvent::Started &&
+            effect.task_notification) {
+            started_cards.emplace_back(effect.xiaoai_context, effect.task_notification->task_title);
         }
     }
-    std::sort(labels.begin(), labels.end());
-    CHECK_EQ(std::size_t(2), labels.size());
-    CHECK_EQ(std::string("alpha"), labels[0]);
-    CHECK_EQ(std::string("beta"), labels[1]);
+    std::sort(started_cards.begin(), started_cards.end());
+    CHECK_EQ(std::size_t(2), started_cards.size());
+    CHECK_EQ(std::string("alpha"), started_cards[0].first);
+    CHECK_EQ(std::string("修复 Alpha 项目的登录问题"), started_cards[0].second);
+    CHECK_EQ(std::string("beta"), started_cards[1].first);
+    CHECK_EQ(std::string("发布 Beta 项目的新版本"), started_cards[1].second);
 }
 
 void test_session_monitor_lifecycle() {
     TempDirectory root("CodeXPetsMonitor_");
     const auto file = create_session(root.path, "rollout-main.jsonl",
-        "{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"cwd\":\"D:\\\\Projects\\alpha\",\"git\":{\"repository_url\":\"https://github.com/example/alpha.git\"}}}\n"
-        "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"A\"}}\n"
-        "{\"timestamp\":\"2026-08-01T00:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello title test\"}}\n");
+        std::string("{\"timestamp\":\"2026-08-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"cwd\":\"D:\\\\Projects\\\\alpha\",\"git\":{\"repository_url\":\"https://github.com/example/alpha.git\"}}}\n"
+                    "{\"timestamp\":\"2026-08-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"A\"}}\n") +
+        user_task_record("2026-08-01T00:00:01.1Z", "A",
+                         "<environment_context>ignore this machine context</environment_context>") +
+        user_task_record("2026-08-01T00:00:02Z", "A", "Hello title test"));
     CodexSessionMonitor monitor(root.path);
     (void)monitor.take_events();
     CHECK_EQ(1, monitor.active_count());
@@ -928,8 +945,8 @@ void test_session_monitor_lifecycle() {
     CHECK_EQ(std::size_t(3), completed_notification.steps.size());
 
     append(file,
-        "{\"timestamp\":\"2026-08-01T00:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"B\"}}\n"
-        "{\"timestamp\":\"2026-08-01T00:00:06Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Abort title test\"}}\n"
+        std::string("{\"timestamp\":\"2026-08-01T00:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"B\"}}\n") +
+        user_task_record("2026-08-01T00:00:06Z", "B", "Abort title test") +
         "{\"timestamp\":\"2026-08-01T00:00:07Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\",\"turn_id\":\"B\",\"reason\":\"interrupted\"}}\n");
     monitor.poll();
     CHECK_EQ(0, monitor.active_count());
@@ -994,9 +1011,11 @@ void test_session_monitor_success_and_order() {
     CodexSessionMonitor ordered(ordered_root.path);
     (void)ordered.take_events();
     append(ordered_file,
-        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"A\"}}\n"
+        std::string("{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"A\"}}\n") +
+        user_task_record("2026-08-01T00:00:01Z", "A", "First ordered task") +
         "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"A\"}}\n"
-        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"B\"}}\n");
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"B\"}}\n" +
+        user_task_record("2026-08-01T00:00:02Z", "B", "Second ordered task"));
     ordered.poll();
     const auto ordered_events = ordered.take_events();
     std::vector<MonitorEventKind> lifecycle;
@@ -1241,7 +1260,7 @@ void test_telegram_card_and_transport() {
     TaskNotification notification;
     notification.state = TaskNotificationState::Error;
     notification.project_name = "codex-pets";
-    notification.task_title = "编译 <Windows> & 发布";
+    notification.task_title = "编译 <Windows>\n& 发布";
     notification.steps = {
         {"检查代码", TaskStepState::Completed},
         {"编译 Windows x64", TaskStepState::Error},

@@ -297,6 +297,7 @@ struct CodexSessionMonitor::Impl {
         std::uint64_t start_sequence{};
         SystemClock::time_point started{};
         std::string title;
+        bool start_event_emitted{};
         std::optional<Plan> plan;
         std::unordered_map<std::string, SystemClock::time_point> pending_tool_calls;
         SystemClock::time_point last_activity{SystemClock::time_point::min()};
@@ -369,6 +370,42 @@ struct CodexSessionMonitor::Impl {
         value.resize(end);
         value += "…";
         return value;
+    }
+
+    static bool ignored_user_task_text(std::string_view text) {
+        const auto trimmed = trim_ascii(text);
+        return trimmed.starts_with("<environment_context>") ||
+               trimmed.starts_with("<turn_aborted>") ||
+               trimmed.starts_with("# AGENTS.md instructions for") ||
+               trimmed.starts_with("<permissions instructions>");
+    }
+
+    static std::string normalize_user_task_text(std::string text) {
+        text = trim_ascii(text);
+        if (ignored_user_task_text(text)) return {};
+        while (text.starts_with("<image ")) {
+            const auto end = text.find("</image>");
+            if (end == std::string::npos) break;
+            text.erase(0, end + std::string_view("</image>").size());
+            text = trim_ascii(text);
+        }
+        return limited_text(std::move(text));
+    }
+
+    static std::string user_task_text(const JsonValue& payload) {
+        const auto* content = payload.get("content");
+        if (!content) return normalize_user_task_text(json_string(payload.get("message")));
+        if (content->is_string()) return normalize_user_task_text(content->string());
+        if (!content->is_array()) return {};
+        std::string result;
+        for (const auto& item : content->array()) {
+            if (!item.is_object() || json_string(item.get("type")) != "input_text") continue;
+            const auto part = trim_ascii(json_string(item.get("text")));
+            if (part.empty()) continue;
+            if (!result.empty()) result += '\n';
+            result += part;
+        }
+        return normalize_user_task_text(std::move(result));
     }
 
     static std::string message_from_value(const JsonValue* value, int depth = 0) {
@@ -742,6 +779,7 @@ struct CodexSessionMonitor::Impl {
             remember_project_name(source_path, line);
             return true;
         }
+        if (try_process_user_response_item(line, source_path, suppress_notifications)) return true;
         if (try_process_plan_update(line, source_path, suppress_notifications)) return true;
         if (line.find("\"type\":\"event_msg\"") == std::string_view::npos) {
             if (!complete_json(line)) return false;
@@ -771,14 +809,16 @@ struct CodexSessionMonitor::Impl {
         const auto event_at = event_time(root);
         record_event(event_type, source_path);
 
+        auto turn_id = json_string(payload->get("turn_id"));
+        if (turn_id.empty()) turn_id = json_string(root.get("turn_id"));
         if (event_type == "user_message") {
-            const auto title = trim_ascii(json_string(payload->get("message")));
-            if (!title.empty()) set_title_for_file(source_path, title, event_at);
+            const auto title = normalize_user_task_text(json_string(payload->get("message")));
+            if (!title.empty()) {
+                set_title_for_turn(source_path, turn_id, title, event_at, suppress_notifications);
+            }
             return true;
         }
 
-        auto turn_id = json_string(payload->get("turn_id"));
-        if (turn_id.empty()) turn_id = json_string(root.get("turn_id"));
         if (turn_id.empty()) {
             touch_turns_for_file(source_path, event_at);
             return true;
@@ -806,7 +846,7 @@ struct CodexSessionMonitor::Impl {
                 added = true;
             }
             touch_turn(it->second, event_at);
-            if (added && !suppress_notifications) emit(MonitorEventKind::TaskStarted, it->second.project_name);
+            if (added && suppress_notifications) it->second.start_event_emitted = true;
         } else if (event_type == "task_complete") {
             const auto it = active_turns.find(turn_id);
             if (it != active_turns.end()) {
@@ -876,6 +916,36 @@ struct CodexSessionMonitor::Impl {
         }
         if (before != active_turns.size()) emit(MonitorEventKind::StateChanged);
         return true;
+    }
+
+    bool try_process_user_response_item(std::string_view line,
+                                        const std::filesystem::path& source_path,
+                                        bool suppress_notifications) {
+        if (line.find("\"type\":\"message\"") == std::string_view::npos ||
+            line.find("\"role\":\"user\"") == std::string_view::npos) return false;
+        try {
+            const auto root = parse_json(line);
+            if (json_string(root.get("type")) != "response_item") return false;
+            const auto* payload = root.get("payload");
+            if (!payload || !payload->is_object() ||
+                json_string(payload->get("type")) != "message" ||
+                json_string(payload->get("role")) != "user") return false;
+            auto turn_id = json_string(payload->get("turn_id"));
+            if (const auto* metadata = payload->get("internal_chat_message_metadata_passthrough")) {
+                if (turn_id.empty()) turn_id = json_string(metadata->get("turn_id"));
+            }
+            const auto event_at = event_time(root);
+            const auto title = user_task_text(*payload);
+            if (!title.empty()) {
+                set_title_for_turn(source_path, turn_id, title, event_at, suppress_notifications);
+            } else {
+                touch_turns_for_file(source_path, event_at);
+            }
+            return true;
+        } catch (const std::exception& exception) {
+            if (complete_json(line)) report_error("解析用户任务内容", exception.what(), true);
+            return false;
+        }
     }
 
     bool try_process_plan_update(std::string_view line, const std::filesystem::path& source_path,
@@ -978,18 +1048,32 @@ struct CodexSessionMonitor::Impl {
         if (changed) emit(MonitorEventKind::StateChanged);
     }
 
-    void set_title_for_file(const std::filesystem::path& path, const std::string& title,
-                            SystemClock::time_point activity) {
+    void set_title_for_turn(const std::filesystem::path& path, std::string_view turn_id,
+                            const std::string& title, SystemClock::time_point activity,
+                            bool suppress_notifications) {
         ActiveTurn* turn = nullptr;
-        for (auto& [_, candidate] : active_turns) {
-            if (PathEqual{}(candidate.source_path, path) &&
-                (!turn || candidate.start_sequence > turn->start_sequence)) turn = &candidate;
+        if (!turn_id.empty()) {
+            if (auto it = active_turns.find(std::string(turn_id)); it != active_turns.end() &&
+                PathEqual{}(it->second.source_path, path)) turn = &it->second;
+        }
+        if (!turn) {
+            for (auto& [_, candidate] : active_turns) {
+                if (PathEqual{}(candidate.source_path, path) &&
+                    (!turn || candidate.start_sequence > turn->start_sequence)) turn = &candidate;
+            }
         }
         if (!turn) return;
         touch_turn(*turn, activity);
-        if (!turn->title.empty()) return;
-        turn->title = title;
-        emit(MonitorEventKind::StateChanged);
+        if (turn->title.empty()) {
+            turn->title = title;
+            if (!suppress_notifications) emit(MonitorEventKind::StateChanged);
+        }
+        if (turn->start_event_emitted || turn->title.empty()) return;
+        turn->start_event_emitted = true;
+        if (!suppress_notifications) {
+            emit(MonitorEventKind::TaskStarted, turn->project_name,
+                 make_notification(TaskNotificationState::Started, *turn));
+        }
     }
 
     static void touch_turn(ActiveTurn& turn, SystemClock::time_point activity) noexcept {

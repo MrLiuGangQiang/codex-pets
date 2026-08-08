@@ -97,8 +97,11 @@ std::vector<MonitorEventEffect> apply_monitor_event_policy(
                 effect.xiaoai_event = XiaoAiEvent::Started;
                 effect.xiaoai_context = event_context.empty() ? std::string(app_logic::select_notification_label(
                     snapshot.active_project_names, preferred_task_index)) : std::string(event_context);
-                effect.task_notification = started_notification(
-                    snapshot, preferred_task_index, event_context);
+                effect.task_notification = captured_notification(snapshot, event_index);
+                if (!effect.task_notification) {
+                    effect.task_notification = started_notification(
+                        snapshot, preferred_task_index, event_context);
+                }
                 effects.push_back(std::move(effect));
                 break;
             case MonitorEventKind::TaskCompleted:

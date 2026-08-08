@@ -29,6 +29,23 @@ std::string truncate_utf8(std::string value, std::size_t maximum_bytes) {
     return value;
 }
 
+std::string compact_line(std::string_view input) {
+    std::string result;
+    result.reserve(input.size());
+    bool previous_space = false;
+    for (const char ch : input) {
+        const bool whitespace = ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+        if (whitespace) {
+            if (!result.empty() && !previous_space) result.push_back(' ');
+            previous_space = true;
+        } else {
+            result.push_back(ch);
+            previous_space = false;
+        }
+    }
+    return trim_ascii(result);
+}
+
 std::string html_escape(std::string_view input) {
     std::string result;
     result.reserve(input.size());
@@ -197,10 +214,10 @@ std::string response_error(const TelegramHttpResponse& response) {
 
 std::string format_telegram_task_card(const TaskNotification& notification,
                                       SystemClock::time_point timestamp) {
-    const auto project = truncate_utf8(notification.project_name.empty()
-        ? std::string("未命名项目") : notification.project_name, kMaximumProjectBytes);
-    const auto task = truncate_utf8(notification.task_title.empty()
-        ? std::string("未命名任务") : notification.task_title, kMaximumTaskBytes);
+    const auto project = truncate_utf8(compact_line(notification.project_name.empty()
+        ? std::string("未命名项目") : notification.project_name), kMaximumProjectBytes);
+    const auto task = truncate_utf8(compact_line(notification.task_title.empty()
+        ? std::string("未命名任务") : notification.task_title), kMaximumTaskBytes);
     auto steps = notification.steps;
     if (steps.empty()) steps.push_back(fallback_step(notification.state));
 
@@ -215,8 +232,8 @@ std::string format_telegram_task_card(const TaskNotification& notification,
            << "<b>步骤 · " << completed << " / " << steps.size() << "</b>\n";
     const auto visible = std::min(steps.size(), kMaximumVisibleSteps);
     for (std::size_t index = 0; index < visible; ++index) {
-        const auto text = truncate_utf8(steps[index].text.empty()
-            ? std::string("未命名步骤") : steps[index].text, kMaximumStepBytes);
+        const auto text = truncate_utf8(compact_line(steps[index].text.empty()
+            ? std::string("未命名步骤") : steps[index].text), kMaximumStepBytes);
         output << step_icon(steps[index].state) << ' ' << html_escape(text) << '\n';
     }
     if (steps.size() > visible) {
